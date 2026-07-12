@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node-terminal",
+      "request": "launch",
+      "name": "sandbox: fresh zsh",
+      "command": "ZDOTDIR=${workspaceFolder}/sandbox exec zsh",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "sandbox: prep",
+      "postDebugTask": "stop echo-server"
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "detail": "Rebuild the daemon + plugin bundle (cached).",
+      "type": "shell",
+      "command": "make",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "stop echo-server",
+      "detail": "Kill any running echo-server so the next launch starts a fresh binary.",
+      "type": "shell",
+      "command": "pkill -f '[b]in/echo-server' || true",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "echo-server",
+      "detail": "Phase 0 fake backend: build + run echo-server on the autopilot socket (background).",
+      "type": "shell",
+      "command": "make spike && ./bin/echo-server -socket /tmp/zsh-autopilot.sock",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": {
+        "owner": "echo-server",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "listening on"
+        }
+      }
+    },
+    {
+      "label": "sandbox: prep",
+      "detail": "Build, kill any stale echo-server, then start a fresh one before opening the sandbox shell.",
+      "dependsOn": [
+        "build",
+        "stop echo-server",
+        "echo-server"
+      ],
+      "dependsOrder": "sequence"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+
+# Go
+daemon/vendor/
+
+# Runtime
+*.sock
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Sandbox-local history
+sandbox/.zsh_history

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Pre-commit checks. Enable with: make hooks (sets core.hooksPath=.githooks).
+set -e
+
+# 1. Keep the committed zsh bundle in sync with its sources.
+#    `zsh-autopilot.zsh` is GENERATED (concatenated from zsh/*.zsh by
+#    `make plugin`) but committed so plugin managers can install without a build
+#    step. Regenerate it and stage it so it can never drift from the fragments.
+#    `git add` is a no-op when nothing changed. Caveat: built from the WORKING
+#    TREE, so `git add -p` of a partial fragment hunk will bundle the whole
+#    working-tree fragment.
+make plugin >/dev/null
+git add zsh-autopilot.zsh
+
+# 2. Gate on zsh syntax. There is no reliable zsh autoformatter (shfmt supports
+#    sh/bash/mksh, not zsh), so we check parseability instead of reformatting.
+zsh -n zsh-autopilot.zsh
+
+# 3. gofmt any staged Go files and re-stage them.
+git diff --cached --name-only --diff-filter=ACM -- '*.go' | while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	gofmt -w "$f"
+	git add "$f"
+done
