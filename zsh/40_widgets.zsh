@@ -67,17 +67,21 @@ _zsh_autopilot_modify() {
 # lives in the socket transport fragment (50_socket.zsh); until that is
 # implemented this degrades to a no-op so the widget/ghost-text loop still runs.
 _zsh_autopilot_fetch() {
-  whence -w _zsh_autopilot_send &>/dev/null && _zsh_autopilot_send "$BUFFER"
+  whence -w _zsh_autopilot_send &>/dev/null && _zsh_autopilot_send "$BUFFER" typing
   return 0
 }
 
-# Offer a suggestion. Invoked as `zle autopilot-suggest -- "$suggestion"` by the
-# socket transport when the daemon's reply arrives. This is the seam where the
-# daemon's string becomes ghost text.
+# Offer a suggestion. Invoked as `zle autopilot-suggest -- "$source" "$suggestion"`
+# by the socket transport when the daemon's reply arrives. This is the seam
+# where the daemon's string becomes ghost text. $source (llm|history) is carried
+# through from the protocol's source tag; Phase 1 paints regardless of source,
+# but the seam is here so the Phase 4a history/upgrade rendering rules slot in
+# without touching the widget's caller.
 _zsh_autopilot_suggest() {
   emulate -L zsh
 
-  local suggestion="$1"
+  local source="$1"
+  local suggestion="$2"
 
   # Paint whenever we have a suggestion — including on an empty buffer, which
   # is the next-command (precmd) case. With an empty BUFFER the prefix strip

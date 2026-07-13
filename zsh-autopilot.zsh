@@ -316,17 +316,21 @@ _zsh_autopilot_modify() {
 # lives in the socket transport fragment (50_socket.zsh); until that is
 # implemented this degrades to a no-op so the widget/ghost-text loop still runs.
 _zsh_autopilot_fetch() {
-  whence -w _zsh_autopilot_send &>/dev/null && _zsh_autopilot_send "$BUFFER"
+  whence -w _zsh_autopilot_send &>/dev/null && _zsh_autopilot_send "$BUFFER" typing
   return 0
 }
 
-# Offer a suggestion. Invoked as `zle autopilot-suggest -- "$suggestion"` by the
-# socket transport when the daemon's reply arrives. This is the seam where the
-# daemon's string becomes ghost text.
+# Offer a suggestion. Invoked as `zle autopilot-suggest -- "$source" "$suggestion"`
+# by the socket transport when the daemon's reply arrives. This is the seam
+# where the daemon's string becomes ghost text. $source (llm|history) is carried
+# through from the protocol's source tag; Phase 1 paints regardless of source,
+# but the seam is here so the Phase 4a history/upgrade rendering rules slot in
+# without touching the widget's caller.
 _zsh_autopilot_suggest() {
   emulate -L zsh
 
-  local suggestion="$1"
+  local source="$1"
+  local suggestion="$2"
 
   # Paint whenever we have a suggestion — including on an empty buffer, which
   # is the next-command (precmd) case. With an empty BUFFER the prefix strip
@@ -462,6 +466,61 @@ _zsh_autopilot_partial_accept() {
     zle -N autopilot-$action _zsh_autopilot_widget_$action
   done
 }
+
+#--------------------------------------------------------------------#
+# Minimal JSON helpers                                               #
+#--------------------------------------------------------------------#
+# The wire protocol (daemon/internal/protocol) is newline-delimited JSON. zsh
+# has no JSON tooling, and forking jq on every keystroke is exactly the
+# fork-per-request cost the daemon exists to avoid (design §48). These two
+# pure-zsh helpers cover what the client needs: escape a string into a JSON
+# request, and pull a flat string field out of a one-line JSON reply.
+#
+# Scope/limits (documented, adequate for shell command lines):
+#  - Encoding escapes " \ and the \n \t \r control chars. Other control bytes
+#    (< 0x20) are passed through; command buffers don't contain them.
+#  - Decoding understands the \" \\ \/ \n \t \r escapes. It does NOT decode
+#    \uXXXX — which is why the daemon MUST encode with HTML escaping disabled so
+#    shell metacharacters (< > &) stay literal (see the protocol package doc).
+
+# Escape $1 as a JSON string body (no surrounding quotes) into $REPLY.
+# Backslash is replaced first so the escapes we introduce aren't re-escaped.
+_zsh_autopilot_json_escape() {
+  emulate -L zsh
+  local s=$1
+  s=${s//'\'/'\\'}
+  s=${s//'"'/'\"'}
+  s=${s//$'\n'/'\n'}
+  s=${s//$'\t'/'\t'}
+  s=${s//$'\r'/'\r'}
+  REPLY=$s
+}
+
+# Extract the string value of flat key $2 from one-line JSON object $1 into
+# $REPLY. Returns non-zero if the key is absent. The regex tolerates escaped
+# quotes inside the value ((\\.|[^"\\])*), then the escapes are undone. A
+# sentinel byte (0x01) protects literal "\\" so a following n/t/r isn't misread
+# as a control escape.
+_zsh_autopilot_json_str_field() {
+  emulate -L zsh
+  local json=$1 key=$2
+  local -a match mbegin mend
+  local re
+  re='"'${key}'":"((\\.|[^"\\])*)"'
+
+  [[ $json =~ $re ]] || { REPLY=; return 1 }
+
+  local raw=$match[1]
+  raw=${raw//'\\'/$'\x01'}
+  raw=${raw//'\n'/$'\n'}
+  raw=${raw//'\t'/$'\t'}
+  raw=${raw//'\r'/$'\r'}
+  raw=${raw//'\"'/'"'}
+  raw=${raw//'\/'/'/'}
+  raw=${raw//$'\x01'/'\'}
+  REPLY=$raw
+  return 0
+}
 #--------------------------------------------------------------------#
 # Daemon Socket Transport                                            #
 #--------------------------------------------------------------------#
@@ -470,6 +529,14 @@ _zsh_autopilot_partial_accept() {
 # registers a `zle -F` handler that paints the reply as ghost text.
 # Replaces zsh-autosuggestions' async.zsh (forked-pipe) model.
 #
+
+# Per-shell identity for request IDs. The session id is minted once; each fetch
+# bumps a sequence counter, and the id we most recently sent is the "current"
+# request. Replies whose id != current are stale (the user typed on) and are
+# dropped — this is the supersede-by-request-ID contract (protocol package doc).
+typeset -g ZSH_AUTOPILOT_SESSION_ID=${ZSH_AUTOPILOT_SESSION_ID:-$$-$RANDOM}
+typeset -gi _ZSH_AUTOPILOT_SEQ=0
+typeset -g _ZSH_AUTOPILOT_REQ_ID=
 
 _zsh_autopilot_connect() {
   zmodload zsh/net/socket 2>/dev/null || return 1
@@ -491,23 +558,32 @@ _zsh_autopilot_socket_alive() {
   [[ -n $ZSH_AUTOPILOT_SOCKET_FD ]] && { true <&$ZSH_AUTOPILOT_SOCKET_FD } 2>/dev/null
 }
 
+# Send a request to the daemon. $1 = buffer, $2 = kind (typing|next_command).
+# Mints a fresh request id, records it as current, and ships one JSON line.
 _zsh_autopilot_send() {
-  local buffer="$1"
+  local buffer="$1" kind="${2:-typing}"
 
   _zsh_autopilot_socket_alive || _zsh_autopilot_connect || return 1
 
+  (( _ZSH_AUTOPILOT_SEQ++ ))
+  typeset -g _ZSH_AUTOPILOT_REQ_ID="${ZSH_AUTOPILOT_SESSION_ID}.${_ZSH_AUTOPILOT_SEQ}"
+
+  local REPLY
+  _zsh_autopilot_json_escape "$buffer"
+  local line='{"v":1,"id":"'${_ZSH_AUTOPILOT_REQ_ID}'","kind":"'${kind}'","buf":"'${REPLY}'"}'
+
   # Write; if the peer had gone away (half-open), reconnect once and retry.
-  if ! print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$buffer" 2>/dev/null; then
+  if ! print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$line" 2>/dev/null; then
     _zsh_autopilot_connect || return 1
-    print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$buffer" 2>/dev/null || return 1
+    print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$line" 2>/dev/null || return 1
   fi
 }
 
-# precmd hook: at a fresh, empty prompt, ask the daemon what to run next. We
-# signal "next command" by sending an empty buffer; the reply is painted on the
-# empty line by the zle -F handler once the editor becomes active.
+# precmd hook: at a fresh, empty prompt, ask the daemon what to run next. The
+# reply is painted on the empty line by the zle -F handler once the editor
+# becomes active.
 _zsh_autopilot_precmd() {
-  _zsh_autopilot_send ''
+  _zsh_autopilot_send '' next_command
 }
 
 # zle -F callback: fires while the line editor is active whenever the socket
@@ -525,11 +601,21 @@ _zsh_autopilot_receive() {
     return
   fi
 
-  # Normal path: read one newline-framed reply and paint it as ghost text.
-  # The handler stays registered (persistent warm socket)
+  # Normal path: read one newline-framed JSON reply. The handler stays
+  # registered (persistent warm socket).
+  local line
+  IFS= read -r -u $fd line || return
+
+  # Correlate by id: ignore replies for a request we've already superseded.
+  local REPLY
+  _zsh_autopilot_json_str_field "$line" id || return
+  [[ $REPLY == $_ZSH_AUTOPILOT_REQ_ID ]] || return
+  local reply_source
   local suggestion
-  IFS= read -r -u $fd suggestion || return
-  zle autopilot-suggest -- "$suggestion"
+  _zsh_autopilot_json_str_field "$line" source && reply_source=$REPLY
+  _zsh_autopilot_json_str_field "$line" suggestion && suggestion=$REPLY || return
+
+  zle autopilot-suggest -- "$reply_source" "$suggestion"
 }
 
 #--------------------------------------------------------------------#
