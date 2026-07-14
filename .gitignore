@@ -7,6 +7,9 @@
 # Go
 daemon/vendor/
 
+# Delve debug binaries (created by the "daemon (debug)" launch config)
+__debug_bin*
+
 # Runtime
 *.sock
 
