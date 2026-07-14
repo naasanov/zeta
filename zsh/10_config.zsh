@@ -19,6 +19,12 @@ typeset -g ZSH_AUTOPILOT_ORIGINAL_WIDGET_PREFIX=autopilot-orig-
 (( ! ${+ZSH_AUTOPILOT_SOCKET} )) &&
 typeset -g ZSH_AUTOPILOT_SOCKET=/tmp/zsh-autopilot.sock
 
+# Number of recent commands kept for the "history" context field sent with
+# each request (oldest first). Small and bounded — this rides along on every
+# keystroke burst, not just next-command requests, so keep it short.
+(( ! ${+ZSH_AUTOPILOT_HISTORY_SIZE} )) &&
+typeset -gi ZSH_AUTOPILOT_HISTORY_SIZE=10
+
 # Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_CLEAR_WIDGETS

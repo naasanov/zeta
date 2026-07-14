@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -101,7 +102,7 @@ func main() {
 		baseURL := envOr("ZSH_AUTOPILOT_BASE_URL", defaultBaseURL)
 		model := envOr("ZSH_AUTOPILOT_MODEL", defaultModel)
 		client := provider.NewClient(baseURL, model, apiKey, defaultMaxTokens)
-		srv.SetSuggest(llmSuggest(client))
+		srv.SetSuggest(llmSuggest(client, log))
 		log.Info("llm mode", "base_url", baseURL, "model", model)
 	} else {
 		log.Info("echo mode: GROQ_API_KEY not set, using placeholder suggestions")
@@ -150,19 +151,65 @@ func debounceFromEnv(log *slog.Logger) time.Duration {
 // stable cache prefix for Phase 2 prompt caching.
 const typingUserPrefix = "Complete this command, keeping any needed leading space:\n"
 
+// contextBlock renders whatever step-5 context fields (design §7) are present
+// on req into a compact "Context:" block for the user turn, one line per
+// present field, omitting lines for absent/zero fields entirely (no "git:"
+// line without a branch, no "last command" line when LastExit == 0, no
+// "recent commands" line with empty History). It returns "" when no context
+// fields are present at all, so callers can skip the block cleanly.
+//
+// This is a pure function (no I/O) so it's unit-testable without a running
+// daemon or provider.
+func contextBlock(req protocol.Request) string {
+	var lines []string
+	if req.Cwd != "" {
+		lines = append(lines, "- cwd: "+req.Cwd)
+	}
+	if req.GitBranch != "" {
+		branch := "- git: branch " + req.GitBranch
+		if req.GitDirty {
+			branch += " (dirty)"
+		}
+		lines = append(lines, branch)
+	}
+	if req.LastExit != 0 {
+		lines = append(lines, "- last command failed (exit "+strconv.Itoa(req.LastExit)+")")
+	}
+	if len(req.History) > 0 {
+		lines = append(lines, "- recent commands: "+strings.Join(req.History, "; "))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "Context:\n" + strings.Join(lines, "\n") + "\n\n"
+}
+
 // llmSuggest adapts a provider.Client into the server's suggest seam
 // (func(ctx, protocol.Request) (protocol.Reply, error)). It builds the
-// prompt from just req.Buf (no cwd/git/history yet — that's a later step),
-// calls the provider, and assembles the reply so Suggestion always starts
-// with req.Buf: the zsh client strips that exact prefix before painting
-// ghost text, so this invariant is load-bearing, not cosmetic.
-func llmSuggest(client *provider.Client) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
+// prompt from req.Buf plus whatever step-5 context fields (design §7) are
+// present on the request (see contextBlock), calls the provider, and
+// assembles the reply so Suggestion always starts with req.Buf: the zsh
+// client strips that exact prefix before painting ghost text, so this
+// invariant is load-bearing, not cosmetic.
+func llmSuggest(client *provider.Client, log *slog.Logger) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
+		ctxBlock := contextBlock(req)
+
 		system := systemPromptTyping
-		user := typingUserPrefix + req.Buf
+		// ctxBlock goes BEFORE the directive+buffer; req.Buf must stay at the
+		// very end so the completion continues directly from it (see
+		// typingUserPrefix's doc comment).
+		user := ctxBlock + typingUserPrefix + req.Buf
 		if req.Kind == protocol.KindNextCommand {
 			system = systemPromptNextCommand
-			user = "(prompt is empty)"
+			user = ctxBlock + "(prompt is empty)"
+		}
+
+		// TEMP(debug): dump the exact prompt sent to the LLM — the assembled
+		// context block + directive + buffer — so we can eyeball what the model
+		// actually sees. Gated behind -v. Remove before shipping.
+		if log.Enabled(ctx, slog.LevelDebug) {
+			fmt.Fprintf(os.Stderr, "\n=== llm prompt (id=%s) ===\n[system]\n%s\n[user]\n%s\n=== end prompt ===\n\n", req.ID, system, user)
 		}
 
 		suffix, err := client.Complete(ctx, system, user)

@@ -37,6 +37,13 @@ _zsh_autopilot_socket_alive() {
 
 # Send a request to the daemon. $1 = buffer, $2 = kind (typing|next_command).
 # Mints a fresh request id, records it as current, and ships one JSON line.
+#
+# Optional context fields ride along on every request (cwd/git_branch/
+# git_dirty/last_exit/history), each included only when it has a meaningful
+# value to report. Git state and history are read from the caches maintained
+# by 47_context.zsh's precmd/chpwd/preexec hooks — nothing here forks git or
+# walks history; that would defeat the point of caching on the hot per-
+# keystroke path.
 _zsh_autopilot_send() {
   local buffer="$1" kind="${2:-typing}"
 
@@ -47,7 +54,28 @@ _zsh_autopilot_send() {
 
   local REPLY
   _zsh_autopilot_json_escape "$buffer"
-  local line='{"v":1,"id":"'${_ZSH_AUTOPILOT_REQ_ID}'","kind":"'${kind}'","buf":"'${REPLY}'"}'
+  local line='{"v":1,"id":"'${_ZSH_AUTOPILOT_REQ_ID}'","kind":"'${kind}'","buf":"'${REPLY}'"'
+
+  _zsh_autopilot_json_escape "$PWD"
+  line+=',"cwd":"'${REPLY}'"'
+
+  if [[ -n $_ZSH_AUTOPILOT_GIT_BRANCH ]]; then
+    _zsh_autopilot_json_escape "$_ZSH_AUTOPILOT_GIT_BRANCH"
+    line+=',"git_branch":"'${REPLY}'","git_dirty":'${_ZSH_AUTOPILOT_GIT_DIRTY}
+  fi
+
+  (( _ZSH_AUTOPILOT_LAST_EXIT != 0 )) && line+=',"last_exit":'${_ZSH_AUTOPILOT_LAST_EXIT}
+
+  if (( ${#_ZSH_AUTOPILOT_HISTORY} > 0 )); then
+    local hist_json='' item
+    for item in "${_ZSH_AUTOPILOT_HISTORY[@]}"; do
+      _zsh_autopilot_json_escape "$item"
+      hist_json+=${hist_json:+,}'"'${REPLY}'"'
+    done
+    line+=',"history":['${hist_json}']'
+  fi
+
+  line+='}'
 
   # Write; if the peer had gone away (half-open), reconnect once and retry.
   if ! print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$line" 2>/dev/null; then
