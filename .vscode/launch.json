@@ -2,13 +2,31 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "daemon (debug)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/daemon/cmd/autopilotd",
+      "cwd": "${workspaceFolder}",
+      "args": ["-socket", "/tmp/zsh-autopilot.sock", "-v"],
+      "envFile": "${workspaceFolder}/sandbox/.env",
+      "console": "integratedTerminal",
+      "preLaunchTask": "stop daemon"
+    },
+    {
+      "name": "sandbox: fresh zsh",
       "type": "node-terminal",
       "request": "launch",
-      "name": "sandbox: fresh zsh",
       "command": "ZDOTDIR=${workspaceFolder}/sandbox exec zsh",
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "sandbox: prep",
-      "postDebugTask": "stop daemon"
+      "preLaunchTask": "build"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "sandbox + daemon (debug)",
+      "configurations": ["daemon (debug)", "sandbox: fresh zsh"],
+      "stopAll": true
     }
   ]
 }

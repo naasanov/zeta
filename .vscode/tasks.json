@@ -3,7 +3,7 @@
   "tasks": [
     {
       "label": "build",
-      "detail": "Rebuild the daemon + plugin bundle (cached).",
+      "detail": "Rebuild the daemon + plugin bundle (cached). Sandbox needs the bundle.",
       "type": "shell",
       "command": "make",
       "options": {
@@ -18,7 +18,7 @@
     },
     {
       "label": "stop daemon",
-      "detail": "Kill any running autopilotd so the next launch starts a fresh binary.",
+      "detail": "Kill any stale task-run autopilotd so the debug launch can bind the socket (single-instance guard).",
       "type": "shell",
       "command": "pkill -f '[b]in/autopilotd' || true",
       "options": {
@@ -29,42 +29,6 @@
         "panel": "shared"
       },
       "problemMatcher": []
-    },
-    {
-      "label": "daemon",
-      "detail": "Build + run the real autopilotd on the autopilot socket (background). Loads sandbox/.env (GROQ_API_KEY, ZSH_AUTOPILOT_* overrides) if present; echo mode when no key.",
-      "type": "shell",
-      "command": "set -a; [ -f sandbox/.env ] && . sandbox/.env; set +a; make daemon && ./bin/autopilotd -socket /tmp/zsh-autopilot.sock -v",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "isBackground": true,
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      },
-      "problemMatcher": {
-        "owner": "daemon",
-        "pattern": {
-          "regexp": "^$"
-        },
-        "background": {
-          "activeOnStart": true,
-          "beginsPattern": ".",
-          "endsPattern": "listening"
-        }
-      }
-    },
-    {
-      "label": "sandbox: prep",
-      "detail": "Build, kill any stale daemon, then start a fresh autopilotd before opening the sandbox shell.",
-      "dependsOn": [
-        "build",
-        "stop daemon",
-        "daemon"
-      ],
-      "dependsOrder": "sequence"
     }
   ]
 }
