@@ -31,6 +31,12 @@ func testSocketPath(t *testing.T) string {
 	return filepath.Join(dir, "d.sock")
 }
 
+// testDebounce is the debounce duration used by the test helpers below: small
+// enough to keep the suite fast, large enough to give a "burst" of rapid
+// sends (no sleeps between them) a real window to coalesce in without
+// flaking on a loaded CI box.
+const testDebounce = 25 * time.Millisecond
+
 // startServer runs a Server in the background and returns it along with a
 // cancel func that shuts it down. It waits for the socket file to appear
 // before returning so callers can dial immediately.
@@ -44,11 +50,13 @@ func startServer(t *testing.T, path string) (cancel context.CancelFunc, done <-c
 // the server starts accepting connections. Passing nil keeps the default.
 // This is the seam the coordinator tests use to create deterministic
 // cancellation windows: a stub that blocks on ctx (or a per-request channel)
-// instead of an LLM call.
+// instead of an LLM call. The server's debounce is set to testDebounce (much
+// shorter than the production default) so these tests stay fast.
 func startServerWithSuggest(t *testing.T, path string, suggest func(ctx context.Context, req protocol.Request) (protocol.Reply, error)) (cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := New(path, log)
+	srv.Debounce = testDebounce
 	if suggest != nil {
 		srv.suggest = suggest
 	}
@@ -302,6 +310,154 @@ func TestCancelOnConnectionClose(t *testing.T) {
 	case <-cancelled:
 	case <-time.After(2 * time.Second):
 		t.Fatal("in-flight request was not cancelled when connection closed")
+	}
+}
+
+// TestDebounceCoalescesBurst is the core debounce correctness invariant: a
+// burst of requests arriving on one connection faster than the debounce
+// window, with no reads in between, must produce exactly ONE call into
+// suggest — for the LAST buffered request, not the first or any
+// intermediate one. This is what keeps a fast typist under a provider's
+// per-minute rate limit: every superseded buffer in the burst must never
+// even be sent, not merely be cancelled after being sent.
+func TestDebounceCoalescesBurst(t *testing.T) {
+	path := testSocketPath(t)
+
+	var mu sync.Mutex
+	var calls []string
+	suggest := func(_ context.Context, req protocol.Request) (protocol.Reply, error) {
+		mu.Lock()
+		calls = append(calls, req.Buf)
+		mu.Unlock()
+		return protocol.Reply{V: protocol.Version, ID: req.ID, Source: protocol.SourceLLM, Suggestion: req.Buf}, nil
+	}
+
+	cancel, _ := startServerWithSuggest(t, path, suggest)
+	defer cancel()
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	for i, buf := range []string{"g", "gi", "git"} {
+		if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: fmt.Sprintf("%d", i), Kind: protocol.KindTyping, Buf: buf}); err != nil {
+			t.Fatalf("encode %q: %v", buf, err)
+		}
+	}
+
+	// Wait comfortably past the debounce window for dispatch to happen.
+	time.Sleep(testDebounce * 4)
+
+	mu.Lock()
+	got := append([]string(nil), calls...)
+	mu.Unlock()
+
+	if len(got) != 1 {
+		t.Fatalf("suggest called %d times, want exactly 1; calls=%v", len(got), got)
+	}
+	if got[0] != "git" {
+		t.Errorf("suggest called with buf %q, want %q (the last buffered request)", got[0], "git")
+	}
+
+	// The reply for the dispatched (last) request should be waiting on the
+	// wire.
+	var reply protocol.Reply
+	if err := protocol.NewDecoder(conn).Decode(&reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if reply.ID != "2" {
+		t.Errorf("reply.ID = %q, want %q (id of the last request)", reply.ID, "2")
+	}
+}
+
+// TestDebounceFiresAfterQuiet checks the other half of the invariant: a
+// single request, with nothing superseding it, must still get answered —
+// dispatch after a quiet period, not just suppression during a burst.
+func TestDebounceFiresAfterQuiet(t *testing.T) {
+	path := testSocketPath(t)
+	cancel, _ := startServer(t, path)
+	defer cancel()
+
+	start := time.Now()
+	reply := roundTrip(t, path, protocol.Request{V: protocol.Version, ID: "1", Kind: protocol.KindTyping, Buf: "git"})
+	elapsed := time.Since(start)
+
+	if reply.ID != "1" {
+		t.Errorf("reply.ID = %q, want %q", reply.ID, "1")
+	}
+	if elapsed < testDebounce {
+		t.Errorf("reply arrived after %v, want at least the debounce window (%v)", elapsed, testDebounce)
+	}
+}
+
+// TestSupersedeAfterDebounceStillWorks confirms debounce and supersede
+// compose correctly: once a request has survived debounce and is actually
+// in flight with the provider, a NEW request arriving later (after its own
+// debounce window) must still cancel that in-flight call, exactly as before
+// debounce was introduced.
+func TestSupersedeAfterDebounceStillWorks(t *testing.T) {
+	path := testSocketPath(t)
+
+	started := make(chan string, 2)
+	cancelled := make(chan string, 2)
+
+	suggest := func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
+		if req.ID == "A" {
+			started <- req.ID
+			<-ctx.Done()
+			cancelled <- req.ID
+			return protocol.Reply{}, ctx.Err()
+		}
+		return protocol.Reply{V: protocol.Version, ID: req.ID, Source: protocol.SourceLLM, Suggestion: "b-reply"}, nil
+	}
+
+	cancel, _ := startServerWithSuggest(t, path, suggest)
+	defer cancel()
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	dec := protocol.NewDecoder(conn)
+
+	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "A", Kind: protocol.KindTyping, Buf: "gi"}); err != nil {
+		t.Fatalf("encode A: %v", err)
+	}
+
+	// Let A clear debounce and actually dispatch (block in suggest).
+	select {
+	case id := <-started:
+		if id != "A" {
+			t.Fatalf("started id = %q, want A", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request A did not start in time")
+	}
+
+	// Now send B; it must go through its own debounce window before
+	// dispatch, at which point it supersedes A.
+	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "B", Kind: protocol.KindTyping, Buf: "git"}); err != nil {
+		t.Fatalf("encode B: %v", err)
+	}
+
+	select {
+	case id := <-cancelled:
+		if id != "A" {
+			t.Fatalf("cancelled id = %q, want A", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request A was not cancelled by superseding request B")
+	}
+
+	var reply protocol.Reply
+	if err := dec.Decode(&reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if reply.ID != "B" {
+		t.Fatalf("reply.ID = %q, want B (A must not write after being cancelled)", reply.ID)
 	}
 }
 

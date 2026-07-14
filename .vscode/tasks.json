@@ -17,10 +17,10 @@
       "problemMatcher": []
     },
     {
-      "label": "stop echo-server",
-      "detail": "Kill any running echo-server so the next launch starts a fresh binary.",
+      "label": "stop daemon",
+      "detail": "Kill any running autopilotd so the next launch starts a fresh binary.",
       "type": "shell",
-      "command": "pkill -f '[b]in/echo-server' || true",
+      "command": "pkill -f '[b]in/autopilotd' || true",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -31,10 +31,10 @@
       "problemMatcher": []
     },
     {
-      "label": "echo-server",
-      "detail": "Phase 0 fake backend: build + run echo-server on the autopilot socket (background).",
+      "label": "daemon",
+      "detail": "Build + run the real autopilotd on the autopilot socket (background). Loads sandbox/.env (GROQ_API_KEY, ZSH_AUTOPILOT_* overrides) if present; echo mode when no key.",
       "type": "shell",
-      "command": "make spike && ./bin/echo-server -socket /tmp/zsh-autopilot.sock",
+      "command": "set -a; [ -f sandbox/.env ] && . sandbox/.env; set +a; make daemon && ./bin/autopilotd -socket /tmp/zsh-autopilot.sock -v",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -45,24 +45,24 @@
         "clear": true
       },
       "problemMatcher": {
-        "owner": "echo-server",
+        "owner": "daemon",
         "pattern": {
           "regexp": "^$"
         },
         "background": {
           "activeOnStart": true,
           "beginsPattern": ".",
-          "endsPattern": "listening on"
+          "endsPattern": "listening"
         }
       }
     },
     {
       "label": "sandbox: prep",
-      "detail": "Build, kill any stale echo-server, then start a fresh one before opening the sandbox shell.",
+      "detail": "Build, kill any stale daemon, then start a fresh autopilotd before opening the sandbox shell.",
       "dependsOn": [
         "build",
-        "stop echo-server",
-        "echo-server"
+        "stop daemon",
+        "daemon"
       ],
       "dependsOrder": "sequence"
     }

@@ -15,6 +15,15 @@ HISTFILE="${ZDOTDIR}/.zsh_history"
 HISTSIZE=1000
 SAVEHIST=1000
 
+# Load developer env vars (GROQ_API_KEY, any ZSH_AUTOPILOT_* overrides) from an
+# untracked sandbox/.env if present, before the plugin reads its config. `set -a`
+# exports each assignment so child processes see it. See sandbox/.env.example.
+if [[ -r "${ZDOTDIR}/.env" ]]; then
+  set -a
+  source "${ZDOTDIR}/.env"
+  set +a
+fi
+
 # Make it unmistakable that you're in the sandbox.
 PROMPT='%F{cyan}[autopilot-sandbox]%f %1~ %# '
 

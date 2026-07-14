@@ -8,7 +8,7 @@
       "command": "ZDOTDIR=${workspaceFolder}/sandbox exec zsh",
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "sandbox: prep",
-      "postDebugTask": "stop echo-server"
+      "postDebugTask": "stop daemon"
     }
   ]
 }

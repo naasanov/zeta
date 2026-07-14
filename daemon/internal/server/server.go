@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
@@ -28,11 +29,24 @@ import (
 // point in practice. Kept short because macOS caps socket paths at ~104 bytes.
 const DefaultSocket = "/tmp/zsh-autopilot.sock"
 
+// DefaultDebounce is the default quiet period a connection must see before a
+// buffered request is dispatched to the provider (design §4). Rapid keystroke
+// bursts within this window collapse into a single dispatch of the LATEST
+// buffer, which is what keeps us under free-tier provider rate limits
+// (cancellation alone doesn't help: a cancelled request was already sent and
+// still counts against the limit).
+const DefaultDebounce = 100 * time.Millisecond
+
 // Server listens on a Unix domain socket and answers each request with a
 // suggestion. It holds no provider state yet; that lands in a later step.
 type Server struct {
 	SocketPath string
 	Log        *slog.Logger
+	// Debounce is the quiet period before a buffered request dispatches (see
+	// DefaultDebounce). Zero means "unset"; New fills in DefaultDebounce, but
+	// tests within this package may still set it directly to something small
+	// for speed.
+	Debounce time.Duration
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
@@ -55,9 +69,18 @@ func New(path string, log *slog.Logger) *Server {
 	return &Server{
 		SocketPath: path,
 		Log:        log,
+		Debounce:   DefaultDebounce,
 		conns:      make(map[net.Conn]struct{}),
 		suggest:    suggestInstantEcho,
 	}
+}
+
+// SetSuggest overrides the suggest func used to answer requests, replacing
+// the default echo stub. main installs the real provider-backed suggester
+// here once a Client is configured (see cmd/autopilotd); call it before Run.
+// Tests within this package may still set the unexported field directly.
+func (s *Server) SetSuggest(fn func(ctx context.Context, req protocol.Request) (protocol.Reply, error)) {
+	s.suggest = fn
 }
 
 // suggestInstantEcho is the default suggest func: an instant (non-blocking)
@@ -152,6 +175,17 @@ func (s *Server) claimSocket() error {
 	return os.Remove(s.SocketPath)
 }
 
+// shortID trims the constant per-session prefix from a request id for terse
+// logs. IDs are "<session>.<seq>" (the client mints them, §protocol); the
+// session part repeats on every request over a connection, so only the trailing
+// sequence number carries information line-to-line.
+func shortID(id string) string {
+	if i := strings.LastIndexByte(id, '.'); i >= 0 {
+		return id[i+1:]
+	}
+	return id
+}
+
 func (s *Server) trackConn(c net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,12 +206,25 @@ func (s *Server) closeAllConns() {
 	}
 }
 
-// handle reads newline-framed requests off conn continuously and dispatches
-// each to its own processing goroutine, until EOF or a decode error ends the
-// connection. It never blocks on processing a request — that's the whole
-// point of the coordinator: a request that's slow to answer (real provider
-// call, later step) must not stop the reader from seeing the NEXT request,
-// because that next request is what supersedes and cancels the slow one.
+// handle owns one connection's request lifecycle: a reader goroutine decodes
+// requests off the wire and hands them to this goroutine (the coordinator),
+// which debounces bursts and dispatches processing goroutines, until EOF/a
+// decode error ends the connection or the server shuts down.
+//
+// Debounce (design §4): a burst of rapid requests (e.g. one per keystroke)
+// must not each hit the provider — free-tier rate limits (e.g. Groq's 30
+// req/min) make that fail fast. So the coordinator never dispatches the
+// instant a request arrives; it buffers the latest one and (re)starts a
+// timer. Only once the timer fires — meaning s.Debounce has passed with no
+// newer request superseding it — does the buffered request actually get
+// sent to the provider. Cancellation alone can't substitute for this: a
+// cancelled request was already sent and still counted against the rate
+// limit.
+//
+// Dispatch, cancelPrev, and the debounce timer are all owned by this single
+// goroutine (never the reader), which is deliberate: it's what lets teardown
+// wait on wg (outstanding processing goroutines) without a timer callback
+// racing a wg.Add against wg.Wait from another goroutine.
 //
 // Per-connection state:
 //   - connCtx/connCancel: cancelled when the server shuts down (ctx) OR this
@@ -185,7 +232,7 @@ func (s *Server) closeAllConns() {
 //     connection is torn down at the latest by connection teardown.
 //   - cancelPrev: the supersede handle. A newly dispatched request cancels
 //     whatever was previously in flight before installing itself. Only this
-//     connection's reader loop touches it, so it needs no mutex.
+//     goroutine touches it, so it needs no mutex.
 //   - writeMu: serializes writes to conn so two processing goroutines never
 //     interleave bytes on the wire.
 //   - wg: tracks outstanding processing goroutines so handle does not return
@@ -195,69 +242,129 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 	var writeMu sync.Mutex
 	var wg sync.WaitGroup
-	// cancelPrev cancels the previous in-flight request when a new one arrives
-	// (supersede). Only this connection's reader loop touches it — no mutex.
+	// cancelPrev cancels the previous in-flight request when a new one is
+	// dispatched (supersede). Only the coordinator loop below touches it —
+	// no mutex needed.
 	var cancelPrev context.CancelFunc
 
 	// Defers run LIFO, so declaration order here is deliberate: on return we
-	// want connCancel() (stop any in-flight request) -> wg.Wait() (let its
-	// goroutine actually exit) -> conn.Close() (only now is it safe; no
-	// goroutine can still be writing to conn).
+	// want connCancel() (stop any in-flight request, and unblock the reader
+	// goroutine's channel send if it's parked there) -> wg.Wait() (let
+	// processing goroutines actually exit) -> conn.Close() (only now is it
+	// safe; no goroutine can still be writing to conn). conn.Close() also
+	// unblocks the reader goroutine's Decode call so it can exit.
 	defer conn.Close()
 	defer wg.Wait()
 	defer connCancel()
 
 	s.Log.Debug("accepted connection", "remote", conn.RemoteAddr())
 
-	dec := protocol.NewDecoder(conn)
-	for {
-		var req protocol.Request
-		if err := dec.Decode(&req); err != nil {
-			if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
-				s.Log.Debug("connection closed")
-			} else {
-				s.Log.Debug("decode", "err", err)
+	debounce := s.Debounce
+	if debounce <= 0 {
+		debounce = DefaultDebounce
+	}
+
+	// reqCh carries decoded requests from the reader goroutine to this
+	// coordinator. It's closed by the reader when Decode ends (EOF/error),
+	// which signals the coordinator to tear down.
+	reqCh := make(chan protocol.Request)
+	go func() {
+		defer close(reqCh)
+		dec := protocol.NewDecoder(conn)
+		for {
+			var req protocol.Request
+			if err := dec.Decode(&req); err != nil {
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+					s.Log.Debug("connection closed")
+				} else {
+					s.Log.Debug("decode", "err", err)
+				}
+				return
 			}
+			s.Log.Debug("request", "id", shortID(req.ID), "kind", req.Kind, "buf", req.Buf)
+			select {
+			case reqCh <- req:
+			case <-connCtx.Done():
+				// Coordinator is tearing down; don't block forever trying to
+				// hand off a request nobody will read.
+				return
+			}
+		}
+	}()
+
+	// timer drives dispatch: it fires debounce after the most recently
+	// buffered request, unless a newer request resets it first. Created
+	// stopped so it never fires before the first request arrives.
+	timer := time.NewTimer(debounce)
+	timer.Stop()
+	defer timer.Stop()
+
+	var pending *protocol.Request
+
+	for {
+		select {
+		case req, ok := <-reqCh:
+			if !ok {
+				// Reader ended (EOF/decode error): tear down.
+				return
+			}
+			r := req
+			pending = &r
+			timer.Reset(debounce)
+
+		case <-timer.C:
+			if pending == nil {
+				continue
+			}
+			req := *pending
+			pending = nil
+
+			// One dispatch per debounce window — this is the request that
+			// actually reaches the suggester/provider, so watching these lines
+			// vs. the per-keystroke "request" lines shows debounce coalescing.
+			s.Log.Debug("dispatch", "id", shortID(req.ID), "kind", req.Kind, "buf", req.Buf)
+
+			// Supersede: cancel whatever was previously in flight on this
+			// connection, then remember this request's cancel for next
+			// time. Dispatch only ever happens here, in the coordinator
+			// goroutine, so this needs no mutex.
+			if cancelPrev != nil {
+				cancelPrev()
+			}
+			reqCtx, reqCancel := context.WithCancel(connCtx)
+			cancelPrev = reqCancel
+
+			wg.Go(func() {
+				defer reqCancel()
+
+				reply, err := s.suggest(reqCtx, req)
+
+				// Cancelled/superseded/connection-closing: don't write.
+				// It's fine if this races a request that finished
+				// computing just as it was cancelled (see design note);
+				// the client drops replies whose id isn't its current
+				// one, so a stray stale write would be harmless too, but
+				// skipping it is just as easy and avoids writing on
+				// behalf of a request nobody wants anymore.
+				if reqCtx.Err() != nil {
+					return
+				}
+				if err != nil {
+					s.Log.Debug("suggest", "id", shortID(req.ID), "err", err)
+					return
+				}
+
+				writeMu.Lock()
+				defer writeMu.Unlock()
+				if err := protocol.Encode(conn, reply); err != nil {
+					s.Log.Debug("encode", "err", err)
+				}
+			})
+
+		case <-connCtx.Done():
+			// Server shutdown or connection teardown initiated elsewhere.
 			return
 		}
-		s.Log.Debug("request", "id", req.ID, "kind", req.Kind, "buf", req.Buf)
-
-		// Supersede: cancel whatever was previously in flight on this
-		// connection, then remember this request's cancel for next time.
-		if cancelPrev != nil {
-			cancelPrev()
-		}
-		reqCtx, reqCancel := context.WithCancel(connCtx)
-		cancelPrev = reqCancel
-
-		// req is declared fresh each iteration (var req protocol.Request
-		// above, inside the loop body), so it's already safe to capture
-		// per-goroutine — no shadowing dance needed here.
-		wg.Go(func() {
-			defer reqCancel()
-
-			reply, err := s.suggest(reqCtx, req)
-
-			// Cancelled/superseded/connection-closing: don't write. It's
-			// fine if this races a request that finished computing just as
-			// it was cancelled (see design note); the client drops replies
-			// whose id isn't its current one, so a stray stale write would
-			// be harmless too, but skipping it is just as easy and avoids
-			// writing on behalf of a request nobody wants anymore.
-			if reqCtx.Err() != nil {
-				return
-			}
-			if err != nil {
-				s.Log.Debug("suggest", "id", req.ID, "err", err)
-				return
-			}
-
-			writeMu.Lock()
-			defer writeMu.Unlock()
-			if err := protocol.Encode(conn, reply); err != nil {
-				s.Log.Debug("encode", "err", err)
-			}
-		})
 	}
 }
 

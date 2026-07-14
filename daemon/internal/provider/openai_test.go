@@ -1,0 +1,165 @@
+package provider
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+// sseChunk builds one SSE "data:" line carrying content as a chat-completions
+// delta, matching the shape streamChunk expects. json.Marshal takes care of
+// escaping any embedded newline in content as the two characters `\` `n`, so
+// the emitted line is still exactly one physical line, just like a real
+// provider's stream.
+func sseChunk(t *testing.T, content string) string {
+	t.Helper()
+	payload := map[string]any{
+		"choices": []map[string]any{
+			{"delta": map[string]any{"content": content}},
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal chunk: %v", err)
+	}
+	return "data: " + string(b) + "\n\n"
+}
+
+func TestComplete_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, part := range []string{"git ", "commit ", "-m \"wip\""} {
+			fmt.Fprint(w, sseChunk(t, part))
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), "sys", "git")
+	if err != nil {
+		t.Fatalf("Complete() err = %v, want nil", err)
+	}
+	want := `git commit -m "wip"`
+	if got != want {
+		t.Errorf("Complete() = %q, want %q", got, want)
+	}
+}
+
+// TestComplete_FirstLineCutoff drives a stream whose content spans a newline
+// partway through, with a deliberately slow final chunk. It asserts both that
+// (a) only the text before the newline comes back, and (b) Complete returns
+// long before the final chunk would have been sent, proving the client
+// stopped reading early rather than happening to produce the right prefix
+// after consuming everything.
+func TestComplete_FirstLineCutoff(t *testing.T) {
+	const lateDelay = 300 * time.Millisecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		fmt.Fprint(w, sseChunk(t, "foo"))
+		flusher.Flush()
+
+		fmt.Fprint(w, sseChunk(t, " bar\n"))
+		flusher.Flush()
+
+		// A later chunk that, if consumed, would change the result. The
+		// client must not wait for this: it already has a complete first
+		// line after the previous chunk.
+		time.Sleep(lateDelay)
+		fmt.Fprint(w, sseChunk(t, "baz-should-not-appear"))
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "test-model", "test-key", 48)
+
+	start := time.Now()
+	got, err := client.Complete(context.Background(), "sys", "user")
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Complete() err = %v, want nil", err)
+	}
+	want := "foo bar"
+	if got != want {
+		t.Errorf("Complete() = %q, want %q", got, want)
+	}
+	if elapsed >= lateDelay {
+		t.Errorf("Complete() took %v, want well under the %v late-chunk delay (client did not stop early)", elapsed, lateDelay)
+	}
+}
+
+// TestComplete_Cancellation forces a stream that blocks indefinitely after
+// its first chunk, then cancels the ctx passed to Complete. It asserts
+// Complete returns promptly (not after the block would otherwise clear) with
+// a context error, proving the in-flight HTTP call is actually aborted by ctx
+// cancellation and the call does not hang.
+func TestComplete_Cancellation(t *testing.T) {
+	blockCh := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, sseChunk(t, "partial-no-newline"))
+		flusher.Flush()
+		<-blockCh // simulate a stalled stream that never completes on its own
+	}))
+	// Cleanup order is load-bearing: srv.Close() blocks until in-flight
+	// handlers return, and the handler above is parked on <-blockCh, so the
+	// channel MUST be closed before srv.Close() runs. Defers are LIFO, so
+	// close(blockCh) is declared last to execute first.
+	defer srv.Close()
+	defer close(blockCh)
+
+	client := NewClient(srv.URL, "test-model", "test-key", 48)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.Complete(ctx, "sys", "user")
+		errCh <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let the request start and the first chunk arrive
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Complete() err = %v, want errors.Is(err, context.Canceled)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Complete() did not return promptly after ctx cancellation (hung)")
+	}
+}
+
+func TestComplete_HTTPError(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusInternalServerError} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				fmt.Fprint(w, `{"error":"boom"}`)
+			}))
+			defer srv.Close()
+
+			client := NewClient(srv.URL, "test-model", "test-key", 48)
+			got, err := client.Complete(context.Background(), "sys", "user")
+			if err == nil {
+				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got)
+			}
+		})
+	}
+}

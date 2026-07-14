@@ -19,3 +19,6 @@ daemon/vendor/
 
 # Sandbox-local history
 sandbox/.zsh_history
+
+# Local secrets / env (API keys). Committed template: sandbox/.env.example
+sandbox/.env
