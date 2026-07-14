@@ -40,8 +40,10 @@ const (
 	defaultMaxTokens = 48
 )
 
-// systemPromptTyping tells the model to emit only the suffix to append to what
-// the user has typed. Two properties are load-bearing and tuned by dogfooding
+// systemPrompt tells the model to emit only the text to append to the command
+// buffer. Typing completion and next-command prediction intentionally share
+// this one stable system prompt: next-command is just the append contract with
+// an empty buffer. Two properties are load-bearing and tuned by dogfooding
 // (design §235):
 //   - Spacing: the reply is req.Buf + suffix with nothing inserted between, so
 //     the model must supply the leading space itself when the completion starts
@@ -53,11 +55,11 @@ const (
 // The model's OUTPUT must stay single-line (provider.Complete cuts at the first
 // newline). The prompt itself may span multiple lines. The « » in the examples
 // only mark exact output boundaries so leading spaces are visible.
-const systemPromptTyping = `You are a shell command autocompletion engine. You receive exactly what the user has typed so far and output the text to append to continue the command — nothing else.
+const systemPrompt = `You are a shell command suggestion engine. You receive a shell command buffer and output only the text to append at the end — nothing else. When the buffer is empty, the appended text may be a complete next command.
 
 Rules:
 - Your output is appended verbatim, with NO separator added. Begin with a space when the completion starts a new word or argument; begin with no space when finishing the current word.
-- Never repeat or restate what the user already typed.
+- Never repeat or restate a non-empty buffer.
 - Prefer a SHORT, high-confidence completion. A partial completion is useful — you do NOT need to produce the whole command.
 - Never invent specifics you cannot know: commit messages, file names, branch names, URLs, values. Stop right before such free-form input (for example, end at the opening quote).
 - Output a single line. No explanation, no markdown, no backticks.
@@ -69,17 +71,6 @@ git add => .
 git add -A => && git commit -m "
 git commit -m  => "
 docker run => -it `
-
-// systemPromptNextCommand is used when the buffer is empty (KindNextCommand):
-// there is nothing to complete, so the model predicts a likely next command.
-// Same restraint applies — a short, common command beats a fabricated pipeline.
-const systemPromptNextCommand = `You are a shell command prediction engine. The user's prompt is empty, immediately after running a previous command. Output a single likely next command.
-
-Rules:
-- Prefer a SHORT, common command over a long speculative one.
-- Never invent specifics you cannot know (commit messages, file names, values). Stop before such free-form input (for example, end at the opening quote).
-- Output a single line. No explanation, no markdown, no backticks.
-- If nothing useful comes to mind, output nothing.`
 
 func main() {
 	socket := flag.String("socket", server.DefaultSocket, "unix socket path to listen on")
@@ -143,13 +134,17 @@ func debounceFromEnv(log *slog.Logger) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// typingUserPrefix is prepended to req.Buf in the USER turn (not the system
-// prompt). Placing the spacing directive right next to the input gives it more
-// attention on instruct models than the system prompt alone — empirically this
-// fixed the model dropping leading spaces. req.Buf stays at the very end so the
-// completion continues directly from it, and the static prefix here is still a
-// stable cache prefix for Phase 2 prompt caching.
-const typingUserPrefix = "Complete this command, keeping any needed leading space:\n"
+// User-turn directives are deliberately outside the system prompt so typing and
+// next-command can share one cacheable system prefix. For typing, placing the
+// spacing directive right next to the input gives it more attention on instruct
+// models than the system prompt alone — empirically this fixed the model
+// dropping leading spaces. req.Buf stays at the very end so the completion
+// continues directly from it, and the static prefix here is still a stable cache
+// prefix for Phase 2 prompt caching.
+const (
+	typingUserPrefix      = "Complete this command, keeping any needed leading space:\n"
+	nextCommandUserPrefix = "The prompt is empty. Based on the recent commands and context above, predict the single most likely next command. Keep it short and common:\n"
+)
 
 // contextBlock renders whatever step-5 context fields (design §7) are present
 // on req into a compact "Context:" block for the user turn, one line per
@@ -184,6 +179,18 @@ func contextBlock(req protocol.Request) string {
 	return "Context:\n" + strings.Join(lines, "\n") + "\n\n"
 }
 
+// buildPrompt assembles the provider turns for a request. The system turn is
+// intentionally mode-independent; KindTyping and KindNextCommand differ only in
+// the short user-turn directive next to the buffer.
+func buildPrompt(req protocol.Request) (system, user string) {
+	ctxBlock := contextBlock(req)
+	userPrefix := typingUserPrefix
+	if req.Kind == protocol.KindNextCommand {
+		userPrefix = nextCommandUserPrefix
+	}
+	return systemPrompt, ctxBlock + userPrefix + req.Buf
+}
+
 // llmSuggest adapts a provider.Client into the server's suggest seam
 // (func(ctx, protocol.Request) (protocol.Reply, error)). It builds the
 // prompt from req.Buf plus whatever step-5 context fields (design §7) are
@@ -193,17 +200,7 @@ func contextBlock(req protocol.Request) string {
 // invariant is load-bearing, not cosmetic.
 func llmSuggest(client *provider.Client, log *slog.Logger) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
-		ctxBlock := contextBlock(req)
-
-		system := systemPromptTyping
-		// ctxBlock goes BEFORE the directive+buffer; req.Buf must stay at the
-		// very end so the completion continues directly from it (see
-		// typingUserPrefix's doc comment).
-		user := ctxBlock + typingUserPrefix + req.Buf
-		if req.Kind == protocol.KindNextCommand {
-			system = systemPromptNextCommand
-			user = ctxBlock + "(prompt is empty)"
-		}
+		system, user := buildPrompt(req)
 
 		// TEMP(debug): dump the exact prompt sent to the LLM — the assembled
 		// context block + directive + buffer — so we can eyeball what the model

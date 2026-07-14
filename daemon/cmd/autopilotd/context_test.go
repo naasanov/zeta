@@ -106,8 +106,61 @@ func TestBufferStaysLastInAssembledUserMessage(t *testing.T) {
 		Cwd:  "/Users/x/project", GitBranch: "main", GitDirty: true, LastExit: 1,
 		History: []string{"cd project", "npm install", "npm test"},
 	}
-	user := contextBlock(req) + typingUserPrefix + req.Buf
+	_, user := buildPrompt(req)
 	if !strings.HasSuffix(user, req.Buf) {
 		t.Errorf("expected assembled user message to end with req.Buf %q, got:\n%s", req.Buf, user)
+	}
+}
+
+// TestPromptUsesOneSystemPromptForBothModes pins the cleanup that makes
+// next-command prediction the same append contract as typing completion, just
+// with an empty buffer and a different user-turn directive.
+func TestPromptUsesOneSystemPromptForBothModes(t *testing.T) {
+	typingSystem, typingUser := buildPrompt(protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"})
+	nextSystem, nextUser := buildPrompt(protocol.Request{Kind: protocol.KindNextCommand, Buf: ""})
+
+	if typingSystem != systemPrompt {
+		t.Errorf("typing request used unexpected system prompt")
+	}
+	if nextSystem != systemPrompt {
+		t.Errorf("next-command request used unexpected system prompt")
+	}
+	if typingSystem != nextSystem {
+		t.Errorf("expected typing and next-command to share one system prompt")
+	}
+	if !strings.Contains(typingUser, "Complete this command") {
+		t.Errorf("typing user prompt missing typing directive, got:\n%s", typingUser)
+	}
+	if !strings.Contains(nextUser, "next command") {
+		t.Errorf("next-command user prompt missing next-command directive, got:\n%s", nextUser)
+	}
+}
+
+// TestNextCommandPromptCarriesContextAndNoFakeBufferMarker checks that
+// next-command mode keeps using the real request context but no longer needs a
+// special "(prompt is empty)" sentinel in the user turn.
+func TestNextCommandPromptCarriesContextAndNoFakeBufferMarker(t *testing.T) {
+	req := protocol.Request{
+		Kind:      protocol.KindNextCommand,
+		Buf:       "",
+		Cwd:       "/Users/x/project",
+		GitBranch: "main",
+		History:   []string{"npm test"},
+	}
+	_, user := buildPrompt(req)
+
+	for _, want := range []string{
+		"Context:",
+		"- cwd: /Users/x/project",
+		"- git: branch main",
+		"- recent commands: npm test",
+		"next command",
+	} {
+		if !strings.Contains(user, want) {
+			t.Errorf("expected next-command prompt to contain %q, got:\n%s", want, user)
+		}
+	}
+	if strings.Contains(user, "(prompt is empty)") {
+		t.Errorf("did not expect legacy empty-prompt sentinel, got:\n%s", user)
 	}
 }

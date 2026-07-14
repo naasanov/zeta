@@ -48,8 +48,10 @@ import (
 // Version is the current protocol version stamped into every message.
 const Version = 1
 
-// Request kinds. Phase 1 only fetches on typing; next-command prediction is
-// wired through the same protocol but is a Phase 2 feature.
+// Request kinds. Both are active: the client fetches a completion as the user
+// types (KindTyping) and predicts a next command on the empty prompt from the
+// precmd hook (KindNextCommand). They share one system prompt on the daemon
+// side — next-command is just the append contract with an empty buffer.
 const (
 	KindTyping      = "typing"       // fetch a completion for a non-empty buffer
 	KindNextCommand = "next_command" // predict the next command on an empty prompt
