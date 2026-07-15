@@ -1,10 +1,7 @@
-// Package provider is a small, hand-rolled client for OpenAI-compatible
-// streaming chat-completions endpoints (design §6). Phase 1 targets Groq by
-// default, but any OpenAI-shaped /chat/completions endpoint (Groq, OpenAI,
-// Together, Ollama, ...) works by swapping base URL + model + key. This is
-// deliberately NOT a formal Provider interface with multiple adapters — that
-// generalization (native Anthropic adapter, openai-go SDK, TOML profiles) is
-// Phase 2. Today there is exactly one concrete Client and one caller.
+// openai.go is a small, hand-rolled client for OpenAI-compatible streaming
+// chat-completions endpoints (design §6). Phase 1 targets Groq by default,
+// but any OpenAI-shaped /chat/completions endpoint (Groq, OpenAI, Together,
+// Ollama, ...) works by swapping base URL + model + key. No SDK/deps.
 package provider
 
 import (
@@ -19,11 +16,11 @@ import (
 	"time"
 )
 
-// Client talks to a single OpenAI-compatible /chat/completions endpoint. It
-// holds a shared *http.Client so the daemon never pays TLS/TCP setup cost per
-// keystroke (design §4 "warm connections") — construct one Client at startup
-// and reuse it for every request.
-type Client struct {
+// openAIClient talks to a single OpenAI-compatible /chat/completions
+// endpoint. It holds a shared *http.Client so the daemon never pays TLS/TCP
+// setup cost per keystroke (design §4 "warm connections") — construct one via
+// NewOpenAI at startup and reuse it for every request.
+type openAIClient struct {
 	baseURL   string
 	model     string
 	apiKey    string
@@ -31,30 +28,36 @@ type Client struct {
 	http      *http.Client
 }
 
-// NewClient builds a Client with a shared, keep-alive-tuned http.Client. Call
-// this once at daemon startup, not per-request: a fresh http.Client (and
-// therefore a fresh connection pool) defeats the whole warm-connection point.
-func NewClient(baseURL, model, apiKey string, maxTokens int) *Client {
+// NewOpenAI builds a Provider backed by a shared, keep-alive-tuned
+// http.Client. Call this once at daemon startup, not per-request: a fresh
+// http.Client (and therefore a fresh connection pool) defeats the whole
+// warm-connection point.
+func NewOpenAI(baseURL, model, apiKey string, maxTokens int) (Provider, error) {
 	transport := &http.Transport{
 		ForceAttemptHTTP2:   true,
 		MaxIdleConns:        16,
 		MaxIdleConnsPerHost: 16,
 		IdleConnTimeout:     90 * time.Second,
 	}
-	return &Client{
+	return &openAIClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
 		http:      &http.Client{Transport: transport},
-	}
+	}, nil
 }
 
-// Model returns the model name this Client was constructed with.
+// Name identifies this adapter for METRICS(§12) and price-table lookups.
+func (c *openAIClient) Name() string {
+	return "openai"
+}
+
+// Model returns the model name this client was constructed with.
 //
 // METRICS(§12): used by internal/suggest to look up pricing for the
 // "request" event's cost_usd field.
-func (c *Client) Model() string {
+func (c *openAIClient) Model() string {
 	return c.model
 }
 
@@ -115,63 +118,56 @@ type streamUsage struct {
 	} `json:"prompt_tokens_details"`
 }
 
-// Completion is the result of a successful (or partially successful, on the
-// HTTP-error path) Complete call: the suggestion text plus METRICS(§12)
-// provider-internal stats used to build the "request" event. HTTPStatus is
-// populated even on error returns so the caller can log the status of a
-// failed call.
-type Completion struct {
-	Text         string
-	TTFT         time.Duration
-	InputTokens  int
-	OutputTokens int
-	CachedTokens int
-	HTTPStatus   int
-	StopReason   string
-}
-
 // Complete issues a streaming chat-completions request and returns the
-// model's first line of output (design §4 "stream + take first line only").
+// model's first line of output (design §4 "stream + take first line only"),
+// driving the shared accumulator for TTFT stamping and the cutoff.
 //
 // It honors ctx throughout: the HTTP request itself is built with
 // NewRequestWithContext, so cancelling ctx (e.g. because a newer keystroke
 // superseded this request — see server.handle) aborts the call, including
 // mid-stream reads of the response body.
-func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (Completion, error) {
+func (c *openAIClient) Complete(ctx context.Context, req Request) (Completion, error) {
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = c.maxTokens
+	}
 	reqBody := chatRequest{
 		Model: c.model,
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
+			{Role: "system", Content: req.Prompt.System},
+			{Role: "user", Content: req.Prompt.ChatUser()},
 		},
-		MaxTokens: c.maxTokens,
+		MaxTokens: maxTokens,
 		Stream:    true,
 		// METRICS(§12): request the trailing usage chunk.
 		StreamOptions: &streamOptions{IncludeUsage: true},
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return Completion{}, fmt.Errorf("provider: marshal request: %w", err)
+		return Completion{}, &Error{Kind: ErrTransport, Provider: c.Name(), Err: fmt.Errorf("provider: marshal request: %w", err)}
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
-		return Completion{}, fmt.Errorf("provider: build request: %w", err)
+		return Completion{}, &Error{Kind: ErrTransport, Provider: c.Name(), Err: fmt.Errorf("provider: build request: %w", err)}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	// METRICS(§12): TTFT is measured from just before the round trip starts
-	// to the first chunk carrying non-empty delta content (below).
-	sendStart := time.Now()
+	// to the first chunk carrying non-empty delta content (accumulator.Push).
+	acc := newAccumulator(time.Now())
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		// Covers network errors AND ctx cancellation/deadline (http.Client.Do
 		// returns ctx.Err(), possibly wrapped, when ctx ends before or during
 		// the round trip).
-		return Completion{}, fmt.Errorf("provider: request: %w", err)
+		if ctx.Err() != nil {
+			return Completion{}, &Error{Kind: ErrCanceled, Provider: c.Name(), Err: err}
+		}
+		return Completion{}, &Error{Kind: ErrTransport, Provider: c.Name(), Err: fmt.Errorf("provider: request: %w", err)}
 	}
 	// Closing the body (a) prevents leaking the connection on every return
 	// path below, including the early "first newline seen" cutoff, and (b)
@@ -181,7 +177,12 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return Completion{HTTPStatus: resp.StatusCode}, fmt.Errorf("provider: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return Completion{HTTPStatus: resp.StatusCode}, &Error{
+			Kind:       ClassifyHTTP(resp.StatusCode),
+			HTTPStatus: resp.StatusCode,
+			Provider:   c.Name(),
+			Err:        fmt.Errorf("provider: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+		}
 	}
 
 	// SSE parsing: the response body is a sequence of lines. Each event we
@@ -189,8 +190,6 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	// events but bufio.Scanner's default ScanLines split already gives us
 	// one line at a time, so we just filter for the "data:" prefix and skip
 	// everything else (blank keep-alive lines, comments, other fields).
-	var acc strings.Builder
-	var ttft time.Duration
 	var stopReason string
 	var inputTokens, outputTokens, cachedTokens int
 	scanner := bufio.NewScanner(resp.Body)
@@ -209,7 +208,7 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return Completion{HTTPStatus: resp.StatusCode}, fmt.Errorf("provider: malformed stream chunk: %w", err)
+			return Completion{HTTPStatus: resp.StatusCode}, &Error{Kind: ErrTransport, HTTPStatus: resp.StatusCode, Provider: c.Name(), Err: fmt.Errorf("provider: malformed stream chunk: %w", err)}
 		}
 
 		// METRICS(§12): usage lands on its own final chunk (choices may be
@@ -230,14 +229,6 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 			stopReason = chunk.Choices[0].FinishReason
 		}
 
-		delta := chunk.Choices[0].Delta.Content
-		if delta != "" && ttft == 0 {
-			// METRICS(§12): TTFT = time from just before c.http.Do to the
-			// first chunk with non-empty delta content.
-			ttft = time.Since(sendStart)
-		}
-		acc.WriteString(delta)
-
 		// First-line cutoff (design §4): as soon as the accumulated text
 		// contains a newline, we have a complete single-line suggestion and
 		// stop reading immediately — we don't need the rest of the
@@ -249,10 +240,10 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		// zero on this path. That's expected and acceptable — the cutoff is
 		// the whole point of streaming and must not be removed to chase
 		// usage stats.
-		if text := acc.String(); strings.ContainsRune(text, '\n') {
+		if stop := acc.Push(chunk.Choices[0].Delta.Content); stop {
 			return Completion{
-				Text:         text[:strings.IndexByte(text, '\n')],
-				TTFT:         ttft,
+				Text:         acc.Text(),
+				TTFT:         acc.TTFT(),
 				InputTokens:  inputTokens,
 				OutputTokens: outputTokens,
 				CachedTokens: cachedTokens,
@@ -267,19 +258,19 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		// aborted the read, and scanner.Err() would otherwise surface as an
 		// opaque wrapped "context canceled" from the transport anyway.
 		if ctx.Err() != nil {
-			return Completion{HTTPStatus: resp.StatusCode}, ctx.Err()
+			return Completion{HTTPStatus: resp.StatusCode}, &Error{Kind: ErrCanceled, HTTPStatus: resp.StatusCode, Provider: c.Name(), Err: ctx.Err()}
 		}
-		return Completion{HTTPStatus: resp.StatusCode}, fmt.Errorf("provider: read stream: %w", serr)
+		return Completion{HTTPStatus: resp.StatusCode}, &Error{Kind: ErrTransport, HTTPStatus: resp.StatusCode, Provider: c.Name(), Err: fmt.Errorf("provider: read stream: %w", serr)}
 	}
 	if ctx.Err() != nil {
-		return Completion{HTTPStatus: resp.StatusCode}, ctx.Err()
+		return Completion{HTTPStatus: resp.StatusCode}, &Error{Kind: ErrCanceled, HTTPStatus: resp.StatusCode, Provider: c.Name(), Err: ctx.Err()}
 	}
 
 	// Stream ended (EOF / [DONE] / max_tokens finish) with no newline seen:
 	// return whatever we accumulated as the whole (single-line) completion.
 	return Completion{
-		Text:         acc.String(),
-		TTFT:         ttft,
+		Text:         acc.Text(),
+		TTFT:         acc.TTFT(),
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		CachedTokens: cachedTokens,

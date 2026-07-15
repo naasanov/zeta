@@ -1,8 +1,9 @@
-// Package suggest adapts a provider.Client into the server's suggest seam.
+// Package suggest adapts a provider.Provider into the server's suggest seam.
 package suggest
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -13,7 +14,7 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// LLM adapts a provider.Client into the server's suggest seam
+// LLM adapts a provider.Provider into the server's suggest seam
 // (func(ctx, protocol.Request) (protocol.Reply, error)). It builds the
 // prompt from req.Buf plus whatever step-5 context fields (design §7) are
 // present on the request (see prompt.Build), calls the provider, and
@@ -21,19 +22,32 @@ import (
 // client strips that exact prefix before painting ghost text, so this
 // invariant is load-bearing, not cosmetic.
 //
+// Taking provider.Provider (the interface) rather than a concrete client is
+// the point of this seam: it makes LLM testable with a stub instead of an
+// httptest.Server (see TestLLM_StubProvider).
+//
 // METRICS(§12): emit, when non-nil, receives the "request" event built from
 // req + the provider's Completion stats after every call (success or
 // error). nil disables metrics entirely with zero added cost on this path.
-func LLM(client *provider.Client, log *slog.Logger, emit func(metrics.RequestEvent)) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
+func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent)) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
-		system, user := prompt.Build(req)
+		built := prompt.Build(req)
 
 		// METRICS(§12): suggest_ms is wall time around the provider call.
 		start := time.Now()
-		completion, err := client.Complete(ctx, system, user)
+		completion, err := p.Complete(ctx, provider.Request{Prompt: built})
 		suggestMs := float64(time.Since(start)) / float64(time.Millisecond)
 
 		if err != nil {
+			// METRICS(§12): error_type unwraps a *provider.Error to its Kind;
+			// empty string when the error isn't a *provider.Error (e.g. a
+			// bare ctx.Err() from somewhere else in the stack).
+			var errorType string
+			var perr *provider.Error
+			if errors.As(err, &perr) {
+				errorType = string(perr.Kind)
+			}
+
 			// METRICS(§12): a cancelled/superseded request (ctx.Err() != nil)
 			// gets its own event shape so cancellations are distinguishable
 			// from real provider errors in the log.
@@ -48,6 +62,9 @@ func LLM(client *provider.Client, log *slog.Logger, emit func(metrics.RequestEve
 					BufferLen:         len(req.Buf),
 					SuggestMs:         suggestMs,
 					HTTPStatus:        completion.HTTPStatus,
+					Provider:          p.Name(),
+					Model:             p.Model(),
+					ErrorType:         errorType,
 					PriceTableVersion: metrics.PriceTableVersion,
 				}
 				if ctx.Err() != nil {
@@ -88,7 +105,9 @@ func LLM(client *provider.Client, log *slog.Logger, emit func(metrics.RequestEve
 				CachedReadTokens:  completion.CachedTokens,
 				HTTPStatus:        completion.HTTPStatus,
 				StopReason:        completion.StopReason,
-				CostUSD:           metrics.CostUSD(client.Model(), completion.InputTokens, completion.OutputTokens, completion.CachedTokens),
+				Provider:          p.Name(),
+				Model:             p.Model(),
+				CostUSD:           metrics.CostUSD(p.Name(), p.Model(), completion.InputTokens, completion.OutputTokens, completion.CachedTokens),
 				PriceTableVersion: metrics.PriceTableVersion,
 			})
 		}

@@ -85,9 +85,13 @@ func main() {
 	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
 		baseURL := envOr("ZSH_AUTOPILOT_BASE_URL", defaultBaseURL)
 		model := envOr("ZSH_AUTOPILOT_MODEL", defaultModel)
-		client := provider.NewClient(baseURL, model, apiKey, defaultMaxTokens)
-		srv.SetSuggest(suggest.LLM(client, log, emit))
-		log.Info("llm mode", "base_url", baseURL, "model", model)
+		client, err := provider.NewOpenAI(baseURL, model, apiKey, defaultMaxTokens)
+		if err != nil {
+			log.Error("failed to construct openai provider, falling back to echo mode", "err", err)
+		} else {
+			srv.SetSuggest(suggest.LLM(client, log, emit))
+			log.Info("llm mode", "base_url", baseURL, "model", model)
+		}
 	} else {
 		log.Info("echo mode: GROQ_API_KEY not set, using placeholder suggestions")
 	}

@@ -13,6 +13,17 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
+// newOpenAI is a small test helper around provider.NewOpenAI, which now
+// returns an error (the Provider constructor signature added in T1).
+func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) provider.Provider {
+	t.Helper()
+	p, err := provider.NewOpenAI(baseURL, model, apiKey, maxTokens)
+	if err != nil {
+		t.Fatalf("provider.NewOpenAI() err = %v, want nil", err)
+	}
+	return p
+}
+
 // METRICS(§12): TestLLM_EmitsRequestEvent drives suggest.LLM against a fake
 // OpenAI-compatible server and asserts the "request" event handed to emit
 // carries the expected field mapping from the request + the provider's
@@ -31,7 +42,7 @@ func TestLLM_EmitsRequestEvent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := provider.NewClient(srv.URL, "llama-3.3-70b-versatile", "test-key", 48)
+	client := newOpenAI(t, srv.URL, "llama-3.3-70b-versatile", "test-key", 48)
 
 	var got []metrics.RequestEvent
 	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
@@ -97,6 +108,12 @@ func TestLLM_EmitsRequestEvent(t *testing.T) {
 	if ev.HTTPStatus != http.StatusOK {
 		t.Errorf("ev.HTTPStatus = %d, want %d", ev.HTTPStatus, http.StatusOK)
 	}
+	if ev.Provider != "openai" {
+		t.Errorf("ev.Provider = %q, want %q", ev.Provider, "openai")
+	}
+	if ev.Model != "llama-3.3-70b-versatile" {
+		t.Errorf("ev.Model = %q, want %q", ev.Model, "llama-3.3-70b-versatile")
+	}
 	if ev.PriceTableVersion != metrics.PriceTableVersion {
 		t.Errorf("ev.PriceTableVersion = %d, want %d", ev.PriceTableVersion, metrics.PriceTableVersion)
 	}
@@ -117,7 +134,7 @@ func TestLLM_NilEmitDoesNotPanic(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := provider.NewClient(srv.URL, "test-model", "test-key", 48)
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
 	fn := LLM(client, slog.Default(), nil)
 
 	req := protocol.Request{V: protocol.Version, ID: "s.1", Kind: protocol.KindTyping, Buf: "git"}
@@ -146,7 +163,7 @@ func TestLLM_CancelledEmitsCancelledEvent(t *testing.T) {
 	defer srv.Close()
 	defer close(blockCh)
 
-	client := provider.NewClient(srv.URL, "test-model", "test-key", 48)
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
 
 	var got []metrics.RequestEvent
 	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
@@ -169,5 +186,89 @@ func TestLLM_CancelledEmitsCancelledEvent(t *testing.T) {
 	}
 	if got[0].CancelledAtStage != "in_flight" {
 		t.Errorf("ev.CancelledAtStage = %q, want %q", got[0].CancelledAtStage, "in_flight")
+	}
+}
+
+// stubProvider is a minimal provider.Provider for testing suggest.LLM
+// without spinning up an httptest.Server — the payoff of taking the
+// interface instead of a concrete *provider client (T1's whole point).
+type stubProvider struct {
+	completion provider.Completion
+	err        error
+	name       string
+	model      string
+}
+
+func (s stubProvider) Complete(ctx context.Context, req provider.Request) (provider.Completion, error) {
+	return s.completion, s.err
+}
+func (s stubProvider) Name() string  { return s.name }
+func (s stubProvider) Model() string { return s.model }
+
+// TestLLM_StubProvider demonstrates the new seam: suggest.LLM works against
+// any provider.Provider, not just the httptest-backed openai client, and
+// still preserves the req.Buf + suffix reply invariant and correctly
+// forwards Name()/Model() into the emitted "request" event.
+func TestLLM_StubProvider(t *testing.T) {
+	stub := stubProvider{
+		completion: provider.Completion{
+			Text:         " status",
+			InputTokens:  5,
+			OutputTokens: 1,
+			HTTPStatus:   200,
+			StopReason:   "stop",
+		},
+		name:  "codestral",
+		model: "codestral-latest",
+	}
+
+	var got []metrics.RequestEvent
+	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
+	fn := LLM(stub, slog.Default(), emit)
+
+	req := protocol.Request{V: protocol.Version, ID: "s.1", Kind: protocol.KindTyping, Buf: "git"}
+	reply, err := fn(context.Background(), req)
+	if err != nil {
+		t.Fatalf("LLM() err = %v, want nil", err)
+	}
+	if want := "git status"; reply.Suggestion != want {
+		t.Errorf("reply.Suggestion = %q, want %q", reply.Suggestion, want)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("emit called %d times, want 1", len(got))
+	}
+	if got[0].Provider != "codestral" {
+		t.Errorf("ev.Provider = %q, want %q", got[0].Provider, "codestral")
+	}
+	if got[0].Model != "codestral-latest" {
+		t.Errorf("ev.Model = %q, want %q", got[0].Model, "codestral-latest")
+	}
+}
+
+// TestLLM_StubProviderErrorSetsErrorType asserts a *provider.Error on the
+// failure path is unwrapped into the "request" event's ErrorType field.
+func TestLLM_StubProviderErrorSetsErrorType(t *testing.T) {
+	stub := stubProvider{
+		err:   &provider.Error{Kind: provider.ErrRateLimited, HTTPStatus: 429, Provider: "codestral"},
+		name:  "codestral",
+		model: "codestral-latest",
+	}
+
+	var got []metrics.RequestEvent
+	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
+	fn := LLM(stub, slog.Default(), emit)
+
+	req := protocol.Request{V: protocol.Version, ID: "s.1", Kind: protocol.KindTyping, Buf: "git"}
+	_, err := fn(context.Background(), req)
+	if err == nil {
+		t.Fatalf("LLM() err = nil, want non-nil")
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("emit called %d times, want 1", len(got))
+	}
+	if got[0].ErrorType != string(provider.ErrRateLimited) {
+		t.Errorf("ev.ErrorType = %q, want %q", got[0].ErrorType, provider.ErrRateLimited)
 	}
 }

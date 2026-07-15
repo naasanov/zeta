@@ -86,14 +86,41 @@ func contextBlock(req protocol.Request) string {
 	return "Context:\n" + strings.Join(lines, "\n") + "\n\n"
 }
 
-// Build assembles the provider turns for a request. The system turn is
-// intentionally mode-independent; KindTyping and KindNextCommand differ only in
-// the short user-turn directive next to the buffer.
-func Build(req protocol.Request) (system, user string) {
-	ctxBlock := contextBlock(req)
-	userPrefix := typingUserPrefix
+// Prompt is the provider-neutral prompt. Adapters render it their own way:
+// chat adapters build messages (System + ChatUser()), the FIM adapter builds
+// prompt+suffix directly from Prefix/Suffix.
+type Prompt struct {
+	System      string // stable across every request — the prompt-cache anchor
+	Instruction string // typing vs next-command append contract; static per mode
+	Context     string // "Context:\n cwd: ...\n" — changes on chpwd/precmd
+	Prefix      string // the buffer being completed; may be ""
+	Suffix      string // always "" in Phase 2; the FIM infill hook
+}
+
+// Build assembles the provider-neutral Prompt for a request. The system turn
+// is intentionally mode-independent; KindTyping and KindNextCommand differ
+// only in the short user-turn directive next to the buffer.
+func Build(req protocol.Request) Prompt {
+	instruction := typingUserPrefix
 	if req.Kind == protocol.KindNextCommand {
-		userPrefix = nextCommandUserPrefix
+		instruction = nextCommandUserPrefix
 	}
-	return systemPrompt, ctxBlock + userPrefix + req.Buf
+	return Prompt{
+		System:      systemPrompt,
+		Instruction: instruction,
+		Context:     contextBlock(req),
+		Prefix:      req.Buf,
+		Suffix:      "",
+	}
+}
+
+// ChatUser renders the user turn for chat adapters. It reproduces today's
+// exact user-turn string byte for byte: Context + Instruction + Prefix, with
+// Prefix last so the completion continues directly from the buffer.
+//
+// T4 reorders this to Instruction-before-Context for prompt caching (a stable
+// instruction prefix caches better than one that varies with context); that
+// reorder is NOT done here — this ticket is zero-behavior-change only.
+func (p Prompt) ChatUser() string {
+	return p.Context + p.Instruction + p.Prefix
 }
