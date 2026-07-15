@@ -50,6 +50,14 @@ func NewClient(baseURL, model, apiKey string, maxTokens int) *Client {
 	}
 }
 
+// Model returns the model name this Client was constructed with.
+//
+// METRICS(§12): used by internal/suggest to look up pricing for the
+// "request" event's cost_usd field.
+func (c *Client) Model() string {
+	return c.model
+}
+
 // chatMessage and chatRequest mirror just the subset of the OpenAI
 // chat-completions request schema this client needs.
 type chatMessage struct {
@@ -62,16 +70,64 @@ type chatRequest struct {
 	Messages  []chatMessage `json:"messages"`
 	MaxTokens int           `json:"max_tokens"`
 	Stream    bool          `json:"stream"`
+	// METRICS(§12): ask the OpenAI-compatible endpoint to emit a final SSE
+	// chunk carrying a usage object (prompt/completion token counts), which
+	// streamChunk.Usage below decodes. Harmless to leave wired even if
+	// metrics are stripped later — it's a cheap byproduct, not a metrics
+	// dependency.
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// METRICS(§12): streamOptions requests the trailing usage chunk.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // streamChunk mirrors one SSE "data:" event's JSON payload — just enough to
-// pull out the incremental token(s) in choices[0].delta.content.
+// pull out the incremental token(s) in choices[0].delta.content, plus
+// (METRICS §12) choices[0].finish_reason and a top-level usage object that
+// arrives on the final chunk when stream_options.include_usage is set.
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
 			Content string `json:"content"`
 		} `json:"delta"`
+		// METRICS(§12): finish_reason ("stop", "length", ...) is set on the
+		// last per-choice chunk.
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	// METRICS(§12): usage arrives on its own final chunk (choices may be
+	// empty on that chunk). Decoded defensively — absent/zero is fine and
+	// expected whenever the first-line cutoff returns before this chunk
+	// arrives.
+	Usage *streamUsage `json:"usage"`
+}
+
+// METRICS(§12): streamUsage mirrors the OpenAI-compatible usage object.
+// Cached input tokens live under prompt_tokens_details.cached_tokens in the
+// OpenAI-compatible shape; decoded defensively since providers vary in
+// whether they populate it.
+type streamUsage struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+// Completion is the result of a successful (or partially successful, on the
+// HTTP-error path) Complete call: the suggestion text plus METRICS(§12)
+// provider-internal stats used to build the "request" event. HTTPStatus is
+// populated even on error returns so the caller can log the status of a
+// failed call.
+type Completion struct {
+	Text         string
+	TTFT         time.Duration
+	InputTokens  int
+	OutputTokens int
+	CachedTokens int
+	HTTPStatus   int
+	StopReason   string
 }
 
 // Complete issues a streaming chat-completions request and returns the
@@ -81,7 +137,7 @@ type streamChunk struct {
 // NewRequestWithContext, so cancelling ctx (e.g. because a newer keystroke
 // superseded this request — see server.handle) aborts the call, including
 // mid-stream reads of the response body.
-func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (Completion, error) {
 	reqBody := chatRequest{
 		Model: c.model,
 		Messages: []chatMessage{
@@ -90,26 +146,32 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		},
 		MaxTokens: c.maxTokens,
 		Stream:    true,
+		// METRICS(§12): request the trailing usage chunk.
+		StreamOptions: &streamOptions{IncludeUsage: true},
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("provider: marshal request: %w", err)
+		return Completion{}, fmt.Errorf("provider: marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("provider: build request: %w", err)
+		return Completion{}, fmt.Errorf("provider: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
+
+	// METRICS(§12): TTFT is measured from just before the round trip starts
+	// to the first chunk carrying non-empty delta content (below).
+	sendStart := time.Now()
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		// Covers network errors AND ctx cancellation/deadline (http.Client.Do
 		// returns ctx.Err(), possibly wrapped, when ctx ends before or during
 		// the round trip).
-		return "", fmt.Errorf("provider: request: %w", err)
+		return Completion{}, fmt.Errorf("provider: request: %w", err)
 	}
 	// Closing the body (a) prevents leaking the connection on every return
 	// path below, including the early "first newline seen" cutoff, and (b)
@@ -119,7 +181,7 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("provider: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return Completion{HTTPStatus: resp.StatusCode}, fmt.Errorf("provider: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	// SSE parsing: the response body is a sequence of lines. Each event we
@@ -128,6 +190,9 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	// one line at a time, so we just filter for the "data:" prefix and skip
 	// everything else (blank keep-alive lines, comments, other fields).
 	var acc strings.Builder
+	var ttft time.Duration
+	var stopReason string
+	var inputTokens, outputTokens, cachedTokens int
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -144,21 +209,56 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return "", fmt.Errorf("provider: malformed stream chunk: %w", err)
+			return Completion{HTTPStatus: resp.StatusCode}, fmt.Errorf("provider: malformed stream chunk: %w", err)
+		}
+
+		// METRICS(§12): usage lands on its own final chunk (choices may be
+		// empty there), so this check must happen before the len==0 skip
+		// below.
+		if chunk.Usage != nil {
+			inputTokens = chunk.Usage.PromptTokens
+			outputTokens = chunk.Usage.CompletionTokens
+			if chunk.Usage.PromptTokensDetails != nil {
+				cachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
 		}
 
-		acc.WriteString(chunk.Choices[0].Delta.Content)
+		if chunk.Choices[0].FinishReason != "" {
+			stopReason = chunk.Choices[0].FinishReason
+		}
+
+		delta := chunk.Choices[0].Delta.Content
+		if delta != "" && ttft == 0 {
+			// METRICS(§12): TTFT = time from just before c.http.Do to the
+			// first chunk with non-empty delta content.
+			ttft = time.Since(sendStart)
+		}
+		acc.WriteString(delta)
 
 		// First-line cutoff (design §4): as soon as the accumulated text
 		// contains a newline, we have a complete single-line suggestion and
 		// stop reading immediately — we don't need the rest of the
 		// completion (often prose/explanation past the first line), and
 		// returning now is the whole point of streaming at all.
+		//
+		// METRICS(§12) note: this returns before the trailing usage chunk
+		// arrives, so InputTokens/OutputTokens/CachedTokens will typically be
+		// zero on this path. That's expected and acceptable — the cutoff is
+		// the whole point of streaming and must not be removed to chase
+		// usage stats.
 		if text := acc.String(); strings.ContainsRune(text, '\n') {
-			return text[:strings.IndexByte(text, '\n')], nil
+			return Completion{
+				Text:         text[:strings.IndexByte(text, '\n')],
+				TTFT:         ttft,
+				InputTokens:  inputTokens,
+				OutputTokens: outputTokens,
+				CachedTokens: cachedTokens,
+				HTTPStatus:   resp.StatusCode,
+				StopReason:   stopReason,
+			}, nil
 		}
 	}
 
@@ -167,15 +267,23 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		// aborted the read, and scanner.Err() would otherwise surface as an
 		// opaque wrapped "context canceled" from the transport anyway.
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return Completion{HTTPStatus: resp.StatusCode}, ctx.Err()
 		}
-		return "", fmt.Errorf("provider: read stream: %w", serr)
+		return Completion{HTTPStatus: resp.StatusCode}, fmt.Errorf("provider: read stream: %w", serr)
 	}
 	if ctx.Err() != nil {
-		return "", ctx.Err()
+		return Completion{HTTPStatus: resp.StatusCode}, ctx.Err()
 	}
 
 	// Stream ended (EOF / [DONE] / max_tokens finish) with no newline seen:
 	// return whatever we accumulated as the whole (single-line) completion.
-	return acc.String(), nil
+	return Completion{
+		Text:         acc.String(),
+		TTFT:         ttft,
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		CachedTokens: cachedTokens,
+		HTTPStatus:   resp.StatusCode,
+		StopReason:   stopReason,
+	}, nil
 }

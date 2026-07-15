@@ -20,8 +20,7 @@ __debug_bin*
 !.vscode/tasks.json
 !.vscode/launch.json
 
-# Sandbox-local history
+# Sandbox
 sandbox/.zsh_history
-
-# Local secrets / env (API keys). Committed template: sandbox/.env.example
 sandbox/.env
+sandbox/.metrics/events.jsonl

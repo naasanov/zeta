@@ -51,6 +51,8 @@ _zsh_autopilot_send() {
 
   (( _ZSH_AUTOPILOT_SEQ++ ))
   typeset -g _ZSH_AUTOPILOT_REQ_ID="${ZSH_AUTOPILOT_SESSION_ID}.${_ZSH_AUTOPILOT_SEQ}"
+  # METRICS(§12): capture the send-time anchor for total_latency_ms.
+  whence -w _zsh_autopilot_metric_t0 &>/dev/null && _zsh_autopilot_metric_t0
 
   local REPLY
   _zsh_autopilot_json_escape "$buffer"
@@ -119,6 +121,10 @@ _zsh_autopilot_receive() {
   local suggestion
   _zsh_autopilot_json_str_field "$line" source && reply_source=$REPLY
   _zsh_autopilot_json_str_field "$line" suggestion && suggestion=$REPLY || return
+
+  # METRICS(§12): the reply matched our current request and is about to be
+  # painted — this is the "shown" event's paint anchor.
+  whence -w _zsh_autopilot_metric_shown &>/dev/null && _zsh_autopilot_metric_shown "$_ZSH_AUTOPILOT_REQ_ID" "$suggestion"
 
   zle autopilot-suggest -- "$reply_source" "$suggestion"
 }

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/logging"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/metrics"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/server"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/suggest"
@@ -55,19 +56,41 @@ func main() {
 	srv := server.New(*socket, log)
 	srv.Debounce = debounceFromEnv(log)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// METRICS(§12): dev-only JSONL event log, dogfooding-only and stripped in
+	// Phase 3 (see internal/metrics). Fully independent of the provider gate
+	// below — metrics can run even in echo mode, but the "request" event
+	// only exists on the LLM path since only suggest.LLM has anything to
+	// report.
+	var emit func(metrics.RequestEvent)
+	if cfg, ok := metrics.ConfigFromEnv(); ok {
+		mlog, err := metrics.New(cfg.LogPath, cfg.User)
+		if err != nil {
+			log.Error("metrics: failed to open log, metrics disabled", "path", cfg.LogPath, "err", err)
+		} else {
+			defer mlog.Close()
+			go func() {
+				if err := metrics.Serve(ctx, cfg.SocketPath, mlog, log); err != nil {
+					log.Error("metrics: serve exited", "err", err)
+				}
+			}()
+			emit = mlog.EmitRequest
+			log.Info("metrics enabled", "log", cfg.LogPath, "socket", cfg.SocketPath, "user", cfg.User)
+		}
+	}
+
 	// Keys never travel via flags/argv (they'd show up in `ps`); env only.
 	if apiKey := os.Getenv("GROQ_API_KEY"); apiKey != "" {
 		baseURL := envOr("ZSH_AUTOPILOT_BASE_URL", defaultBaseURL)
 		model := envOr("ZSH_AUTOPILOT_MODEL", defaultModel)
 		client := provider.NewClient(baseURL, model, apiKey, defaultMaxTokens)
-		srv.SetSuggest(suggest.LLM(client, log))
+		srv.SetSuggest(suggest.LLM(client, log, emit))
 		log.Info("llm mode", "base_url", baseURL, "model", model)
 	} else {
 		log.Info("echo mode: GROQ_API_KEY not set, using placeholder suggestions")
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	if err := srv.Run(ctx); err != nil {
 		log.Error("daemon exited", "err", err)

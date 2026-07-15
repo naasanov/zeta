@@ -53,6 +53,9 @@ _zsh_autopilot_track_history() {
   local cmd="$1"
   [[ -z $cmd ]] && return
 
+  # METRICS(§12): signal that a previously accepted suggestion actually ran.
+  whence -w _zsh_autopilot_metric_executed &>/dev/null && _zsh_autopilot_metric_executed
+
   _ZSH_AUTOPILOT_HISTORY+=("$cmd")
 
   local -i max=${ZSH_AUTOPILOT_HISTORY_SIZE:-10}

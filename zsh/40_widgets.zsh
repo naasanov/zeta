@@ -8,6 +8,9 @@ _zsh_autopilot_clear() {
   # Remove the suggestion
   POSTDISPLAY=
 
+  # METRICS(§12): outcome cleared
+  whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome cleared
+
   _zsh_autopilot_invoke_original_widget $@
 }
 
@@ -42,6 +45,10 @@ _zsh_autopilot_modify() {
     POSTDISPLAY="${orig_postdisplay:$(($#BUFFER - $#orig_buffer))}"
     return $retval
   fi
+
+  # METRICS(§12): buffer diverged from the shown suggestion (a real edit, not
+  # just typing into it) — the suggestion was dropped instead of accepted.
+  whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome typed_over
 
   # Bail out if suggestions are disabled (latent kill-switch: set
   # _ZSH_AUTOPILOT_DISABLED to suppress fetching)
@@ -111,11 +118,17 @@ _zsh_autopilot_accept() {
   fi
 
   # Only accept if the cursor is at the end of the buffer
+  # METRICS(§12): capture the accepted length before POSTDISPLAY is blanked.
+  local _zsh_autopilot_metrics_accepted_chars=$#POSTDISPLAY
+
   # Add the suggestion to the buffer
   BUFFER="$BUFFER$POSTDISPLAY"
 
   # Remove the suggestion
   POSTDISPLAY=
+
+  # METRICS(§12): outcome accepted
+  whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome accepted "$_zsh_autopilot_metrics_accepted_chars"
 
   # Run the original widget before manually moving the cursor so that the
   # cursor movement doesn't make the widget do something unexpected
@@ -172,6 +185,9 @@ _zsh_autopilot_partial_accept() {
 
     # Clip the buffer at the cursor
     BUFFER="${BUFFER[1,$cursor_loc]}"
+
+    # METRICS(§12): outcome partial_accepted, accepted_chars = chars actually taken
+    whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome partial_accepted "$(( cursor_loc - $#original_buffer ))"
   else
     # Restore the original buffer
     BUFFER="$original_buffer"

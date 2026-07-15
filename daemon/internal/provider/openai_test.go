@@ -49,8 +49,11 @@ func TestComplete_HappyPath(t *testing.T) {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
 	want := `git commit -m "wip"`
-	if got != want {
-		t.Errorf("Complete() = %q, want %q", got, want)
+	if got.Text != want {
+		t.Errorf("Complete().Text = %q, want %q", got.Text, want)
+	}
+	if got.HTTPStatus != http.StatusOK {
+		t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, http.StatusOK)
 	}
 }
 
@@ -94,8 +97,8 @@ func TestComplete_FirstLineCutoff(t *testing.T) {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
 	want := "foo bar"
-	if got != want {
-		t.Errorf("Complete() = %q, want %q", got, want)
+	if got.Text != want {
+		t.Errorf("Complete().Text = %q, want %q", got.Text, want)
 	}
 	if elapsed >= lateDelay {
 		t.Errorf("Complete() took %v, want well under the %v late-chunk delay (client did not stop early)", elapsed, lateDelay)
@@ -158,8 +161,57 @@ func TestComplete_HTTPError(t *testing.T) {
 			client := NewClient(srv.URL, "test-model", "test-key", 48)
 			got, err := client.Complete(context.Background(), "sys", "user")
 			if err == nil {
-				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got)
+				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got.Text)
+			}
+			// METRICS(§12): HTTPStatus must still be populated on the error
+			// return so the caller can log/emit the status of a failed call.
+			if got.HTTPStatus != status {
+				t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, status)
 			}
 		})
+	}
+}
+
+// METRICS(§12): TestComplete_UsageAndFinishReason drives a stream that ends
+// (no newline in the content, so the first-line cutoff doesn't fire) with a
+// trailing usage chunk and a finish_reason, asserting both decode onto the
+// returned Completion.
+func TestComplete_UsageAndFinishReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"git status"},"finish_reason":null}]}`+"\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":42,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":10}}}`+"\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), "sys", "user")
+	if err != nil {
+		t.Fatalf("Complete() err = %v, want nil", err)
+	}
+
+	if got.Text != "git status" {
+		t.Errorf("Complete().Text = %q, want %q", got.Text, "git status")
+	}
+	if got.StopReason != "stop" {
+		t.Errorf("Complete().StopReason = %q, want %q", got.StopReason, "stop")
+	}
+	if got.InputTokens != 42 {
+		t.Errorf("Complete().InputTokens = %d, want 42", got.InputTokens)
+	}
+	if got.OutputTokens != 7 {
+		t.Errorf("Complete().OutputTokens = %d, want 7", got.OutputTokens)
+	}
+	if got.CachedTokens != 10 {
+		t.Errorf("Complete().CachedTokens = %d, want 10", got.CachedTokens)
+	}
+	if got.TTFT <= 0 {
+		t.Errorf("Complete().TTFT = %v, want > 0", got.TTFT)
 	}
 }
