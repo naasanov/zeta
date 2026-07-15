@@ -1,4 +1,4 @@
-package main
+package prompt
 
 import (
 	"strings"
@@ -106,7 +106,7 @@ func TestBufferStaysLastInAssembledUserMessage(t *testing.T) {
 		Cwd:  "/Users/x/project", GitBranch: "main", GitDirty: true, LastExit: 1,
 		History: []string{"cd project", "npm install", "npm test"},
 	}
-	_, user := buildPrompt(req)
+	_, user := Build(req)
 	if !strings.HasSuffix(user, req.Buf) {
 		t.Errorf("expected assembled user message to end with req.Buf %q, got:\n%s", req.Buf, user)
 	}
@@ -116,8 +116,8 @@ func TestBufferStaysLastInAssembledUserMessage(t *testing.T) {
 // next-command prediction the same append contract as typing completion, just
 // with an empty buffer and a different user-turn directive.
 func TestPromptUsesOneSystemPromptForBothModes(t *testing.T) {
-	typingSystem, typingUser := buildPrompt(protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"})
-	nextSystem, nextUser := buildPrompt(protocol.Request{Kind: protocol.KindNextCommand, Buf: ""})
+	typingSystem, typingUser := Build(protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"})
+	nextSystem, nextUser := Build(protocol.Request{Kind: protocol.KindNextCommand, Buf: ""})
 
 	if typingSystem != systemPrompt {
 		t.Errorf("typing request used unexpected system prompt")
@@ -147,7 +147,7 @@ func TestNextCommandPromptCarriesContextAndNoFakeBufferMarker(t *testing.T) {
 		GitBranch: "main",
 		History:   []string{"npm test"},
 	}
-	_, user := buildPrompt(req)
+	_, user := Build(req)
 
 	for _, want := range []string{
 		"Context:",

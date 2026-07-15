@@ -1,4 +1,4 @@
-package main
+package logging
 
 import (
 	"context"
@@ -27,7 +27,7 @@ type compactHandler struct {
 	group string // dotted group prefix for keys, "" if none
 }
 
-func newCompactHandler(w io.Writer, level slog.Level) *compactHandler {
+func NewCompactHandler(w io.Writer, level slog.Level) *compactHandler {
 	return &compactHandler{mu: &sync.Mutex{}, w: w, level: level}
 }
 

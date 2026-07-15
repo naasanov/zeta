@@ -14,18 +14,17 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/logging"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/server"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/suggest"
 )
 
 // Groq defaults (design §4/§6): Groq is the fastest OpenAI-compatible option
@@ -40,38 +39,6 @@ const (
 	defaultMaxTokens = 48
 )
 
-// systemPrompt tells the model to emit only the text to append to the command
-// buffer. Typing completion and next-command prediction intentionally share
-// this one stable system prompt: next-command is just the append contract with
-// an empty buffer. Two properties are load-bearing and tuned by dogfooding
-// (design §235):
-//   - Spacing: the reply is req.Buf + suffix with nothing inserted between, so
-//     the model must supply the leading space itself when the completion starts
-//     a new word (otherwise "git add" + "." => "git add.").
-//   - Restraint: prefer a short completion and stop before free-form input it
-//     cannot know (a commit message, a filename) instead of fabricating one. A
-//     partial completion is useful; the whole command is not required.
-//
-// The model's OUTPUT must stay single-line (provider.Complete cuts at the first
-// newline). The prompt itself may span multiple lines. The « » in the examples
-// only mark exact output boundaries so leading spaces are visible.
-const systemPrompt = `You are a shell command suggestion engine. You receive a shell command buffer and output only the text to append at the end — nothing else. When the buffer is empty, the appended text may be a complete next command.
-
-Rules:
-- Your output is appended verbatim, with NO separator added. Begin with a space when the completion starts a new word or argument; begin with no space when finishing the current word.
-- Never repeat or restate a non-empty buffer.
-- Prefer a SHORT, high-confidence completion. A partial completion is useful — you do NOT need to produce the whole command.
-- Never invent specifics you cannot know: commit messages, file names, branch names, URLs, values. Stop right before such free-form input (for example, end at the opening quote).
-- Output a single line. No explanation, no markdown, no backticks.
-- If nothing useful comes to mind, output nothing.
-
-Examples — everything after the arrow indicates the exact output (leading spaces included)
-git ad =>d
-git add => .
-git add -A => && git commit -m "
-git commit -m  => "
-docker run => -it `
-
 func main() {
 	socket := flag.String("socket", server.DefaultSocket, "unix socket path to listen on")
 	verbose := flag.Bool("v", false, "enable debug logging")
@@ -82,8 +49,8 @@ func main() {
 		level = slog.LevelDebug
 	}
 	// compactHandler keeps the dev log panel terse: "HH:MM:SS.mmm L msg key=val"
-	// instead of slog's verbose time=/level=/msg= prefix (see logging.go).
-	log := slog.New(newCompactHandler(os.Stderr, level))
+	// instead of slog's verbose time=/level=/msg= prefix (see internal/logging).
+	log := slog.New(logging.NewCompactHandler(os.Stderr, level))
 
 	srv := server.New(*socket, log)
 	srv.Debounce = debounceFromEnv(log)
@@ -93,7 +60,7 @@ func main() {
 		baseURL := envOr("ZSH_AUTOPILOT_BASE_URL", defaultBaseURL)
 		model := envOr("ZSH_AUTOPILOT_MODEL", defaultModel)
 		client := provider.NewClient(baseURL, model, apiKey, defaultMaxTokens)
-		srv.SetSuggest(llmSuggest(client, log))
+		srv.SetSuggest(suggest.LLM(client, log))
 		log.Info("llm mode", "base_url", baseURL, "model", model)
 	} else {
 		log.Info("echo mode: GROQ_API_KEY not set, using placeholder suggestions")
@@ -132,96 +99,4 @@ func debounceFromEnv(log *slog.Logger) time.Duration {
 		return server.DefaultDebounce
 	}
 	return time.Duration(ms) * time.Millisecond
-}
-
-// User-turn directives are deliberately outside the system prompt so typing and
-// next-command can share one cacheable system prefix. For typing, placing the
-// spacing directive right next to the input gives it more attention on instruct
-// models than the system prompt alone — empirically this fixed the model
-// dropping leading spaces. req.Buf stays at the very end so the completion
-// continues directly from it, and the static prefix here is still a stable cache
-// prefix for Phase 2 prompt caching.
-const (
-	typingUserPrefix      = "Complete this command, keeping any needed leading space:\n"
-	nextCommandUserPrefix = "The prompt is empty. Based on the recent commands and context above, predict the single most likely next command. Keep it short and common:\n"
-)
-
-// contextBlock renders whatever step-5 context fields (design §7) are present
-// on req into a compact "Context:" block for the user turn, one line per
-// present field, omitting lines for absent/zero fields entirely (no "git:"
-// line without a branch, no "last command" line when LastExit == 0, no
-// "recent commands" line with empty History). It returns "" when no context
-// fields are present at all, so callers can skip the block cleanly.
-//
-// This is a pure function (no I/O) so it's unit-testable without a running
-// daemon or provider.
-func contextBlock(req protocol.Request) string {
-	var lines []string
-	if req.Cwd != "" {
-		lines = append(lines, "- cwd: "+req.Cwd)
-	}
-	if req.GitBranch != "" {
-		branch := "- git: branch " + req.GitBranch
-		if req.GitDirty {
-			branch += " (dirty)"
-		}
-		lines = append(lines, branch)
-	}
-	if req.LastExit != 0 {
-		lines = append(lines, "- last command failed (exit "+strconv.Itoa(req.LastExit)+")")
-	}
-	if len(req.History) > 0 {
-		lines = append(lines, "- recent commands: "+strings.Join(req.History, "; "))
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	return "Context:\n" + strings.Join(lines, "\n") + "\n\n"
-}
-
-// buildPrompt assembles the provider turns for a request. The system turn is
-// intentionally mode-independent; KindTyping and KindNextCommand differ only in
-// the short user-turn directive next to the buffer.
-func buildPrompt(req protocol.Request) (system, user string) {
-	ctxBlock := contextBlock(req)
-	userPrefix := typingUserPrefix
-	if req.Kind == protocol.KindNextCommand {
-		userPrefix = nextCommandUserPrefix
-	}
-	return systemPrompt, ctxBlock + userPrefix + req.Buf
-}
-
-// llmSuggest adapts a provider.Client into the server's suggest seam
-// (func(ctx, protocol.Request) (protocol.Reply, error)). It builds the
-// prompt from req.Buf plus whatever step-5 context fields (design §7) are
-// present on the request (see contextBlock), calls the provider, and
-// assembles the reply so Suggestion always starts with req.Buf: the zsh
-// client strips that exact prefix before painting ghost text, so this
-// invariant is load-bearing, not cosmetic.
-func llmSuggest(client *provider.Client, log *slog.Logger) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
-	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
-		system, user := buildPrompt(req)
-
-		// TEMP(debug): dump the exact prompt sent to the LLM — the assembled
-		// context block + directive + buffer — so we can eyeball what the model
-		// actually sees. Gated behind -v. Remove before shipping.
-		if log.Enabled(ctx, slog.LevelDebug) {
-			fmt.Fprintf(os.Stderr, "\n=== llm prompt (id=%s) ===\n[system]\n%s\n[user]\n%s\n=== end prompt ===\n\n", req.ID, system, user)
-		}
-
-		suffix, err := client.Complete(ctx, system, user)
-		if err != nil {
-			// Coordinator logs and skips the write on error — graceful
-			// degradation, no ghost text for this request.
-			return protocol.Reply{}, err
-		}
-		suffix = strings.TrimRight(suffix, " \t\r\n")
-
-		return protocol.Reply{
-			V:          protocol.Version,
-			ID:         req.ID,
-			Source:     protocol.SourceLLM,
-			Suggestion: req.Buf + suffix,
-		}, nil
-	}
 }
