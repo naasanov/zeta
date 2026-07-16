@@ -28,6 +28,11 @@ func TestAccumulator_CutoffMidDelta(t *testing.T) {
 	if got, want := a.Text(), "foo bar"; got != want {
 		t.Errorf("Text() = %q, want %q", got, want)
 	}
+	// Raw() keeps everything past the newline that Text() drops — the codestral
+	// separator cutoff reads the pre-newline buffer through it.
+	if got, want := a.Raw(), "foo bar\nbaz-should-not-appear"; got != want {
+		t.Errorf("Raw() = %q, want %q", got, want)
+	}
 }
 
 func TestAccumulator_CutoffOnExactNewlineDelta(t *testing.T) {

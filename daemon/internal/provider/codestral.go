@@ -44,18 +44,38 @@ var fimStopSequences = []string{"\n"}
 // rather than as a stop sequence precisely so a leading separator becomes the
 // real command instead of nuking the whole suggestion.
 func firstShellCommand(s string) string {
-	s = strings.TrimLeft(s, " \t")
-	for {
-		t := strings.TrimLeft(strings.TrimPrefix(strings.TrimPrefix(s, "&&"), ";"), " \t")
-		if t == s {
-			break
-		}
-		s = t
-	}
+	s = stripLeadingSeparators(s)
 	if i := indexSeparator(s); i >= 0 {
 		s = s[:i]
 	}
 	return strings.TrimRight(s, " \t")
+}
+
+// firstCommandComplete reports whether s already holds a complete first
+// command followed by a separator — meaning we can stop reading the stream
+// early, because everything past that separator would be discarded by
+// firstShellCommand anyway. Leading separators are stripped first so a
+// next-command prediction that opens with "; " is NOT treated as complete
+// before its real command has streamed in (that was the empty-output bug the
+// ";" stop sequence caused). Returns false while only a leading separator has
+// arrived, or while the first command is still streaming.
+func firstCommandComplete(s string) bool {
+	return indexSeparator(stripLeadingSeparators(s)) >= 0
+}
+
+// stripLeadingSeparators removes leading whitespace and any run of leading
+// ";"/"&&" separators (a code model tends to open a next-command prediction
+// with one). Shared by firstShellCommand and firstCommandComplete so both
+// treat the leading run identically.
+func stripLeadingSeparators(s string) string {
+	s = strings.TrimLeft(s, " \t")
+	for {
+		t := strings.TrimLeft(strings.TrimPrefix(strings.TrimPrefix(s, "&&"), ";"), " \t")
+		if t == s {
+			return s
+		}
+		s = t
+	}
 }
 
 // indexSeparator returns the byte index of the first ";" or "&&" in s, or -1.
@@ -306,18 +326,26 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 			stopReason = chunk.Choices[0].FinishReason
 		}
 
-		// First-line cutoff (design §4): as soon as the accumulated text
-		// contains a newline, we have a complete single-line suggestion and
-		// stop reading immediately — we don't need the rest of the
-		// completion (often prose/explanation past the first line), and
-		// returning now is the whole point of streaming at all.
+		// Two cutoffs stop the read early (design §4 — the point of streaming):
 		//
-		// METRICS(§12) note: this returns before the trailing usage chunk
-		// arrives, so InputTokens/OutputTokens/CachedTokens will typically be
-		// zero on this path. That's expected and acceptable — the cutoff is
-		// the whole point of streaming and must not be removed to chase
-		// usage stats.
-		if stop := acc.Push(chunk.Choices[0].Delta.Content); stop {
+		//  1. Newline (shared accumulator): a complete single-line suggestion.
+		//  2. Shell separator (firstCommandComplete, codestral-specific): the
+		//     first command plus a trailing ";"/"&&" has arrived, so the rest
+		//     of the chain is about to be discarded by firstShellCommand
+		//     anyway — stop now rather than stream it. This is what keeps a
+		//     code model's chaining ("mkdir x; cd y; ...") from costing the
+		//     ~66ms p50 / ~490ms p95 of stream time it did before, WITHOUT the
+		//     empty-output bug the ";" stop sequence had: a leading "; " is
+		//     stripped first, so we wait for the real command before stopping.
+		//
+		// METRICS(§12) note: returning here precedes the trailing usage chunk,
+		// so InputTokens/OutputTokens/CachedTokens are typically zero on this
+		// path — expected, and not worth chasing at the cost of the cutoff.
+		stop := acc.Push(chunk.Choices[0].Delta.Content)
+		if !stop && firstCommandComplete(acc.Raw()) {
+			stop = true
+		}
+		if stop {
 			return Completion{
 				Text:         firstShellCommand(acc.Text()),
 				TTFT:         acc.TTFT(),

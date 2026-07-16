@@ -53,6 +53,15 @@ func (a *accumulator) Text() string {
 	return text
 }
 
+// Raw returns the full accumulated text, including anything past the first
+// newline. Text() is the newline-truncated view most callers want; Raw() is
+// for a caller that applies its own additional cutoff to the in-flight text
+// (the codestral adapter stops early at a shell separator, which it detects on
+// the raw buffer before the newline cutoff would fire).
+func (a *accumulator) Raw() string {
+	return a.buf.String()
+}
+
 // TTFT returns the time from newAccumulator's start to the first non-empty
 // delta, or 0 if no non-empty delta has been pushed yet.
 func (a *accumulator) TTFT() time.Duration {

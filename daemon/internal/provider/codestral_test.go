@@ -365,3 +365,68 @@ func TestFirstShellCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestFirstCommandComplete(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"still streaming first command", "source .venv/bin/act", false},
+		{"leading separator only, no command yet", "; ", false},
+		{"leading separator with partial command", "; source .venv", false},
+		{"first command done, trailing semicolon", "mkdir x;", true},
+		{"first command done, trailing &&", "git add .&&", true},
+		{"leading sep then command then sep", "; source x;", true},
+		{"pipe is not a boundary", "ps aux | grep foo", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := firstCommandComplete(tt.in); got != tt.want {
+				t.Errorf("firstCommandComplete(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestComplete_Codestral_SeparatorCutoff proves the streaming separator cutoff:
+// once "mkdir x;" has arrived, Complete returns "mkdir x" without waiting for a
+// deliberately slow trailing chain chunk — the early-stop that keeps chaining
+// from costing stream time, distinct from the newline cutoff.
+func TestComplete_Codestral_SeparatorCutoff(t *testing.T) {
+	const lateDelay = 300 * time.Millisecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		fmt.Fprint(w, fimSSEChunk(t, "mkdir x"))
+		flusher.Flush()
+		fmt.Fprint(w, fimSSEChunk(t, "; "))
+		flusher.Flush()
+
+		// If consumed, this would chain more commands. The client must not
+		// wait: the first command plus its separator already arrived.
+		time.Sleep(lateDelay)
+		fmt.Fprint(w, fimSSEChunk(t, "cd x; git init"))
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
+	start := time.Now()
+	got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "mkdir"}, MaxTokens: 48})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Complete() err = %v, want nil", err)
+	}
+	if got.Text != "mkdir x" {
+		t.Errorf("Complete().Text = %q, want %q", got.Text, "mkdir x")
+	}
+	if elapsed >= lateDelay {
+		t.Errorf("Complete() took %v, expected to return before the %v late chunk (no separator cutoff)", elapsed, lateDelay)
+	}
+}
