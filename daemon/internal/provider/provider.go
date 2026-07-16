@@ -1,10 +1,23 @@
-// Package provider defines the Provider seam and its shared streaming core.
-// Three adapters implement it: the hand-rolled OpenAI-compatible client
-// (Groq et al., this ticket), a native Anthropic adapter, and a Codestral
-// FIM adapter (both later, parallel tickets — design §6). Adapters render
-// prompt.Prompt their own way (chat messages vs. prompt+suffix) but share the
-// accumulator's streaming policy (TTFT stamping, first-line cutoff) and the
-// Error/ErrKind classification in errors.go.
+// Package provider defines the Provider seam and its shared streaming core,
+// with three adapters behind one interface (design §6). Adapters render
+// prompt.Prompt their own way (chat messages vs. FIM prompt+suffix) but share
+// the same streaming policy and error taxonomy.
+//
+// File map:
+//   - provider.go   — the contract: Provider interface, Request, Completion.
+//   - accum.go      — shared accumulator: TTFT stamping + first-line cutoff,
+//     driven by each adapter from its own stream.
+//   - errors.go     — shared *Error / ErrKind / ClassifyHTTP (→ §12 error_type).
+//   - httpclient.go — shared keep-alive http.Client (opt-in; anthropic's SDK
+//     owns its own, so it doesn't use this).
+//   - openai.go     — openai-go SDK adapter; any OpenAI-compatible endpoint.
+//   - anthropic.go  — native anthropic-sdk-go adapter (the "quality" path).
+//   - codestral.go  — hand-rolled Mistral FIM adapter (prompt+suffix), plus
+//     RenderFIM and the shell-command cutoff logic.
+//
+// The shared pieces are unexported and live in this one package precisely so
+// the adapters can use them without an exported API — which is why the
+// adapters are sibling files here rather than subpackages.
 package provider
 
 import (
