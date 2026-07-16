@@ -119,19 +119,13 @@ func NewCodestral(baseURL, model, apiKey string, maxTokens int) (Provider, error
 	if model == "" {
 		model = "codestral-latest"
 	}
-	transport := &http.Transport{
-		ForceAttemptHTTP2:   true,
-		MaxIdleConns:        16,
-		MaxIdleConnsPerHost: 16,
-		IdleConnTimeout:     90 * time.Second,
-	}
 	return &codestralClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
 		stop:      fimStopSequences,
-		http:      &http.Client{Transport: transport},
+		http:      keepAliveHTTPClient(),
 	}, nil
 }
 

@@ -33,18 +33,10 @@ type openAIClient struct {
 // fresh http.Client (and therefore a fresh connection pool) defeats the whole
 // warm-connection point.
 func NewOpenAI(baseURL, model, apiKey string, maxTokens int) (Provider, error) {
-	transport := &http.Transport{
-		ForceAttemptHTTP2:   true,
-		MaxIdleConns:        16,
-		MaxIdleConnsPerHost: 16,
-		IdleConnTimeout:     90 * time.Second,
-	}
-	httpClient := &http.Client{Transport: transport}
-
 	client := openai.NewClient(
 		option.WithBaseURL(baseURL),
 		option.WithAPIKey(apiKey),
-		option.WithHTTPClient(httpClient),
+		option.WithHTTPClient(keepAliveHTTPClient()),
 	)
 
 	return &openAIClient{
