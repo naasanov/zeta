@@ -19,7 +19,11 @@ package metrics
 // CachedPerM field (Anthropic's cached rate is 0.1x input, not Groq's 0.5x,
 // so a single global fraction can't represent both once a second provider is
 // wired up).
-const PriceTableVersion = 3
+//
+// v3 -> v4: verified Codestral price (was a placeholder). InPerM/OutPerM were
+// already correct ($0.30/$0.90), but CachedPerM is now set to Mistral's
+// published -90%-on-cached-input-tokens rate ($0.03/M) instead of 0.
+const PriceTableVersion = 4
 
 // modelPrice holds per-million-token USD pricing for one provider+model.
 type modelPrice struct {
@@ -79,13 +83,17 @@ var priceTable = map[string]modelPrice{
 		OutPerM:    5.00,
 		CachedPerM: 0.10,
 	},
-	// TODO(price): Codestral rate unverified — confirm against Mistral
-	// pricing before treating cost_usd for this row as anything but a rough
-	// placeholder.
+	// Mistral pricing (mistral.ai/pricing/api, checked 2026-07-16): $0.30/$0.90
+	// per 1M input/output tokens for Codestral on api.mistral.ai (the
+	// per-token endpoint we default to, as opposed to the separate
+	// codestral.mistral.ai subscription tier). The same page lists a general
+	// -90%-on-cached-input-tokens discount applied across eligible API
+	// models; Codestral is not itemized separately, but the discount is
+	// stated as API-wide, giving a cached rate of 10% of InPerM ($0.03/M).
 	"codestral/codestral-latest": {
 		InPerM:     0.30,
 		OutPerM:    0.90,
-		CachedPerM: 0,
+		CachedPerM: 0.03,
 	},
 }
 

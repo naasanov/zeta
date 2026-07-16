@@ -82,9 +82,10 @@ func TestCostUSD_AnthropicCachedDiscount(t *testing.T) {
 	}
 }
 
-// TestCostUSD_Codestral pins the codestral/codestral-latest entry (unverified
-// placeholder — see the TODO(price) comment in price.go) so a future price
-// correction shows up as an intentional test diff rather than a silent drift.
+// TestCostUSD_Codestral pins the codestral/codestral-latest entry against
+// Mistral's verified published pricing (mistral.ai/pricing/api, checked
+// 2026-07-16): $0.30/$0.90 per 1M input/output tokens, so a future price
+// change shows up as an intentional test diff rather than a silent drift.
 func TestCostUSD_Codestral(t *testing.T) {
 	got := CostUSD("codestral", "codestral-latest", 1_000_000, 500_000, 0)
 	want := 1.0*0.30 + 0.5*0.90 // $0.30 + $0.45 = $0.75
