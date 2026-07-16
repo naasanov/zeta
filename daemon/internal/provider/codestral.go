@@ -20,21 +20,62 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
 
+// fimStopSequences halt generation early. Only the newline is used: it keeps
+// a code model from spilling onto a second line, and the shared accumulator
+// cuts there too. Command-chaining (";"/"&&") is deliberately NOT a stop
+// sequence — see firstShellCommand for why: a code model predicting a next
+// command often *leads* with a separator ("; source .venv/bin/activate"), and
+// a ";" stop would halt at that leading char and return empty. Chains are
+// handled by post-processing instead, which a leading separator can't defeat.
+var fimStopSequences = []string{"\n"}
+
+// firstShellCommand extracts the first command from a raw FIM completion.
+// Codestral is a code model and, left to its own devices, does two unwanted
+// things for a single-suggestion ghost-text UX:
+//
+//   - leads a next-command prediction with a separator, e.g.
+//     "; source .venv/bin/activate" — natural in code ("<cmd>; <next>"), but
+//     here the buffer is empty so the ";" is spurious;
+//   - chains commands on one line, e.g. "mkdir x; cd y; git init".
+//
+// So: strip any leading separators/whitespace, then keep only up to the first
+// top-level ";" or "&&". Pipes ("|") are left intact — they're within one
+// command (`ps aux | grep`), not a chain. This runs on the accumulated text
+// rather than as a stop sequence precisely so a leading separator becomes the
+// real command instead of nuking the whole suggestion.
+func firstShellCommand(s string) string {
+	s = strings.TrimLeft(s, " \t")
+	for {
+		t := strings.TrimLeft(strings.TrimPrefix(strings.TrimPrefix(s, "&&"), ";"), " \t")
+		if t == s {
+			break
+		}
+		s = t
+	}
+	if i := indexSeparator(s); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimRight(s, " \t")
+}
+
+// indexSeparator returns the byte index of the first ";" or "&&" in s, or -1.
+func indexSeparator(s string) int {
+	semi := strings.IndexByte(s, ';')
+	and := strings.Index(s, "&&")
+	switch {
+	case semi < 0:
+		return and
+	case and < 0:
+		return semi
+	default:
+		return min(semi, and)
+	}
+}
+
 // codestralClient talks to a single Mistral-compatible /v1/fim/completions
 // endpoint. It holds a shared *http.Client so the daemon never pays TLS/TCP
 // setup cost per keystroke (design §4 "warm connections") — construct one via
 // NewCodestral at startup and reuse it for every request.
-// fimStopSequences halt generation at the first shell command boundary.
-// Codestral is a code model and, left unconstrained, completes a partial
-// command into a whole chained one-liner ("mkdir x; cd x; git init; ...") —
-// all on ONE line, so the newline-based first-line cutoff (design §4) never
-// fires and the runaway chain gets painted. Instruct models rarely do this;
-// it's specific to FIM/code models, so the fix lives here rather than in the
-// shared accumulator. Stopping server-side also saves the tokens the model
-// would have spent finishing the chain. Pipes ("|") are deliberately absent —
-// they're within a single command (`ps aux | grep`), not a chain.
-var fimStopSequences = []string{"\n", ";", "&&"}
-
 type codestralClient struct {
 	baseURL   string
 	model     string
@@ -278,7 +319,7 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 		// usage stats.
 		if stop := acc.Push(chunk.Choices[0].Delta.Content); stop {
 			return Completion{
-				Text:         acc.Text(),
+				Text:         firstShellCommand(acc.Text()),
 				TTFT:         acc.TTFT(),
 				InputTokens:  inputTokens,
 				OutputTokens: outputTokens,
@@ -305,7 +346,7 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 	// Stream ended (EOF / [DONE] / max_tokens finish) with no newline seen:
 	// return whatever we accumulated as the whole (single-line) completion.
 	return Completion{
-		Text:         acc.Text(),
+		Text:         firstShellCommand(acc.Text()),
 		TTFT:         acc.TTFT(),
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,

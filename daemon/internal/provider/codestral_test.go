@@ -336,3 +336,32 @@ func TestRenderFIM_ExcludesSystemAndInstruction(t *testing.T) {
 		t.Errorf("RenderFIM() prompt unexpectedly contains Instruction text: %q", gotPrompt)
 	}
 }
+
+func TestFirstShellCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain command unchanged", "git status", "git status"},
+		{"leading semicolon stripped", "; source .venv/bin/activate", "source .venv/bin/activate"},
+		{"leading &&  stripped", "&& make build", "make build"},
+		{"leading separator with extra space", ";   cd ..", "cd .."},
+		{"repeated leading separators", "; ; source x", "source x"},
+		{"trailing chain cut at semicolon", "mkdir x; cd x; git init", "mkdir x"},
+		{"trailing chain cut at &&", "git add . && git commit", "git add ."},
+		{"cut at earliest separator", "a && b; c", "a"},
+		{"pipe left intact", "ps aux | grep foo", "ps aux | grep foo"},
+		{"leading strip then trailing cut", "; mkdir x; cd x", "mkdir x"},
+		{"trailing whitespace trimmed", "ls -la   ", "ls -la"},
+		{"empty stays empty", "", ""},
+		{"only a separator becomes empty", ";", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := firstShellCommand(tt.in); got != tt.want {
+				t.Errorf("firstShellCommand(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
