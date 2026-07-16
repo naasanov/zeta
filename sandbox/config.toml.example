@@ -1,24 +1,33 @@
-# Example config.toml for the zsh-autopilot daemon (design §6).
+# Example config.toml for the zsh-autopilot daemon (design §6, §13 Phase 2
+# provider presets).
 #
 # Copy this to $XDG_CONFIG_HOME/autopilot/config.toml (or
-# ~/.config/autopilot/config.toml if XDG_CONFIG_HOME is unset). If no file
-# exists there, the daemon falls back to a built-in default reproducing the
-# original single-profile Groq behavior, so this file is entirely optional.
+# ~/.config/autopilot/config.toml if XDG_CONFIG_HOME is unset) if you want
+# profile overrides or the "openai" escape hatch below.
+#
+# THE SIMPLE PATH NEEDS NO FILE AT ALL: `provider` is a brand
+# (anthropic/codestral/groq/ollama) with tested defaults (base_url, model,
+# api_key_env) baked in, so setting just two env vars is enough:
+#   ZSH_AUTOPILOT_PROVIDER=codestral
+#   ZSH_AUTOPILOT_CODESTRAL_KEY=sk-...
+# This file only matters once you want to override a preset's defaults, or
+# reach a custom OpenAI-compatible endpoint via the "openai" escape hatch.
 #
 # In dev, point the daemon straight at a gitignored copy in this directory
 # instead of ~/.config by setting ZSH_AUTOPILOT_CONFIG in sandbox/.env, e.g.
 #   ZSH_AUTOPILOT_CONFIG=/abs/path/to/zeta/sandbox/config.toml
 # When that var names a path that doesn't exist, the daemon errors rather than
-# silently falling back — so a typo is loud, not a mystery Groq session.
+# silently falling back — so a typo is loud, not a mystery session.
 #
-# API keys are never written here — each profile names an environment
-# variable (api_key_env) or a shell command (api_key_cmd) that produces the
-# key at startup. In dev, sandbox/.env supplies GROQ_API_KEY /
-# ANTHROPIC_API_KEY / MISTRAL_API_KEY etc. and is loaded by sandbox/.zshrc
-# and the debug launch config.
+# API keys are never written here — each preset brand reads its key from a
+# fixed env var (ZSH_AUTOPILOT_<BRAND>_KEY, e.g. ZSH_AUTOPILOT_CODESTRAL_KEY)
+# unless a profile below overrides api_key_env, or supplies api_key_cmd to
+# shell out to a password manager instead. sandbox/.env supplies these and is
+# loaded by sandbox/.zshrc and the debug launch config.
 
-# Which profile below runs by default. Override per-session with the
-# ZSH_AUTOPILOT_PROFILE env var without editing this file.
+# Which provider runs by default: a brand (anthropic/codestral/groq/ollama),
+# "openai", or the name of a [profiles.*] block below. Override per-session
+# with ZSH_AUTOPILOT_PROVIDER without editing this file.
 default_profile = "codestral"
 
 # Quiet period (ms) before a buffered request dispatches to the provider
@@ -29,24 +38,27 @@ debounce_ms = 100
 # handful of words, not prose.
 max_tokens = 48
 
-[profiles.groq]
-provider = "openai"
-base_url = "https://api.groq.com/openai/v1"
-model = "llama-3.3-70b-versatile"
-api_key_env = "GROQ_API_KEY"
+# --- Override example: same brand, different model + key source -----------
+# A profile only needs `provider` — everything else (base_url, model,
+# api_key_env) fills from that brand's preset. Set only the fields you want
+# to override.
+[profiles.quality]
+provider = "anthropic"
+model = "claude-opus-4-8"
+# api_key_env defaults to ZSH_AUTOPILOT_ANTHROPIC_KEY; override if needed:
+# api_key_env = "MY_OTHER_ANTHROPIC_KEY"
 # Alternative to api_key_env: resolve the key by running a shell command
 # (its stdout, trailing newline trimmed, becomes the key). Useful for
 # password managers instead of plain env vars:
-# api_key_cmd = "pass show groq/api-key"
+# api_key_cmd = "pass show anthropic/api-key"
 
-[profiles.haiku]
-provider = "anthropic"
-model = "claude-haiku-4-5"
-api_key_env = "ANTHROPIC_API_KEY"
-# Anthropic's adapter takes no base_url; any value here is ignored.
-
-[profiles.codestral]
-provider = "codestral"
-base_url = "https://api.mistral.ai"
-model = "codestral-latest"
-api_key_env = "MISTRAL_API_KEY"
+# --- Escape hatch: a custom OpenAI-compatible endpoint ---------------------
+# "openai" is NOT a preset brand — it has no defaults to fill from, so
+# base_url, model, and a key source (api_key_env or api_key_cmd) are all
+# REQUIRED here. This is the only way to reach it; ZSH_AUTOPILOT_PROVIDER=openai
+# with no matching profile is a startup error.
+[profiles.together]
+provider = "openai"
+base_url = "https://api.together.xyz/v1"
+model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+api_key_env = "TOGETHER_API_KEY"

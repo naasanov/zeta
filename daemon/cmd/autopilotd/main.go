@@ -29,30 +29,15 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/config"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/logging"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/metrics"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/server"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/suggest"
 )
 
-// builtinDefaultConfig reproduces today's (pre-config.toml) behavior exactly:
-// a single "groq" profile pointed at the same base URL/model/key-env this
-// package used to hardcode. Used whenever config.toml is absent, so a user
-// who never creates one sees no change in behavior.
-func builtinDefaultConfig() config.Config {
-	return config.Config{
-		DefaultProfile: "groq",
-		DebounceMS:     config.DefaultDebounceMS,
-		MaxTokens:      config.DefaultMaxTokens,
-		Profiles: map[string]config.Profile{
-			"groq": {
-				Provider:  "openai",
-				BaseURL:   "https://api.groq.com/openai/v1",
-				Model:     "llama-3.3-70b-versatile",
-				APIKeyEnv: "GROQ_API_KEY",
-			},
-		},
-	}
-}
+// knownProviders lists the brand names accepted by ZSH_AUTOPILOT_PROVIDER /
+// default_profile, for the "you must pick one" error message.
+const knownProviders = "anthropic, codestral, groq, ollama, openai"
 
 func main() {
 	socket := flag.String("socket", server.DefaultSocket, "unix socket path to listen on")
@@ -101,41 +86,56 @@ func main() {
 		}
 	}
 
-	profileName := envOr("ZSH_AUTOPILOT_PROFILE", cfg.DefaultProfile)
-	profile, ok := cfg.Profiles[profileName]
-	if !ok {
-		log.Error("config: selected profile does not exist", "profile", profileName)
+	selected := envOr("ZSH_AUTOPILOT_PROVIDER", cfg.DefaultProfile)
+	if selected == "" {
+		log.Error("config: no provider selected; set ZSH_AUTOPILOT_PROVIDER or default_profile in config.toml", "providers", knownProviders)
 		os.Exit(1)
 	}
 
-	// Preserve existing env overrides on top of the selected profile: these
+	resolved, err := cfg.Resolve(selected)
+	if err != nil {
+		log.Error("config: failed to resolve provider", "selected", selected, "err", err)
+		os.Exit(1)
+	}
+
+	// Preserve existing env overrides on top of the resolved profile: these
 	// predate config.toml and let a user override base URL/model/debounce
 	// without editing the file (e.g. one-off testing against a different
 	// endpoint).
-	profile.BaseURL = envOr("ZSH_AUTOPILOT_BASE_URL", profile.BaseURL)
-	profile.Model = envOr("ZSH_AUTOPILOT_MODEL", profile.Model)
+	resolved.BaseURL = envOr("ZSH_AUTOPILOT_BASE_URL", resolved.BaseURL)
+	resolved.Model = envOr("ZSH_AUTOPILOT_MODEL", resolved.Model)
 
 	maxTokens := cfg.MaxTokens
 
 	// Keys never travel via flags/argv (they'd show up in `ps`); env (or
 	// api_key_cmd, itself env/exec-based) only.
-	apiKey, err := profile.ResolveKey()
+	apiKey, err := resolved.ResolveKey()
 	if err != nil {
-		log.Error("config: failed to resolve api key, falling back to echo mode", "profile", profileName, "err", err)
+		log.Error("config: failed to resolve api key, falling back to echo mode", "provider", selected, "err", err)
 		apiKey = ""
 	}
+	needsKey := resolved.APIKeyEnv != "" || resolved.APIKeyCmd != ""
 
-	if apiKey != "" {
-		p, err := newProvider(profile, apiKey, maxTokens)
+	switch {
+	case needsKey && apiKey == "":
+		// Missing-key echo mode: install a suggest closure that carries the
+		// missing key var name so the cause is unmistakable both in the
+		// grey ghost-text (a harmless shell comment) and in the daemon log.
+		srv.SetSuggest(echoMissingKey(resolved.APIKeyEnv))
+		log.Error("echo mode: API key not set", "key_env", resolved.APIKeyEnv)
+	default:
+		// Either a key was resolved, or this provider needs none (e.g.
+		// ollama running locally) — construct it with whatever key we have
+		// (possibly "").
+		p, err := newProvider(resolved, apiKey, maxTokens)
 		if err != nil {
-			log.Error("provider: failed to construct, falling back to echo mode", "profile", profileName, "provider", profile.Provider, "err", err)
+			log.Error("provider: failed to construct, falling back to echo mode", "provider", selected, "err", err)
+			srv.SetSuggest(echoMissingKey(resolved.APIKeyEnv))
 		} else {
 			srv.SetSuggest(suggest.LLM(p, log, emit))
 			// Never log the key itself.
-			log.Info("llm mode", "profile", profileName, "provider", profile.Provider, "model", profile.Model)
+			log.Info("llm mode", "provider", selected, "adapter", resolved.Adapter, "model", resolved.Model)
 		}
-	} else {
-		log.Info("echo mode: no api key resolved for profile", "profile", profileName)
 	}
 
 	if err := srv.Run(ctx); err != nil {
@@ -144,68 +144,72 @@ func main() {
 	}
 }
 
-// newProvider constructs a provider.Provider from a resolved profile. It
+// newProvider constructs a provider.Provider from a resolved profile,
+// switching on the internal Adapter (not the user-facing brand in Provider)
+// — several brands share an adapter (groq/ollama both speak "openai"). It
 // lives here, not in internal/provider, so that provider adapters never
 // import internal/config (config knows about providers; providers must not
 // know about config).
-func newProvider(p config.Profile, apiKey string, maxTokens int) (provider.Provider, error) {
-	switch p.Provider {
+func newProvider(r config.ResolvedProfile, apiKey string, maxTokens int) (provider.Provider, error) {
+	switch r.Adapter {
 	case "openai":
-		return provider.NewOpenAI(p.BaseURL, p.Model, apiKey, maxTokens)
+		return provider.NewOpenAI(r.BaseURL, r.Model, apiKey, maxTokens)
 	case "anthropic":
-		// Anthropic's constructor takes no baseURL; p.BaseURL (if set) is
+		// Anthropic's constructor takes no baseURL; r.BaseURL (if set) is
 		// ignored for this provider.
-		return provider.NewAnthropic(p.Model, apiKey, maxTokens)
+		return provider.NewAnthropic(r.Model, apiKey, maxTokens)
 	case "codestral":
-		return provider.NewCodestral(p.BaseURL, p.Model, apiKey, maxTokens)
+		return provider.NewCodestral(r.BaseURL, r.Model, apiKey, maxTokens)
 	default:
-		// config.Parse already validates this, so reaching here means a
-		// built-in default (or hand-built Config) has an unrecognized
-		// provider — a programmer error, not user input.
-		return nil, fmt.Errorf("main: unknown provider %q", p.Provider)
+		// config.Resolve only ever fills Adapter from presets or the openai
+		// escape hatch, so reaching here means a programmer error, not user
+		// input.
+		return nil, fmt.Errorf("main: unknown adapter %q", r.Adapter)
+	}
+}
+
+// echoMissingKey returns a suggest closure that stands in for the LLM
+// suggester when a provider is selected but its API key isn't set. It never
+// makes up plausible-looking ghost text for a missing key:
+//
+//   - On the empty-buffer next-command prompt, the "suggestion" is a shell
+//     comment ("# autopilot: set X") — if the user reflexively accepts it, it's
+//     a harmless no-op line, never a bad command.
+//   - While typing (non-empty buffer), the suggestion is exactly req.Buf, i.e.
+//     an empty suffix — no ghost text is appended mid-command.
+func echoMissingKey(keyEnv string) func(context.Context, protocol.Request) (protocol.Reply, error) {
+	return func(_ context.Context, req protocol.Request) (protocol.Reply, error) {
+		suggestion := req.Buf
+		if req.Buf == "" {
+			suggestion = "# autopilot: set " + keyEnv
+		}
+		return protocol.Reply{
+			V:          protocol.Version,
+			ID:         req.ID,
+			Source:     protocol.SourceLLM,
+			Suggestion: suggestion,
+		}, nil
 	}
 }
 
 // loadConfig loads the config.toml (see configPath for where) if present, or
-// the built-in default Config reproducing pre-config.toml behavior if not. A
-// present-but-malformed file is always an error. A *missing* file is an error
-// only when the path was named explicitly via ZSH_AUTOPILOT_CONFIG — an
-// explicit path that doesn't exist is a typo the user wants to hear about,
-// whereas the implicit XDG default simply being absent falls back silently.
+// a zero-value Config with defaults applied if not — presets resolve on
+// demand (config.Config.Resolve), so there is no built-in profile to seed
+// anymore. A present-but-malformed file is always an error. A *missing* file
+// is an error only when the path was named explicitly via ZSH_AUTOPILOT_CONFIG
+// — an explicit path that doesn't exist is a typo the user wants to hear
+// about, whereas the implicit XDG default simply being absent falls back
+// silently.
 func loadConfig() (config.Config, error) {
-	builtin := builtinDefaultConfig()
-
 	path, explicit := configPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) && !explicit {
-			return builtin, nil
+			return config.Parse([]byte{})
 		}
 		return config.Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		return config.Config{}, err
-	}
-
-	// Seed built-in profiles the config didn't define so the known-good
-	// defaults (currently just "groq") stay selectable even from a sparse or
-	// empty config.toml — a user who lists only [profiles.haiku] can still
-	// pick groq, and an empty file behaves like no file at all. A profile the
-	// user defines under a built-in name wins (their entry is left untouched).
-	if cfg.Profiles == nil {
-		cfg.Profiles = make(map[string]config.Profile, len(builtin.Profiles))
-	}
-	for name, p := range builtin.Profiles {
-		if _, ok := cfg.Profiles[name]; !ok {
-			cfg.Profiles[name] = p
-		}
-	}
-	if cfg.DefaultProfile == "" {
-		cfg.DefaultProfile = builtin.DefaultProfile
-	}
-
-	return cfg, nil
+	return config.Parse(data)
 }
 
 // configPath resolves the config.toml location and reports whether it was
