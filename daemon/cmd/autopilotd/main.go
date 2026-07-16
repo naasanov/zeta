@@ -173,15 +173,39 @@ func newProvider(p config.Profile, apiKey string, maxTokens int) (provider.Provi
 // explicit path that doesn't exist is a typo the user wants to hear about,
 // whereas the implicit XDG default simply being absent falls back silently.
 func loadConfig() (config.Config, error) {
+	builtin := builtinDefaultConfig()
+
 	path, explicit := configPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) && !explicit {
-			return builtinDefaultConfig(), nil
+			return builtin, nil
 		}
 		return config.Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	return config.Parse(data)
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	// Seed built-in profiles the config didn't define so the known-good
+	// defaults (currently just "groq") stay selectable even from a sparse or
+	// empty config.toml — a user who lists only [profiles.haiku] can still
+	// pick groq, and an empty file behaves like no file at all. A profile the
+	// user defines under a built-in name wins (their entry is left untouched).
+	if cfg.Profiles == nil {
+		cfg.Profiles = make(map[string]config.Profile, len(builtin.Profiles))
+	}
+	for name, p := range builtin.Profiles {
+		if _, ok := cfg.Profiles[name]; !ok {
+			cfg.Profiles[name] = p
+		}
+	}
+	if cfg.DefaultProfile == "" {
+		cfg.DefaultProfile = builtin.DefaultProfile
+	}
+
+	return cfg, nil
 }
 
 // configPath resolves the config.toml location and reports whether it was
