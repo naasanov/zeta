@@ -114,13 +114,19 @@ func Build(req protocol.Request) Prompt {
 	}
 }
 
-// ChatUser renders the user turn for chat adapters. It reproduces today's
-// exact user-turn string byte for byte: Context + Instruction + Prefix, with
-// Prefix last so the completion continues directly from the buffer.
+// ChatUser renders the user turn for chat adapters: Context + Instruction +
+// Prefix, with Prefix last so the completion continues directly from the
+// buffer.
 //
-// T4 reorders this to Instruction-before-Context for prompt caching (a stable
-// instruction prefix caches better than one that varies with context); that
-// reorder is NOT done here — this ticket is zero-behavior-change only.
+// T4 considered reordering this to Instruction-before-Context so a stable
+// instruction prefix could seed a provider prompt cache (design §7). Measured
+// and DROPPED: prompt caching is unreachable for every current profile — the
+// full chat prefix (system prompt ~1171 tokens + this user turn) is far below
+// Anthropic Haiku's 4096-token minimum cacheable prefix, Groq's default llama
+// doesn't support caching, and the default provider (codestral, FIM) doesn't
+// use ChatUser at all. Reorder only becomes worthwhile alongside a
+// caching-capable chat model whose prefix clears its minimum; see the note in
+// anthropic.go where a cache_control breakpoint would otherwise go.
 func (p Prompt) ChatUser() string {
 	return p.Context + p.Instruction + p.Prefix
 }

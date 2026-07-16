@@ -88,7 +88,13 @@ func (c *anthropicClient) Complete(ctx context.Context, req Request) (Completion
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.model),
 		MaxTokens: int64(maxTokens),
-		System:    []anthropic.TextBlockParam{{Text: req.Prompt.System}},
+		// No CacheControl breakpoint on the system block: T4 measured the
+		// system prompt at ~1171 tokens, well under Haiku 4.5's 4096-token
+		// minimum cacheable prefix, so a cache_control here caches nothing
+		// (cache_creation_input_tokens stays 0) — a silent no-op, not a win.
+		// CachedTokens is still read below so the day a larger prefix or a
+		// caching-capable model lands, the metric proves whether it hit.
+		System: []anthropic.TextBlockParam{{Text: req.Prompt.System}},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt.ChatUser())),
 		},
