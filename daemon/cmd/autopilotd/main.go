@@ -166,15 +166,17 @@ func newProvider(p config.Profile, apiKey string, maxTokens int) (provider.Provi
 	}
 }
 
-// loadConfig loads $XDG_CONFIG_HOME/autopilot/config.toml (falling back to
-// ~/.config/autopilot/config.toml) if present, or the built-in default
-// Config reproducing pre-config.toml behavior if not. A missing file is not
-// an error; a present-but-malformed one is.
+// loadConfig loads the config.toml (see configPath for where) if present, or
+// the built-in default Config reproducing pre-config.toml behavior if not. A
+// present-but-malformed file is always an error. A *missing* file is an error
+// only when the path was named explicitly via ZSH_AUTOPILOT_CONFIG — an
+// explicit path that doesn't exist is a typo the user wants to hear about,
+// whereas the implicit XDG default simply being absent falls back silently.
 func loadConfig() (config.Config, error) {
-	path := configPath()
+	path, explicit := configPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if os.IsNotExist(err) && !explicit {
 			return builtinDefaultConfig(), nil
 		}
 		return config.Config{}, fmt.Errorf("read %s: %w", path, err)
@@ -182,14 +184,20 @@ func loadConfig() (config.Config, error) {
 	return config.Parse(data)
 }
 
-// configPath resolves the config.toml location: $XDG_CONFIG_HOME/autopilot,
-// falling back to ~/.config/autopilot per the XDG base directory spec.
-func configPath() string {
+// configPath resolves the config.toml location and reports whether it was
+// named explicitly. ZSH_AUTOPILOT_CONFIG wins when set (handy for pointing the
+// daemon at a gitignored sandbox/config.toml in dev without touching
+// ~/.config); otherwise it is $XDG_CONFIG_HOME/autopilot/config.toml, falling
+// back to ~/.config/autopilot/config.toml per the XDG base directory spec.
+func configPath() (path string, explicit bool) {
+	if p := os.Getenv("ZSH_AUTOPILOT_CONFIG"); p != "" {
+		return p, true
+	}
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
 		configHome = filepath.Join(envOr("HOME", "."), ".config")
 	}
-	return filepath.Join(configHome, "autopilot", "config.toml")
+	return filepath.Join(configHome, "autopilot", "config.toml"), false
 }
 
 // envOr returns the environment variable named key, or fallback if unset or

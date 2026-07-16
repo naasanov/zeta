@@ -5,6 +5,12 @@
 # exists there, the daemon falls back to a built-in default reproducing the
 # original single-profile Groq behavior, so this file is entirely optional.
 #
+# In dev, point the daemon straight at a gitignored copy in this directory
+# instead of ~/.config by setting ZSH_AUTOPILOT_CONFIG in sandbox/.env, e.g.
+#   ZSH_AUTOPILOT_CONFIG=/abs/path/to/zeta/sandbox/config.toml
+# When that var names a path that doesn't exist, the daemon errors rather than
+# silently falling back — so a typo is loud, not a mystery Groq session.
+#
 # API keys are never written here — each profile names an environment
 # variable (api_key_env) or a shell command (api_key_cmd) that produces the
 # key at startup. In dev, sandbox/.env supplies GROQ_API_KEY /
