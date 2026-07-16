@@ -24,11 +24,23 @@ import (
 // endpoint. It holds a shared *http.Client so the daemon never pays TLS/TCP
 // setup cost per keystroke (design §4 "warm connections") — construct one via
 // NewCodestral at startup and reuse it for every request.
+// fimStopSequences halt generation at the first shell command boundary.
+// Codestral is a code model and, left unconstrained, completes a partial
+// command into a whole chained one-liner ("mkdir x; cd x; git init; ...") —
+// all on ONE line, so the newline-based first-line cutoff (design §4) never
+// fires and the runaway chain gets painted. Instruct models rarely do this;
+// it's specific to FIM/code models, so the fix lives here rather than in the
+// shared accumulator. Stopping server-side also saves the tokens the model
+// would have spent finishing the chain. Pipes ("|") are deliberately absent —
+// they're within a single command (`ps aux | grep`), not a chain.
+var fimStopSequences = []string{"\n", ";", "&&"}
+
 type codestralClient struct {
 	baseURL   string
 	model     string
 	apiKey    string
 	maxTokens int
+	stop      []string
 	http      *http.Client
 }
 
@@ -57,6 +69,7 @@ func NewCodestral(baseURL, model, apiKey string, maxTokens int) (Provider, error
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
+		stop:      fimStopSequences,
 		http:      &http.Client{Transport: transport},
 	}, nil
 }
@@ -107,11 +120,12 @@ func RenderFIM(p prompt.Prompt) (fimPrompt, suffix string) {
 // client needs. Note prompt/suffix, NOT messages — the shape that makes this
 // its own adapter rather than another OpenAI-compatible chat endpoint.
 type fimRequest struct {
-	Model     string `json:"model"`
-	Prompt    string `json:"prompt"`
-	Suffix    string `json:"suffix"`
-	MaxTokens int    `json:"max_tokens"`
-	Stream    bool   `json:"stream"`
+	Model     string   `json:"model"`
+	Prompt    string   `json:"prompt"`
+	Suffix    string   `json:"suffix"`
+	MaxTokens int      `json:"max_tokens"`
+	Stream    bool     `json:"stream"`
+	Stop      []string `json:"stop,omitempty"`
 }
 
 // fimChunk mirrors one SSE "data:" event's JSON payload. Codestral's FIM
@@ -162,6 +176,7 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 		Suffix:    suffix,
 		MaxTokens: maxTokens,
 		Stream:    true,
+		Stop:      c.stop,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {

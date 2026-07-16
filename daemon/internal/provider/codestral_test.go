@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,12 @@ func TestComplete_Codestral_HappyPath(t *testing.T) {
 	}
 	if gotBody.Suffix != "" {
 		t.Errorf("request Suffix = %q, want empty", gotBody.Suffix)
+	}
+	// Stop sequences must reach the wire — they are what keep a code model
+	// from completing a partial command into a whole chained one-liner
+	// (";"/"&&") that the newline cutoff can't catch.
+	if !slices.Equal(gotBody.Stop, fimStopSequences) {
+		t.Errorf("request Stop = %q, want %q", gotBody.Stop, fimStopSequences)
 	}
 }
 
