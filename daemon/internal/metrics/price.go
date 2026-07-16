@@ -7,39 +7,40 @@ package metrics
 // changes.
 //
 // v1 -> v2: replaced the guessed flat CachedPerM constant with a derived
-// 50%-of-input-rate formula (see cachedDiscount below) and verified/replaced
-// the placeholder prices against Groq's official pricing page. This changes
-// how cost_usd would be recomputed for any cached tokens, so it's a
-// version-worthy change even though the llama-3.3-70b-versatile input/output
-// numbers happened to already match.
-const PriceTableVersion = 2
+// 50%-of-input-rate formula and verified/replaced the placeholder prices
+// against Groq's official pricing page. This changes how cost_usd would be
+// recomputed for any cached tokens, so it's a version-worthy change even
+// though the llama-3.3-70b-versatile input/output numbers happened to
+// already match.
+//
+// v2 -> v3: METRICS(§12) — rekeyed priceTable by "provider/model" instead of
+// bare model name (two providers can serve the same model name at different
+// prices) and replaced the global cachedDiscount constant with a per-model
+// CachedPerM field (Anthropic's cached rate is 0.1x input, not Groq's 0.5x,
+// so a single global fraction can't represent both once a second provider is
+// wired up).
+//
+// v3 -> v4: verified Codestral price (was a placeholder). InPerM/OutPerM were
+// already correct ($0.30/$0.90), but CachedPerM is now set to Mistral's
+// published -90%-on-cached-input-tokens rate ($0.03/M) instead of 0.
+const PriceTableVersion = 4
 
-// modelPrice holds per-million-token USD pricing for one model.
+// modelPrice holds per-million-token USD pricing for one provider+model.
 type modelPrice struct {
 	InPerM  float64
 	OutPerM float64
+	// CachedPerM is the per-million-token USD rate for cached input tokens,
+	// stored directly (not derived from InPerM) since the cached discount
+	// varies by provider: Groq documents a flat 50% discount off InPerM for
+	// the models that support caching; a later Anthropic entry bills cached
+	// reads at 0.1x InPerM instead, which a single global fraction can't
+	// represent.
+	CachedPerM float64
 }
 
-// cachedDiscount is the fraction of InPerM billed for cached input tokens.
-// Per Groq's official prompt-caching docs, cached input tokens are billed at
-// a 50% discount off the normal input rate:
-// https://console.groq.com/docs/prompt-caching ("a 50% discount for cached
-// input tokens"). This is not a guess — it's the documented relationship, so
-// we derive the cached rate from InPerM instead of storing a second
-// independently-guessed constant.
-//
-// Note: as of the verification date below, prompt caching is only supported
-// on a subset of Groq models (the GPT-OSS family: gpt-oss-20b, gpt-oss-120b,
-// gpt-oss-safeguard-20b). llama-3.3-70b-versatile — the daemon's default
-// model — does NOT support prompt caching, so cachedTokens (cached_read_tokens)
-// will legitimately always be 0 for it; the discount only has an effect once
-// a caching-capable model is wired up (see openai/gpt-oss-120b below, the
-// likely Phase 2 candidate).
-const cachedDiscount = 0.5
-
-// priceTable maps model name -> pricing. Unknown models (CostUSD's default)
-// simply cost 0 rather than erroring, since this is a dev-only advisory
-// number, not billing.
+// priceTable maps "provider/model" -> pricing. Unknown keys (CostUSD's
+// default) simply cost 0 rather than erroring, since this is a dev-only
+// advisory number, not billing.
 //
 // Prices verified 2026-07-15 against Groq's official pricing page
 // (https://groq.com/pricing) and, for gpt-oss-120b, cross-checked against
@@ -47,27 +48,59 @@ const cachedDiscount = 0.5
 // both of which independently agreed. Groq pricing moves — re-verify against
 // https://groq.com/pricing before citing these numbers again, especially if
 // this table is more than a few months old.
+//
+// Note: as of the verification date above, prompt caching is only supported
+// on a subset of Groq models (the GPT-OSS family: gpt-oss-20b, gpt-oss-120b,
+// gpt-oss-safeguard-20b). llama-3.3-70b-versatile — the daemon's default
+// model — does NOT support prompt caching, so cachedTokens (cached_read_tokens)
+// will legitimately always be 0 for it; CachedPerM only has an effect once a
+// caching-capable model is wired up (see openai/gpt-oss-120b below, the
+// likely Phase 2 candidate).
 var priceTable = map[string]modelPrice{
 	// Groq pricing page, "Llama 3.3 70B Versatile 128k" row: $0.59 / $0.79
-	// per million input/output tokens.
-	"llama-3.3-70b-versatile": {
-		InPerM:  0.59,
-		OutPerM: 0.79,
+	// per million input/output tokens. Cached rate per Groq's prompt-caching
+	// docs (https://console.groq.com/docs/prompt-caching): 50% discount off
+	// InPerM.
+	"openai/llama-3.3-70b-versatile": {
+		InPerM:     0.59,
+		OutPerM:    0.79,
+		CachedPerM: 0.59 * 0.5,
 	},
 	// Groq pricing page, "GPT OSS 120B 128k" row: $0.15 / $0.60 per million
 	// input/output tokens; matches the model's own GroqDocs page, which also
-	// separately lists the cached-input rate as $0.075/M (= 0.5 * $0.15,
-	// consistent with cachedDiscount above).
-	"openai/gpt-oss-120b": {
-		InPerM:  0.15,
-		OutPerM: 0.60,
+	// separately lists the cached-input rate as $0.075/M (= 0.5 * $0.15).
+	"openai/openai/gpt-oss-120b": {
+		InPerM:     0.15,
+		OutPerM:    0.60,
+		CachedPerM: 0.15 * 0.5,
+	},
+	// Anthropic's published Claude Haiku 4.5 pricing: $1.00 / $5.00 per
+	// million input/output tokens. Unlike Groq's flat 50%-of-input cached
+	// rate above, Anthropic discounts cached reads to 0.1x the input rate —
+	// hence the per-model CachedPerM field rather than a global fraction.
+	"anthropic/claude-haiku-4-5": {
+		InPerM:     1.00,
+		OutPerM:    5.00,
+		CachedPerM: 0.10,
+	},
+	// Mistral pricing (mistral.ai/pricing/api, checked 2026-07-16): $0.30/$0.90
+	// per 1M input/output tokens for Codestral on api.mistral.ai (the
+	// per-token endpoint we default to, as opposed to the separate
+	// codestral.mistral.ai subscription tier). The same page lists a general
+	// -90%-on-cached-input-tokens discount applied across eligible API
+	// models; Codestral is not itemized separately, but the discount is
+	// stated as API-wide, giving a cached rate of 10% of InPerM ($0.03/M).
+	"codestral/codestral-latest": {
+		InPerM:     0.30,
+		OutPerM:    0.90,
+		CachedPerM: 0.03,
 	},
 }
 
-// CostUSD estimates the dollar cost of one request given its model and token
-// counts. Unknown models return 0.
-func CostUSD(model string, inputTokens, outputTokens, cachedTokens int) float64 {
-	p, ok := priceTable[model]
+// CostUSD estimates the dollar cost of one request given its provider,
+// model, and token counts. Unknown provider/model pairs return 0.
+func CostUSD(provider, model string, inputTokens, outputTokens, cachedTokens int) float64 {
+	p, ok := priceTable[provider+"/"+model]
 	if !ok {
 		return 0
 	}
@@ -78,9 +111,8 @@ func CostUSD(model string, inputTokens, outputTokens, cachedTokens int) float64 
 	if uncached < 0 {
 		uncached = 0
 	}
-	cachedPerM := p.InPerM * cachedDiscount
 	cost := float64(uncached)/1e6*p.InPerM +
-		float64(cachedTokens)/1e6*cachedPerM +
+		float64(cachedTokens)/1e6*p.CachedPerM +
 		float64(outputTokens)/1e6*p.OutPerM
 	return cost
 }

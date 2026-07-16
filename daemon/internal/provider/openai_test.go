@@ -9,7 +9,25 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
+
+// testReq builds a provider.Request whose ChatUser() renders to exactly
+// user, for tests that only care about the flat system/user strings that
+// today's Complete(ctx, system, user) used to take.
+func testReq(system, user string) Request {
+	return Request{Prompt: prompt.Prompt{System: system, Prefix: user}, MaxTokens: 48}
+}
+
+func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) Provider {
+	t.Helper()
+	p, err := NewOpenAI(baseURL, model, apiKey, maxTokens)
+	if err != nil {
+		t.Fatalf("NewOpenAI() err = %v, want nil", err)
+	}
+	return p
+}
 
 // sseChunk builds one SSE "data:" line carrying content as a chat-completions
 // delta, matching the shape streamChunk expects. json.Marshal takes care of
@@ -43,8 +61,8 @@ func TestComplete_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(srv.URL, "test-model", "test-key", 48)
-	got, err := client.Complete(context.Background(), "sys", "git")
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), testReq("sys", "git"))
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -87,10 +105,10 @@ func TestComplete_FirstLineCutoff(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(srv.URL, "test-model", "test-key", 48)
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
 
 	start := time.Now()
-	got, err := client.Complete(context.Background(), "sys", "user")
+	got, err := client.Complete(context.Background(), testReq("sys", "user"))
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -127,12 +145,12 @@ func TestComplete_Cancellation(t *testing.T) {
 	defer srv.Close()
 	defer close(blockCh)
 
-	client := NewClient(srv.URL, "test-model", "test-key", 48)
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Complete(ctx, "sys", "user")
+		_, err := client.Complete(ctx, testReq("sys", "user"))
 		errCh <- err
 	}()
 
@@ -153,13 +171,22 @@ func TestComplete_HTTPError(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusInternalServerError} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
-				fmt.Fprint(w, `{"error":"boom"}`)
+				// The SDK's error path (requestconfig.RequestConfig.Execute)
+				// decodes the response body into *openai.Error, which expects
+				// the standard OpenAI error *object* shape under "error" —
+				// {"error": {"message": ..., "type": ..., ...}} — not a flat
+				// string. A flat {"error":"boom"} (what the old hand-rolled
+				// client's test used, since it only cared about status code
+				// and raw body text) fails that decode, so this is adapted to
+				// the shape the SDK genuinely requires.
+				fmt.Fprint(w, `{"error":{"message":"boom","type":"invalid_request_error","code":"boom_code","param":""}}`)
 			}))
 			defer srv.Close()
 
-			client := NewClient(srv.URL, "test-model", "test-key", 48)
-			got, err := client.Complete(context.Background(), "sys", "user")
+			client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+			got, err := client.Complete(context.Background(), testReq("sys", "user"))
 			if err == nil {
 				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got.Text)
 			}
@@ -190,8 +217,8 @@ func TestComplete_UsageAndFinishReason(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(srv.URL, "test-model", "test-key", 48)
-	got, err := client.Complete(context.Background(), "sys", "user")
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), testReq("sys", "user"))
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}

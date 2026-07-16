@@ -23,4 +23,5 @@ __debug_bin*
 # Sandbox
 sandbox/.zsh_history
 sandbox/.env
-sandbox/.metrics/events.jsonl
+sandbox/config.toml
+sandbox/.metrics/

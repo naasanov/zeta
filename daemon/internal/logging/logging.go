@@ -1,3 +1,7 @@
+// Package logging provides a compact slog.Handler for the daemon's dev logs:
+// "HH:MM:SS.mmm L msg key=val" instead of slog's verbose time=/level=/msg=
+// prefix, so the VS Code debug panel stays readable. It's presentation only —
+// no filtering or routing logic.
 package logging
 
 import (

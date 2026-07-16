@@ -86,14 +86,47 @@ func contextBlock(req protocol.Request) string {
 	return "Context:\n" + strings.Join(lines, "\n") + "\n\n"
 }
 
-// Build assembles the provider turns for a request. The system turn is
-// intentionally mode-independent; KindTyping and KindNextCommand differ only in
-// the short user-turn directive next to the buffer.
-func Build(req protocol.Request) (system, user string) {
-	ctxBlock := contextBlock(req)
-	userPrefix := typingUserPrefix
+// Prompt is the provider-neutral prompt. Adapters render it their own way:
+// chat adapters build messages (System + ChatUser()), the FIM adapter builds
+// prompt+suffix directly from Prefix/Suffix.
+type Prompt struct {
+	System      string // stable across every request — the prompt-cache anchor
+	Instruction string // typing vs next-command append contract; static per mode
+	Context     string // "Context:\n cwd: ...\n" — changes on chpwd/precmd
+	Prefix      string // the buffer being completed; may be ""
+	Suffix      string // always "" in Phase 2; the FIM infill hook
+}
+
+// Build assembles the provider-neutral Prompt for a request. The system turn
+// is intentionally mode-independent; KindTyping and KindNextCommand differ
+// only in the short user-turn directive next to the buffer.
+func Build(req protocol.Request) Prompt {
+	instruction := typingUserPrefix
 	if req.Kind == protocol.KindNextCommand {
-		userPrefix = nextCommandUserPrefix
+		instruction = nextCommandUserPrefix
 	}
-	return systemPrompt, ctxBlock + userPrefix + req.Buf
+	return Prompt{
+		System:      systemPrompt,
+		Instruction: instruction,
+		Context:     contextBlock(req),
+		Prefix:      req.Buf,
+		Suffix:      "",
+	}
+}
+
+// ChatUser renders the user turn for chat adapters: Context + Instruction +
+// Prefix, with Prefix last so the completion continues directly from the
+// buffer.
+//
+// T4 considered reordering this to Instruction-before-Context so a stable
+// instruction prefix could seed a provider prompt cache (design §7). Measured
+// and DROPPED: prompt caching is unreachable for every current profile — the
+// full chat prefix (system prompt ~1171 tokens + this user turn) is far below
+// Anthropic Haiku's 4096-token minimum cacheable prefix, Groq's default llama
+// doesn't support caching, and the default provider (codestral, FIM) doesn't
+// use ChatUser at all. Reorder only becomes worthwhile alongside a
+// caching-capable chat model whose prefix clears its minimum; see the note in
+// anthropic.go where a cache_control breakpoint would otherwise go.
+func (p Prompt) ChatUser() string {
+	return p.Context + p.Instruction + p.Prefix
 }

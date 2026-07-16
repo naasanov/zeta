@@ -239,6 +239,17 @@ type RequestEvent struct {
 	CancelledAtStage  string `json:"cancelled_at_stage"` // "in_flight" | ""
 
 	EventsDroppedSinceLast int64 `json:"events_dropped_since_last"`
+
+	// METRICS(§12): Provider/Model/ErrorType are additive fields from the
+	// provider-interface refactor (T1) — Provider/Model let two adapters
+	// serving the same model name at different prices be told apart (see
+	// price.go's provider+model key); ErrorType is the unwrapped
+	// *provider.Error Kind on the error path, empty otherwise. Profile is
+	// wired in a later ticket (TOML config profiles) and is always "" here.
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	Profile   string `json:"profile"`
+	ErrorType string `json:"error_type"`
 }
 
 // SessionID derives the session portion of a request id: everything before
