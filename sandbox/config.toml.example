@@ -19,7 +19,7 @@
 
 # Which profile below runs by default. Override per-session with the
 # ZSH_AUTOPILOT_PROFILE env var without editing this file.
-default_profile = "groq"
+default_profile = "codestral"
 
 # Quiet period (ms) before a buffered request dispatches to the provider
 # (design §4). ZSH_AUTOPILOT_DEBOUNCE_MS overrides this at runtime.
