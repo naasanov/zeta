@@ -1,0 +1,46 @@
+# Example config.toml for the zsh-autopilot daemon (design §6).
+#
+# Copy this to $XDG_CONFIG_HOME/autopilot/config.toml (or
+# ~/.config/autopilot/config.toml if XDG_CONFIG_HOME is unset). If no file
+# exists there, the daemon falls back to a built-in default reproducing the
+# original single-profile Groq behavior, so this file is entirely optional.
+#
+# API keys are never written here — each profile names an environment
+# variable (api_key_env) or a shell command (api_key_cmd) that produces the
+# key at startup. In dev, sandbox/.env supplies GROQ_API_KEY /
+# ANTHROPIC_API_KEY / MISTRAL_API_KEY etc. and is loaded by sandbox/.zshrc
+# and the debug launch config.
+
+# Which profile below runs by default. Override per-session with the
+# ZSH_AUTOPILOT_PROFILE env var without editing this file.
+default_profile = "groq"
+
+# Quiet period (ms) before a buffered request dispatches to the provider
+# (design §4). ZSH_AUTOPILOT_DEBOUNCE_MS overrides this at runtime.
+debounce_ms = 100
+
+# Max output tokens per completion (design §5): a shell completion is a
+# handful of words, not prose.
+max_tokens = 48
+
+[profiles.groq]
+provider = "openai"
+base_url = "https://api.groq.com/openai/v1"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+# Alternative to api_key_env: resolve the key by running a shell command
+# (its stdout, trailing newline trimmed, becomes the key). Useful for
+# password managers instead of plain env vars:
+# api_key_cmd = "pass show groq/api-key"
+
+[profiles.haiku]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+api_key_env = "ANTHROPIC_API_KEY"
+# Anthropic's adapter takes no base_url; any value here is ignored.
+
+[profiles.codestral]
+provider = "codestral"
+base_url = "https://api.mistral.ai"
+model = "codestral-latest"
+api_key_env = "MISTRAL_API_KEY"

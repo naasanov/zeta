@@ -63,6 +63,36 @@ func TestCostUSD_SameModelNameDifferentProviderDoesNotCollide(t *testing.T) {
 	}
 }
 
+// TestCostUSD_AnthropicCachedDiscount pins the anthropic/claude-haiku-4-5
+// entry: cached tokens bill at 0.1x the input rate (Anthropic's discount),
+// not Groq's 0.5x, which is exactly why CachedPerM is a per-model field.
+func TestCostUSD_AnthropicCachedDiscount(t *testing.T) {
+	const provider = "anthropic"
+	const model = "claude-haiku-4-5"
+
+	// 1,000,000 input tokens, of which 400,000 are cached; no output tokens
+	// isolates the input-side cached-vs-uncached split.
+	got := CostUSD(provider, model, 1_000_000, 0, 400_000)
+
+	inPerM := 1.00
+	cachedPerM := priceTable[provider+"/"+model].CachedPerM // 0.10
+	want := 0.6*inPerM + 0.4*cachedPerM                     // 0.60 + 0.04 = 0.64
+	if !floatsClose(got, want) {
+		t.Errorf("CostUSD() = %v, want %v", got, want)
+	}
+}
+
+// TestCostUSD_Codestral pins the codestral/codestral-latest entry (unverified
+// placeholder — see the TODO(price) comment in price.go) so a future price
+// correction shows up as an intentional test diff rather than a silent drift.
+func TestCostUSD_Codestral(t *testing.T) {
+	got := CostUSD("codestral", "codestral-latest", 1_000_000, 500_000, 0)
+	want := 1.0*0.30 + 0.5*0.90 // $0.30 + $0.45 = $0.75
+	if !floatsClose(got, want) {
+		t.Errorf("CostUSD() = %v, want %v", got, want)
+	}
+}
+
 func floatsClose(a, b float64) bool {
 	const eps = 1e-9
 	d := a - b

@@ -70,6 +70,23 @@ var priceTable = map[string]modelPrice{
 		OutPerM:    0.60,
 		CachedPerM: 0.15 * 0.5,
 	},
+	// Anthropic's published Claude Haiku 4.5 pricing: $1.00 / $5.00 per
+	// million input/output tokens. Unlike Groq's flat 50%-of-input cached
+	// rate above, Anthropic discounts cached reads to 0.1x the input rate —
+	// hence the per-model CachedPerM field rather than a global fraction.
+	"anthropic/claude-haiku-4-5": {
+		InPerM:     1.00,
+		OutPerM:    5.00,
+		CachedPerM: 0.10,
+	},
+	// TODO(price): Codestral rate unverified — confirm against Mistral
+	// pricing before treating cost_usd for this row as anything but a rough
+	// placeholder.
+	"codestral/codestral-latest": {
+		InPerM:     0.30,
+		OutPerM:    0.90,
+		CachedPerM: 0,
+	},
 }
 
 // CostUSD estimates the dollar cost of one request given its provider,

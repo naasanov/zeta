@@ -7,34 +7,26 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
 
-// testReq builds a provider.Request whose ChatUser() renders to exactly
-// user, for tests that only care about the flat system/user strings that
-// today's Complete(ctx, system, user) used to take.
-func testReq(system, user string) Request {
-	return Request{Prompt: prompt.Prompt{System: system, Prefix: user}, MaxTokens: 48}
-}
-
-func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) Provider {
+func newCodestral(t *testing.T, baseURL, model, apiKey string, maxTokens int) Provider {
 	t.Helper()
-	p, err := NewOpenAI(baseURL, model, apiKey, maxTokens)
+	p, err := NewCodestral(baseURL, model, apiKey, maxTokens)
 	if err != nil {
-		t.Fatalf("NewOpenAI() err = %v, want nil", err)
+		t.Fatalf("NewCodestral() err = %v, want nil", err)
 	}
 	return p
 }
 
-// sseChunk builds one SSE "data:" line carrying content as a chat-completions
-// delta, matching the shape streamChunk expects. json.Marshal takes care of
-// escaping any embedded newline in content as the two characters `\` `n`, so
-// the emitted line is still exactly one physical line, just like a real
-// provider's stream.
-func sseChunk(t *testing.T, content string) string {
+// fimSSEChunk builds one SSE "data:" line carrying content as a FIM
+// completions delta, matching fimChunk's shape. Codestral's streaming
+// response is OpenAI-shaped, so this mirrors openai_test.go's sseChunk.
+func fimSSEChunk(t *testing.T, content string) string {
 	t.Helper()
 	payload := map[string]any{
 		"choices": []map[string]any{
@@ -48,12 +40,19 @@ func sseChunk(t *testing.T, content string) string {
 	return "data: " + string(b) + "\n\n"
 }
 
-func TestComplete_HappyPath(t *testing.T) {
+func TestComplete_Codestral_HappyPath(t *testing.T) {
+	var gotBody fimRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/fim/completions" {
+			t.Errorf("request path = %q, want %q", r.URL.Path, "/v1/fim/completions")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
 		for _, part := range []string{"git ", "commit ", "-m \"wip\""} {
-			fmt.Fprint(w, sseChunk(t, part))
+			fmt.Fprint(w, fimSSEChunk(t, part))
 			flusher.Flush()
 		}
 		fmt.Fprint(w, "data: [DONE]\n\n")
@@ -61,8 +60,9 @@ func TestComplete_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
-	got, err := client.Complete(context.Background(), testReq("sys", "git"))
+	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
+	req := Request{Prompt: prompt.Prompt{Prefix: "git"}, MaxTokens: 48}
+	got, err := client.Complete(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -73,6 +73,14 @@ func TestComplete_HappyPath(t *testing.T) {
 	if got.HTTPStatus != http.StatusOK {
 		t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, http.StatusOK)
 	}
+	// Request shape must be prompt/suffix, not messages — the whole reason
+	// this is its own adapter rather than another OpenAI-compatible base URL.
+	if gotBody.Prompt != "git" {
+		t.Errorf("request Prompt = %q, want %q", gotBody.Prompt, "git")
+	}
+	if gotBody.Suffix != "" {
+		t.Errorf("request Suffix = %q, want empty", gotBody.Suffix)
+	}
 }
 
 // TestComplete_FirstLineCutoff drives a stream whose content spans a newline
@@ -81,34 +89,34 @@ func TestComplete_HappyPath(t *testing.T) {
 // long before the final chunk would have been sent, proving the client
 // stopped reading early rather than happening to produce the right prefix
 // after consuming everything.
-func TestComplete_FirstLineCutoff(t *testing.T) {
+func TestComplete_Codestral_FirstLineCutoff(t *testing.T) {
 	const lateDelay = 300 * time.Millisecond
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
 
-		fmt.Fprint(w, sseChunk(t, "foo"))
+		fmt.Fprint(w, fimSSEChunk(t, "foo"))
 		flusher.Flush()
 
-		fmt.Fprint(w, sseChunk(t, " bar\n"))
+		fmt.Fprint(w, fimSSEChunk(t, " bar\n"))
 		flusher.Flush()
 
 		// A later chunk that, if consumed, would change the result. The
 		// client must not wait for this: it already has a complete first
 		// line after the previous chunk.
 		time.Sleep(lateDelay)
-		fmt.Fprint(w, sseChunk(t, "baz-should-not-appear"))
+		fmt.Fprint(w, fimSSEChunk(t, "baz-should-not-appear"))
 		flusher.Flush()
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	}))
 	defer srv.Close()
 
-	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
 
 	start := time.Now()
-	got, err := client.Complete(context.Background(), testReq("sys", "user"))
+	got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -128,13 +136,13 @@ func TestComplete_FirstLineCutoff(t *testing.T) {
 // Complete returns promptly (not after the block would otherwise clear) with
 // a context error, proving the in-flight HTTP call is actually aborted by ctx
 // cancellation and the call does not hang.
-func TestComplete_Cancellation(t *testing.T) {
+func TestComplete_Codestral_Cancellation(t *testing.T) {
 	blockCh := make(chan struct{})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
-		fmt.Fprint(w, sseChunk(t, "partial-no-newline"))
+		fmt.Fprint(w, fimSSEChunk(t, "partial-no-newline"))
 		flusher.Flush()
 		<-blockCh // simulate a stalled stream that never completes on its own
 	}))
@@ -145,12 +153,12 @@ func TestComplete_Cancellation(t *testing.T) {
 	defer srv.Close()
 	defer close(blockCh)
 
-	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Complete(ctx, testReq("sys", "user"))
+		_, err := client.Complete(ctx, Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
 		errCh <- err
 	}()
 
@@ -167,26 +175,17 @@ func TestComplete_Cancellation(t *testing.T) {
 	}
 }
 
-func TestComplete_HTTPError(t *testing.T) {
+func TestComplete_Codestral_HTTPError(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusInternalServerError} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
-				// The SDK's error path (requestconfig.RequestConfig.Execute)
-				// decodes the response body into *openai.Error, which expects
-				// the standard OpenAI error *object* shape under "error" —
-				// {"error": {"message": ..., "type": ..., ...}} — not a flat
-				// string. A flat {"error":"boom"} (what the old hand-rolled
-				// client's test used, since it only cared about status code
-				// and raw body text) fails that decode, so this is adapted to
-				// the shape the SDK genuinely requires.
-				fmt.Fprint(w, `{"error":{"message":"boom","type":"invalid_request_error","code":"boom_code","param":""}}`)
+				fmt.Fprint(w, `{"error":"boom"}`)
 			}))
 			defer srv.Close()
 
-			client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
-			got, err := client.Complete(context.Background(), testReq("sys", "user"))
+			client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
+			got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
 			if err == nil {
 				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got.Text)
 			}
@@ -194,6 +193,13 @@ func TestComplete_HTTPError(t *testing.T) {
 			// return so the caller can log/emit the status of a failed call.
 			if got.HTTPStatus != status {
 				t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, status)
+			}
+			var perr *Error
+			if !errors.As(err, &perr) {
+				t.Fatalf("Complete() err = %v, want *provider.Error", err)
+			}
+			if perr.Provider != "codestral" {
+				t.Errorf("Error.Provider = %q, want %q", perr.Provider, "codestral")
 			}
 		})
 	}
@@ -203,7 +209,7 @@ func TestComplete_HTTPError(t *testing.T) {
 // (no newline in the content, so the first-line cutoff doesn't fire) with a
 // trailing usage chunk and a finish_reason, asserting both decode onto the
 // returned Completion.
-func TestComplete_UsageAndFinishReason(t *testing.T) {
+func TestComplete_Codestral_UsageAndFinishReason(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
@@ -217,8 +223,8 @@ func TestComplete_UsageAndFinishReason(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
-	got, err := client.Complete(context.Background(), testReq("sys", "user"))
+	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -240,5 +246,86 @@ func TestComplete_UsageAndFinishReason(t *testing.T) {
 	}
 	if got.TTFT <= 0 {
 		t.Errorf("Complete().TTFT = %v, want > 0", got.TTFT)
+	}
+}
+
+// TestNewCodestral_Defaults asserts the documented empty-value defaults:
+// baseURL "https://api.mistral.ai", model "codestral-latest". Constructed
+// indirectly via Model()/the request URL prefix rather than reaching into
+// unexported fields, since the constructor returns the Provider interface.
+func TestNewCodestral_Defaults(t *testing.T) {
+	p, err := NewCodestral("", "", "test-key", 48)
+	if err != nil {
+		t.Fatalf("NewCodestral() err = %v, want nil", err)
+	}
+	if p.Name() != "codestral" {
+		t.Errorf("Name() = %q, want %q", p.Name(), "codestral")
+	}
+	if p.Model() != "codestral-latest" {
+		t.Errorf("Model() = %q, want %q", p.Model(), "codestral-latest")
+	}
+	c := p.(*codestralClient)
+	if c.baseURL != "https://api.mistral.ai" {
+		t.Errorf("baseURL = %q, want %q", c.baseURL, "https://api.mistral.ai")
+	}
+}
+
+// TestRenderFIM_ContextPresent pins the exact target shape from the T2c
+// contract: context lines re-rendered as "#"-prefixed shell comments, in
+// order, with the buffer last and no trailing newline.
+func TestRenderFIM_ContextPresent(t *testing.T) {
+	p := prompt.Prompt{
+		System:      "system prompt text",
+		Instruction: "instruction text",
+		Context:     "Context:\n- cwd: /Users/x/proj\n- git: branch main (dirty)\n\n",
+		Prefix:      "git com",
+		Suffix:      "",
+	}
+	gotPrompt, gotSuffix := RenderFIM(p)
+	want := "# cwd: /Users/x/proj\n# git: branch main (dirty)\ngit com"
+	if gotPrompt != want {
+		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
+	}
+	if gotSuffix != "" {
+		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)
+	}
+}
+
+// TestRenderFIM_ContextAbsent checks the empty-context case is just the
+// buffer, with no stray comment lines or leading newline.
+func TestRenderFIM_ContextAbsent(t *testing.T) {
+	p := prompt.Prompt{
+		System:      "system prompt text",
+		Instruction: "instruction text",
+		Context:     "",
+		Prefix:      "git com",
+		Suffix:      "",
+	}
+	gotPrompt, gotSuffix := RenderFIM(p)
+	if gotPrompt != "git com" {
+		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, "git com")
+	}
+	if gotSuffix != "" {
+		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)
+	}
+}
+
+// TestRenderFIM_ExcludesSystemAndInstruction asserts System/Instruction never
+// leak into the FIM prompt — a FIM model takes no system role and doesn't
+// need the chat append-contract text.
+func TestRenderFIM_ExcludesSystemAndInstruction(t *testing.T) {
+	p := prompt.Prompt{
+		System:      "UNIQUE_SYSTEM_MARKER",
+		Instruction: "UNIQUE_INSTRUCTION_MARKER",
+		Context:     "Context:\n- cwd: /tmp\n\n",
+		Prefix:      "git",
+		Suffix:      "",
+	}
+	gotPrompt, _ := RenderFIM(p)
+	if strings.Contains(gotPrompt, "UNIQUE_SYSTEM_MARKER") {
+		t.Errorf("RenderFIM() prompt unexpectedly contains System text: %q", gotPrompt)
+	}
+	if strings.Contains(gotPrompt, "UNIQUE_INSTRUCTION_MARKER") {
+		t.Errorf("RenderFIM() prompt unexpectedly contains Instruction text: %q", gotPrompt)
 	}
 }
