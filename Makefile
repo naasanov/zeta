@@ -14,7 +14,7 @@ BIN  ?= bin
 PLUGIN  ?= zsh-autopilot.zsh
 ZSH_SRC := $(sort $(wildcard zsh/[0-9]*.zsh))
 
-.PHONY: all build daemon spike plugin hooks test fmt vet clean
+.PHONY: all build daemon plugin hooks test fmt vet clean
 
 all: build plugin
 
@@ -26,9 +26,6 @@ build: daemon ## Build the daemon binary
 
 daemon: ## Build the daemon -> bin/autopilotd
 	cd daemon && $(GO) build -o ../$(BIN)/autopilotd ./cmd/autopilotd
-
-spike: ## Build the Phase 0 echo server -> bin/echo-server
-	cd spike/echo-server && $(GO) build -o ../../$(BIN)/echo-server .
 
 plugin: $(PLUGIN) ## Concatenate zsh/*.zsh fragments -> zsh-autopilot.zsh
 
