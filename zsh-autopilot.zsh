@@ -66,10 +66,10 @@ typeset -gi ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL=14400
 typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/zeta/main/scripts/install.sh
 
 # Number of recent commands kept for the "history" context field sent with
-# each request (oldest first). Small and bounded — this rides along on every
-# keystroke burst, not just next-command requests, so keep it short.
+# each request (oldest first). Bounded — this rides along on every keystroke
+# burst, not just next-command requests, so keep it reasonable.
 (( ! ${+ZSH_AUTOPILOT_HISTORY_SIZE} )) &&
-typeset -gi ZSH_AUTOPILOT_HISTORY_SIZE=10
+typeset -gi ZSH_AUTOPILOT_HISTORY_SIZE=30
 
 # Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {
@@ -579,6 +579,7 @@ typeset -gi _ZSH_AUTOPILOT_LAST_EXIT=0
 typeset -g _ZSH_AUTOPILOT_GIT_BRANCH=
 typeset -g _ZSH_AUTOPILOT_GIT_DIRTY=false
 typeset -ga _ZSH_AUTOPILOT_HISTORY
+typeset -ga _ZSH_AUTOPILOT_DIR_ENTRIES
 
 # precmd hook: capture the previous command's exit status. This MUST be the
 # very first statement of this function (and this function should be
@@ -606,6 +607,22 @@ _zsh_autopilot_refresh_git() {
 
   [[ -n $(git status --porcelain --untracked-files=no 2>/dev/null) ]] &&
     _ZSH_AUTOPILOT_GIT_DIRTY=true
+}
+
+# precmd + chpwd hook: refresh the cached listing of the current directory's
+# entries. Cheap glob, no fork — but only ever on a fresh prompt or directory
+# change, same cadence as git state above. precmd (not just chpwd) is
+# intentional: it also catches files created within the directory (e.g. after
+# `touch foo`).
+_zsh_autopilot_refresh_dir() {
+  emulate -L zsh
+
+  typeset -g _ZSH_AUTOPILOT_DIR_ENTRIES=()
+
+  local -a e
+  e=( *(N) )
+
+  (( ${#e} >= 1 && ${#e} <= 50 )) && _ZSH_AUTOPILOT_DIR_ENTRIES=("${e[@]}")
 }
 
 # preexec hook: append the about-to-run command to the bounded recent-history
@@ -638,12 +655,49 @@ autoload -Uz add-zsh-hook
 add-zsh-hook precmd _zsh_autopilot_capture_exit
 add-zsh-hook precmd _zsh_autopilot_refresh_git
 add-zsh-hook chpwd _zsh_autopilot_refresh_git
+add-zsh-hook precmd _zsh_autopilot_refresh_dir
+add-zsh-hook chpwd _zsh_autopilot_refresh_dir
 add-zsh-hook preexec _zsh_autopilot_track_history
 
 # Seed the git cache immediately so context is sane even before the first
 # precmd runs (e.g. a suggestion request triggered while typing on the very
 # first prompt).
 _zsh_autopilot_refresh_git
+
+# Seed the directory-listing cache immediately, same reasoning as the git
+# cache above.
+_zsh_autopilot_refresh_dir
+
+# One-shot: seed _ZSH_AUTOPILOT_HISTORY from zsh's own in-memory history (fc)
+# so a brand-new shell starts with recency context instead of an empty array,
+# waiting for commands to run before it has anything to send. `fc -ln` reads
+# history already loaded from $HISTFILE at shell startup — no file parsing,
+# no fork. Guarded so it never clobbers if the array is somehow already
+# populated (e.g. this fragment gets re-sourced).
+_zsh_autopilot_seed_history() {
+  emulate -L zsh -o extendedglob
+
+  (( ${#_ZSH_AUTOPILOT_HISTORY} > 0 )) && return
+
+  local -i max=${ZSH_AUTOPILOT_HISTORY_SIZE:-10}
+  (( max < 1 )) && return
+
+  local -a seeded
+  local line
+  # fc -ln -$max: last $max history entries, oldest first, no line numbers.
+  # Entries are left-padded with whitespace and may include blank lines, so
+  # trim each (the [[:space:]]# repetition needs extendedglob, set above)
+  # and skip empties.
+  while IFS= read -r line; do
+    line="${line##[[:space:]]#}"
+    line="${line%%[[:space:]]#}"
+    [[ -z $line ]] && continue
+    seeded+=("$line")
+  done < <(fc -ln -$max 2>/dev/null)
+
+  (( ${#seeded} > 0 )) && _ZSH_AUTOPILOT_HISTORY=("${seeded[@]}")
+}
+_zsh_autopilot_seed_history
 #--------------------------------------------------------------------#
 # Daemon Socket Transport                                            #
 #--------------------------------------------------------------------#
@@ -758,6 +812,18 @@ _zsh_autopilot_send() {
       hist_json+=${hist_json:+,}'"'${REPLY}'"'
     done
     line+=',"history":['${hist_json}']'
+  fi
+
+  # Distinct loop var (entry, not item): re-declaring the `item` already
+  # local-ised by the history block above would make zsh print `item=...` to
+  # stdout — garbage on the prompt on every send that carries dir entries.
+  if (( ${#_ZSH_AUTOPILOT_DIR_ENTRIES} > 0 )); then
+    local de_json='' entry
+    for entry in "${_ZSH_AUTOPILOT_DIR_ENTRIES[@]}"; do
+      _zsh_autopilot_json_escape "$entry"
+      de_json+=${de_json:+,}'"'${REPLY}'"'
+    done
+    line+=',"dir_entries":['${de_json}']'
   fi
 
   line+='}'

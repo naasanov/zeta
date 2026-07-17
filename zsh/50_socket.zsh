@@ -114,6 +114,18 @@ _zsh_autopilot_send() {
     line+=',"history":['${hist_json}']'
   fi
 
+  # Distinct loop var (entry, not item): re-declaring the `item` already
+  # local-ised by the history block above would make zsh print `item=...` to
+  # stdout — garbage on the prompt on every send that carries dir entries.
+  if (( ${#_ZSH_AUTOPILOT_DIR_ENTRIES} > 0 )); then
+    local de_json='' entry
+    for entry in "${_ZSH_AUTOPILOT_DIR_ENTRIES[@]}"; do
+      _zsh_autopilot_json_escape "$entry"
+      de_json+=${de_json:+,}'"'${REPLY}'"'
+    done
+    line+=',"dir_entries":['${de_json}']'
+  fi
+
   line+='}'
 
   # Write; if the peer had gone away (half-open), reconnect once and retry.

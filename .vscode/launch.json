@@ -8,10 +8,10 @@
       "mode": "debug",
       "program": "${workspaceFolder}/daemon/cmd/autopilotd",
       "cwd": "${workspaceFolder}",
-      "args": ["-socket", "/tmp/zsh-autopilot.sock", "-v"],
+      "args": ["-v"],
       "envFile": "${workspaceFolder}/sandbox/.env",
       "console": "integratedTerminal",
-      "preLaunchTask": "stop daemon"
+      "preLaunchTask": "build"
     },
     {
       "name": "sandbox: fresh zsh",

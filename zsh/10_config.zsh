@@ -39,10 +39,10 @@ typeset -gi ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL=14400
 typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/zeta/main/scripts/install.sh
 
 # Number of recent commands kept for the "history" context field sent with
-# each request (oldest first). Small and bounded — this rides along on every
-# keystroke burst, not just next-command requests, so keep it short.
+# each request (oldest first). Bounded — this rides along on every keystroke
+# burst, not just next-command requests, so keep it reasonable.
 (( ! ${+ZSH_AUTOPILOT_HISTORY_SIZE} )) &&
-typeset -gi ZSH_AUTOPILOT_HISTORY_SIZE=10
+typeset -gi ZSH_AUTOPILOT_HISTORY_SIZE=30
 
 # Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {

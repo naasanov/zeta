@@ -20,11 +20,12 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		{V: Version, ID: "sess.5", Kind: KindNextCommand, Buf: ""},
 		{
 			V: Version, ID: "sess.6", Kind: KindTyping, Buf: "git ad",
-			Cwd:       "/Users/x/project",
-			GitBranch: "main",
-			GitDirty:  true,
-			LastExit:  1,
-			History:   []string{"cd project", "npm install", "npm test"},
+			Cwd:        "/Users/x/project",
+			GitBranch:  "main",
+			GitDirty:   true,
+			LastExit:   1,
+			History:    []string{"cd project", "npm install", "npm test"},
+			DirEntries: []string{"a.txt", "b.txt", "node_modules"},
 		},
 	}
 	for _, want := range cases {
@@ -39,9 +40,9 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		if err := NewDecoder(&buf).Decode(&got); err != nil {
 			t.Fatalf("Decode(%q): %v", want.Buf, err)
 		}
-		// Request now carries a slice field (History), so it's no longer
-		// comparable with !=; reflect.DeepEqual handles nil-vs-empty and
-		// element-wise comparison correctly.
+		// Request now carries slice fields (History, DirEntries), so it's no
+		// longer comparable with !=; reflect.DeepEqual handles nil-vs-empty
+		// and element-wise comparison correctly.
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("round trip mismatch:\n got %+v\nwant %+v", got, want)
 		}
@@ -55,7 +56,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 // would NOT fail round-trip — the field would just stay zero. So decode literal
 // client bytes and assert the context values actually land.
 func TestDecodeClientContextJSON(t *testing.T) {
-	full := `{"v":1,"id":"s.1","kind":"typing","buf":"git sta","cwd":"/home/u/p","git_branch":"phase-1","git_dirty":true,"last_exit":127,"history":["git commit -m \"wip\"","cat a > b & echo hi"]}`
+	full := `{"v":1,"id":"s.1","kind":"typing","buf":"git sta","cwd":"/home/u/p","git_branch":"phase-1","git_dirty":true,"last_exit":127,"history":["git commit -m \"wip\"","cat a > b & echo hi"],"dir_entries":["a","b"]}`
 	var got Request
 	if err := NewDecoder(strings.NewReader(full)).Decode(&got); err != nil {
 		t.Fatalf("decode full client JSON: %v", err)
@@ -63,7 +64,8 @@ func TestDecodeClientContextJSON(t *testing.T) {
 	want := Request{
 		V: 1, ID: "s.1", Kind: KindTyping, Buf: "git sta",
 		Cwd: "/home/u/p", GitBranch: "phase-1", GitDirty: true, LastExit: 127,
-		History: []string{`git commit -m "wip"`, "cat a > b & echo hi"},
+		History:    []string{`git commit -m "wip"`, "cat a > b & echo hi"},
+		DirEntries: []string{"a", "b"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("context fields did not land from client JSON:\n got %+v\nwant %+v", got, want)
@@ -75,7 +77,7 @@ func TestDecodeClientContextJSON(t *testing.T) {
 	if err := NewDecoder(strings.NewReader(min)).Decode(&got); err != nil {
 		t.Fatalf("decode minimal client JSON: %v", err)
 	}
-	if got.GitBranch != "" || got.GitDirty || got.LastExit != 0 || got.History != nil {
+	if got.GitBranch != "" || got.GitDirty || got.LastExit != 0 || got.History != nil || got.DirEntries != nil {
 		t.Errorf("omitted fields should decode to zero, got %+v", got)
 	}
 }

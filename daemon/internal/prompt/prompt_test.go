@@ -32,12 +32,36 @@ func TestContextBlockLastExitZeroOmitted(t *testing.T) {
 // TestContextBlockEmptyHistoryAndBranchOmitted checks that a present-but-empty
 // slice/string doesn't leak a line either.
 func TestContextBlockEmptyHistoryAndBranchOmitted(t *testing.T) {
-	got := contextBlock(protocol.Request{Cwd: "/tmp", GitBranch: "", History: nil})
+	got := contextBlock(protocol.Request{Cwd: "/tmp", GitBranch: "", History: nil, DirEntries: nil})
 	if strings.Contains(got, "git:") {
 		t.Errorf("expected no git line for empty GitBranch, got %q", got)
 	}
 	if strings.Contains(got, "recent commands") {
 		t.Errorf("expected no recent-commands line for empty History, got %q", got)
+	}
+	if strings.Contains(got, "files:") {
+		t.Errorf("expected no files line for empty DirEntries, got %q", got)
+	}
+}
+
+// TestContextBlockDirEntriesPresentAndAbsent checks the dir_entries render
+// contract directly: present entries produce a "- files: ..." line
+// space-joined (mirroring the history line's gating idiom), and an
+// absent/empty slice produces no line at all.
+func TestContextBlockDirEntriesPresentAndAbsent(t *testing.T) {
+	got := contextBlock(protocol.Request{Cwd: "/tmp", DirEntries: []string{"a", "b", "c"}})
+	if !strings.Contains(got, "- files: a b c") {
+		t.Errorf("expected files line for present DirEntries, got %q", got)
+	}
+
+	got = contextBlock(protocol.Request{Cwd: "/tmp", DirEntries: []string{}})
+	if strings.Contains(got, "files:") {
+		t.Errorf("expected no files line for empty (non-nil) DirEntries, got %q", got)
+	}
+
+	got = contextBlock(protocol.Request{Cwd: "/tmp"})
+	if strings.Contains(got, "files:") {
+		t.Errorf("expected no files line for absent DirEntries, got %q", got)
 	}
 }
 
@@ -47,17 +71,19 @@ func TestContextBlockEmptyHistoryAndBranchOmitted(t *testing.T) {
 func TestContextBlockFullyPopulated(t *testing.T) {
 	req := protocol.Request{
 		V: protocol.Version, ID: "sess.1", Kind: protocol.KindTyping, Buf: "git ad",
-		Cwd:       "/Users/x/project",
-		GitBranch: "main",
-		GitDirty:  true,
-		LastExit:  1,
-		History:   []string{"cd project", "npm install", "npm test"},
+		Cwd:        "/Users/x/project",
+		GitBranch:  "main",
+		GitDirty:   true,
+		LastExit:   1,
+		History:    []string{"cd project", "npm install", "npm test"},
+		DirEntries: []string{"README.md", "src", "go.mod"},
 	}
 	got := contextBlock(req)
 
 	wantLines := []string{
 		"Context:",
 		"- cwd: /Users/x/project",
+		"- files: README.md src go.mod",
 		"- git: branch main (dirty)",
 		"- last command failed (exit 1)",
 		"- recent commands: cd project; npm install; npm test",
@@ -68,7 +94,8 @@ func TestContextBlockFullyPopulated(t *testing.T) {
 		}
 	}
 	// Order matters for the stable-prefix caching story (design §7): cwd,
-	// then git, then last-exit, then history.
+	// then files (directory-static context, §7), then git, then last-exit,
+	// then history.
 	idxs := make([]int, len(wantLines)-1)
 	for i, want := range wantLines[1:] {
 		idxs[i] = strings.Index(got, want)

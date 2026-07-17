@@ -57,8 +57,9 @@ const (
 // on req into a compact "Context:" block for the user turn, one line per
 // present field, omitting lines for absent/zero fields entirely (no "git:"
 // line without a branch, no "last command" line when LastExit == 0, no
-// "recent commands" line with empty History). It returns "" when no context
-// fields are present at all, so callers can skip the block cleanly.
+// "recent commands" line with empty History, no "files:" line with empty
+// DirEntries). It returns "" when no context fields are present at all, so
+// callers can skip the block cleanly.
 //
 // This is a pure function (no I/O) so it's unit-testable without a running
 // daemon or provider.
@@ -66,6 +67,9 @@ func contextBlock(req protocol.Request) string {
 	var lines []string
 	if req.Cwd != "" {
 		lines = append(lines, "- cwd: "+req.Cwd)
+	}
+	if len(req.DirEntries) > 0 {
+		lines = append(lines, "- files: "+strings.Join(req.DirEntries, " "))
 	}
 	if req.GitBranch != "" {
 		branch := "- git: branch " + req.GitBranch

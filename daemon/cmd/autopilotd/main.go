@@ -40,7 +40,10 @@ import (
 const knownProviders = "anthropic, codestral, groq, ollama, openai"
 
 func main() {
-	socket := flag.String("socket", server.DefaultSocket, "unix socket path to listen on")
+	// The listen socket defaults to $ZSH_AUTOPILOT_SOCKET (the same var the zsh
+	// client reads, so the two agree from one place — e.g. the sandbox's .env),
+	// falling back to the built-in default; an explicit -socket flag still wins.
+	socket := flag.String("socket", envOr("ZSH_AUTOPILOT_SOCKET", server.DefaultSocket), "unix socket path to listen on (default $ZSH_AUTOPILOT_SOCKET)")
 	verbose := flag.Bool("v", false, "enable debug logging")
 	flag.Parse()
 

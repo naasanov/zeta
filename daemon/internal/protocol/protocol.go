@@ -66,24 +66,26 @@ const (
 
 // Request is a client -> daemon message asking for a suggestion.
 //
-// Context fields (design §7, step 5): Cwd, GitBranch, GitDirty, LastExit, and
-// History are all OPTIONAL — a request may include any subset, and each
-// carries `omitempty` so an absent field is simply missing from the wire
-// message rather than sent as a zero value. The daemon folds in whatever is
-// present and ignores what's absent (see contextBlock in cmd/autopilotd).
+// Context fields (design §7, step 5): Cwd, GitBranch, GitDirty, LastExit,
+// History, and DirEntries are all OPTIONAL — a request may include any
+// subset, and each carries `omitempty` so an absent field is simply missing
+// from the wire message rather than sent as a zero value. The daemon folds in
+// whatever is present and ignores what's absent (see contextBlock in
+// cmd/autopilotd).
 // LastExit specifically omits 0: only a NON-ZERO exit code is meaningful (a
 // failed command the model might help fix), so "0" and "absent" both mean
 // "nothing to fix" and collapse to the same on-the-wire shape by design.
 type Request struct {
-	V         int      `json:"v"`
-	ID        string   `json:"id"`                   // client-minted, unique within a session
-	Kind      string   `json:"kind"`                 // KindTyping | KindNextCommand
-	Buf       string   `json:"buf"`                  // the current command-line buffer
-	Cwd       string   `json:"cwd,omitempty"`        // absolute current working directory
-	GitBranch string   `json:"git_branch,omitempty"` // current git branch; empty/omitted outside a repo
-	GitDirty  bool     `json:"git_dirty,omitempty"`  // true if the working tree has uncommitted changes
-	LastExit  int      `json:"last_exit,omitempty"`  // exit code of the previous command; 0/absent = nothing to fix
-	History   []string `json:"history,omitempty"`    // recent commands, oldest first, newest last
+	V          int      `json:"v"`
+	ID         string   `json:"id"`                    // client-minted, unique within a session
+	Kind       string   `json:"kind"`                  // KindTyping | KindNextCommand
+	Buf        string   `json:"buf"`                   // the current command-line buffer
+	Cwd        string   `json:"cwd,omitempty"`         // absolute current working directory
+	GitBranch  string   `json:"git_branch,omitempty"`  // current git branch; empty/omitted outside a repo
+	GitDirty   bool     `json:"git_dirty,omitempty"`   // true if the working tree has uncommitted changes
+	LastExit   int      `json:"last_exit,omitempty"`   // exit code of the previous command; 0/absent = nothing to fix
+	History    []string `json:"history,omitempty"`     // recent commands, oldest first, newest last
+	DirEntries []string `json:"dir_entries,omitempty"` // names (files+dirs) in cwd, no paths; client-capped, omitted when empty/over cap
 }
 
 // Reply is a daemon -> client message carrying a suggestion for a Request.

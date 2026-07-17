@@ -14,7 +14,9 @@
         "panel": "shared",
         "clear": true
       },
-      "problemMatcher": []
+      "problemMatcher": [],
+      "dependsOn": ["stop daemon"],
+      "dependsOrder": "sequence"
     },
     {
       "label": "stop daemon",
