@@ -8,8 +8,7 @@ project_name: zsh-autopilot
 
 before:
   hooks:
-    - cmd: go mod tidy
-      dir: daemon
+    - go -C daemon mod tidy
 
 builds:
   - id: autopilotd
