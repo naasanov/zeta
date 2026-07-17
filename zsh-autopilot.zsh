@@ -53,6 +53,18 @@ typeset -g ZSH_AUTOPILOT_SOCKET=/tmp/zsh-autopilot.sock
 (( ! ${+ZSH_AUTOPILOT_DAEMON_BIN} )) &&
 typeset -g ZSH_AUTOPILOT_DAEMON_BIN=autopilotd
 
+# TEMPORARY (dogfooding): background self-update on shell startup — see
+# zsh/66_update.zsh. AUTOUPDATE=0 disables it; INTERVAL throttles how often the
+# check may run (seconds; 0 = every shell). URL is the install script it re-runs
+# (which no-ops when already on the latest release). Remove this block and the
+# 66_update.zsh fragment before release — real updates go via brew/plugin-manager.
+(( ! ${+ZSH_AUTOPILOT_AUTOUPDATE} )) &&
+typeset -g ZSH_AUTOPILOT_AUTOUPDATE=1
+(( ! ${+ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL} )) &&
+typeset -gi ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL=14400
+(( ! ${+ZSH_AUTOPILOT_INSTALL_URL} )) &&
+typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/zeta/main/scripts/install.sh
+
 # Number of recent commands kept for the "history" context field sent with
 # each request (oldest first). Small and bounded — this rides along on every
 # keystroke burst, not just next-command requests, so keep it short.
@@ -805,9 +817,12 @@ _zsh_autopilot_receive() {
 #--------------------------------------------------------------------#
 # Fire-and-forget instrumentation: one JSON line per "shown" (a suggestion got
 # painted) and per "outcome" (what the user did with it), written to a
-# write-only Unix socket the daemon side ingests. Off by default
-# (ZSH_AUTOPILOT_METRICS unset) — every helper below gates on that first and
-# returns immediately, so the disabled path is a cheap no-op.
+# write-only Unix socket the daemon side ingests. TEMPORARY dogfooding
+# default-ON (inverts the §12 default-OFF invariant so friends' installs emit
+# without editing .zshrc; revert before the Phase-3 metrics strip) — set
+# ZSH_AUTOPILOT_METRICS=0 to disable. Every helper below gates on
+# _zsh_autopilot_metrics_enabled first and returns immediately, so the disabled
+# path is a cheap no-op.
 #
 # Removability: this fragment is meant to be deleted wholesale later. Every
 # call site elsewhere in the plugin is a single guarded line of the form
@@ -839,9 +854,11 @@ typeset -g _ZSH_AUTOPILOT_SHOWN_ID=
 # Last accepted request_id, consumed by the preexec "executed" signal.
 typeset -g _ZSH_AUTOPILOT_ACCEPTED_ID=
 
-# true if metrics are turned on.
+# true if metrics are turned on. TEMPORARY dogfooding default-ON: enabled
+# unless explicitly disabled with ZSH_AUTOPILOT_METRICS=0 (or =false). Revert
+# to `== 1` (default-OFF) before the Phase-3 metrics strip.
 _zsh_autopilot_metrics_enabled() {
-  [[ $ZSH_AUTOPILOT_METRICS == 1 ]]
+  [[ $ZSH_AUTOPILOT_METRICS != 0 && $ZSH_AUTOPILOT_METRICS != false ]]
 }
 
 _zsh_autopilot_metrics_connect() {
@@ -1014,3 +1031,51 @@ add-zsh-hook precmd _zsh_autopilot_precmd
 
 # Open the warm socket now so the first prompt already has a connection.
 _zsh_autopilot_connect
+
+#--------------------------------------------------------------------#
+# Background self-update (TEMPORARY — dogfooding only)                #
+#--------------------------------------------------------------------#
+# While dogfooding we want friends to pick up new releases without re-running
+# the installer by hand. At shell startup — at most once per
+# ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL seconds — fork a fully-detached job that
+# re-runs the published install script. That script is version-aware: it exits
+# immediately when already on the latest release, and on a real update it swaps
+# the binary/bundle and stops the running daemon so the NEXT new terminal
+# lazy-spawns the new one (this shell keeps the old daemon until then — the
+# spawn-once guard in 50_socket.zsh won't respawn mid-session).
+#
+# Non-blocking by construction: the foreground shell never waits on the network
+# (the whole check is backgrounded). The throttle keeps many terminals from
+# hammering GitHub's unauthenticated API rate limit.
+#
+# Remove this fragment and its config block in 10_config.zsh before release —
+# real distribution updates go through brew / plugin managers, not curl|sh on
+# startup.
+
+zmodload zsh/datetime 2>/dev/null
+
+_zsh_autopilot_autoupdate() {
+  emulate -L zsh
+
+  [[ $ZSH_AUTOPILOT_AUTOUPDATE == 0 ]] && return
+  (( $+commands[curl] )) || return
+  [[ -n $ZSH_AUTOPILOT_INSTALL_URL ]] || return
+
+  local dir="${XDG_DATA_HOME:-$HOME/.local/share}/zsh-autopilot"
+  local stamp="$dir/.last-update-check"
+  local -i now=${EPOCHSECONDS:-0} interval=${ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL:-14400}
+  local -i last=0
+  [[ -r $stamp ]] && last=$(<$stamp) 2>/dev/null
+
+  # Throttle: skip if we checked within the interval. Stamp BEFORE forking so a
+  # burst of new terminals in the same window fire at most one check.
+  (( now - last < interval )) && return
+  mkdir -p "$dir" 2>/dev/null
+  print -r -- $now >| "$stamp" 2>/dev/null
+
+  # Fully detached; all output to the update log so nothing lands on the prompt.
+  ( nohup sh -c "curl -fsSL '$ZSH_AUTOPILOT_INSTALL_URL' | sh" \
+      >>"$dir/update.log" 2>&1 & )
+}
+
+_zsh_autopilot_autoupdate

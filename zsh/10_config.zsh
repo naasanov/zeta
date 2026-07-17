@@ -26,6 +26,18 @@ typeset -g ZSH_AUTOPILOT_SOCKET=/tmp/zsh-autopilot.sock
 (( ! ${+ZSH_AUTOPILOT_DAEMON_BIN} )) &&
 typeset -g ZSH_AUTOPILOT_DAEMON_BIN=autopilotd
 
+# TEMPORARY (dogfooding): background self-update on shell startup — see
+# zsh/66_update.zsh. AUTOUPDATE=0 disables it; INTERVAL throttles how often the
+# check may run (seconds; 0 = every shell). URL is the install script it re-runs
+# (which no-ops when already on the latest release). Remove this block and the
+# 66_update.zsh fragment before release — real updates go via brew/plugin-manager.
+(( ! ${+ZSH_AUTOPILOT_AUTOUPDATE} )) &&
+typeset -g ZSH_AUTOPILOT_AUTOUPDATE=1
+(( ! ${+ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL} )) &&
+typeset -gi ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL=14400
+(( ! ${+ZSH_AUTOPILOT_INSTALL_URL} )) &&
+typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/zeta/main/scripts/install.sh
+
 # Number of recent commands kept for the "history" context field sent with
 # each request (oldest first). Small and bounded — this rides along on every
 # keystroke burst, not just next-command requests, so keep it short.

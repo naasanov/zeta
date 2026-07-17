@@ -40,6 +40,20 @@ version="${latest_tag#v}"
 asset="zsh-autopilot_${version}_${os}_${arch}.tar.gz"
 url="https://github.com/${REPO}/releases/download/${latest_tag}/${asset}"
 
+# Rerunnable: record the installed release tag and skip the work when we're
+# already on the latest. `--force` (or ZSH_AUTOPILOT_INSTALL_FORCE=1) reinstalls
+# anyway. The background self-updater (zsh/66_update.zsh) relies on this early
+# exit to be a cheap no-op on the common "already current" path.
+version_file="${SHARE_DIR}/VERSION"
+installed=""
+[ -f "$version_file" ] && installed="$(cat "$version_file" 2>/dev/null)"
+force="${ZSH_AUTOPILOT_INSTALL_FORCE:-}"
+[ "${1:-}" = "--force" ] && force=1
+if [ -n "$installed" ] && [ "$installed" = "$latest_tag" ] && [ -z "$force" ]; then
+  echo "==> Already up to date (${latest_tag})."
+  exit 0
+fi
+
 echo "==> Downloading ${asset} (${latest_tag})..."
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -57,6 +71,21 @@ raw_base="https://raw.githubusercontent.com/${REPO}/${latest_tag}"
 curl -fsSL "${raw_base}/zsh-autopilot.plugin.zsh" -o "${SHARE_DIR}/zsh-autopilot.plugin.zsh"
 curl -fsSL "${raw_base}/zsh-autopilot.zsh" -o "${SHARE_DIR}/zsh-autopilot.zsh"
 echo "==> Installed plugin: ${SHARE_DIR}/zsh-autopilot.plugin.zsh"
+
+# Record what we just installed so a rerun can detect "already current".
+printf '%s\n' "$latest_tag" > "$version_file"
+
+# We just swapped the daemon binary; stop any running daemon so the next shell
+# that needs it lazy-spawns the new one (a no-op if none is running). The
+# single-instance guard means the old one must exit before the new can bind.
+pkill -x autopilotd 2>/dev/null || true
+
+# On an update (a prior version existed) the .zshrc is already wired — just
+# report. On a first install, print the lines the user still has to add.
+if [ -n "$installed" ]; then
+  echo "==> Updated ${installed} -> ${latest_tag}. Open a new terminal to pick it up."
+  exit 0
+fi
 
 key_line="export ZSH_AUTOPILOT_CODESTRAL_KEY=\"${ZSH_AUTOPILOT_INSTALL_KEY:-<PASTE_KEY_HERE>}\""
 

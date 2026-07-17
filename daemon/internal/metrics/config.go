@@ -11,7 +11,7 @@ import (
 // removable package (design §12): stripping metrics means deleting this
 // directory, not hunting for stray env lookups in main.
 const (
-	EnvEnable  = "ZSH_AUTOPILOT_METRICS"        // "1" enables; anything else (incl. unset) disables
+	EnvEnable  = "ZSH_AUTOPILOT_METRICS"        // TEMPORARY dogfooding default-ON: enabled unless "0"/"false" (see ConfigFromEnv)
 	EnvLogPath = "ZSH_AUTOPILOT_METRICS_LOG"    // JSONL path; default DefaultLogPath()
 	EnvSocket  = "ZSH_AUTOPILOT_METRICS_SOCKET" // metrics socket; default DefaultSocket
 	EnvUser    = "ZSH_AUTOPILOT_USER"           // overrides DefaultUser()
@@ -42,11 +42,17 @@ type Config struct {
 }
 
 // ConfigFromEnv resolves the metrics configuration from the environment. The
-// bool reports whether metrics are enabled at all: they default OFF (§12), and
-// only EnvEnable=="1" turns them on. When it returns false the Config is zero
-// and the caller should wire nothing — no log file, no socket, no emit hook.
+// bool reports whether metrics are enabled at all. When it returns false the
+// Config is zero and the caller should wire nothing — no log file, no socket,
+// no emit hook.
+//
+// TEMPORARY dogfooding default: metrics are ON unless EnvEnable is explicitly
+// "0" or "false". This inverts the design §12 invariant (default OFF, stripped
+// in Phase 3) on purpose, so friends' installs emit without editing .zshrc.
+// Revert to default-OFF before the Phase-3 metrics strip — grep the
+// METRICS(§12) marker and this comment.
 func ConfigFromEnv() (Config, bool) {
-	if os.Getenv(EnvEnable) != "1" {
+	if v := os.Getenv(EnvEnable); v == "0" || v == "false" {
 		return Config{}, false
 	}
 	return Config{

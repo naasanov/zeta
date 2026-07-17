@@ -4,9 +4,12 @@
 #--------------------------------------------------------------------#
 # Fire-and-forget instrumentation: one JSON line per "shown" (a suggestion got
 # painted) and per "outcome" (what the user did with it), written to a
-# write-only Unix socket the daemon side ingests. Off by default
-# (ZSH_AUTOPILOT_METRICS unset) — every helper below gates on that first and
-# returns immediately, so the disabled path is a cheap no-op.
+# write-only Unix socket the daemon side ingests. TEMPORARY dogfooding
+# default-ON (inverts the §12 default-OFF invariant so friends' installs emit
+# without editing .zshrc; revert before the Phase-3 metrics strip) — set
+# ZSH_AUTOPILOT_METRICS=0 to disable. Every helper below gates on
+# _zsh_autopilot_metrics_enabled first and returns immediately, so the disabled
+# path is a cheap no-op.
 #
 # Removability: this fragment is meant to be deleted wholesale later. Every
 # call site elsewhere in the plugin is a single guarded line of the form
@@ -38,9 +41,11 @@ typeset -g _ZSH_AUTOPILOT_SHOWN_ID=
 # Last accepted request_id, consumed by the preexec "executed" signal.
 typeset -g _ZSH_AUTOPILOT_ACCEPTED_ID=
 
-# true if metrics are turned on.
+# true if metrics are turned on. TEMPORARY dogfooding default-ON: enabled
+# unless explicitly disabled with ZSH_AUTOPILOT_METRICS=0 (or =false). Revert
+# to `== 1` (default-OFF) before the Phase-3 metrics strip.
 _zsh_autopilot_metrics_enabled() {
-  [[ $ZSH_AUTOPILOT_METRICS == 1 ]]
+  [[ $ZSH_AUTOPILOT_METRICS != 0 && $ZSH_AUTOPILOT_METRICS != false ]]
 }
 
 _zsh_autopilot_metrics_connect() {
