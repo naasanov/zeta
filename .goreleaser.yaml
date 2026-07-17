@@ -1,0 +1,53 @@
+# GoReleaser config for the autopilotd daemon (design doc §10).
+# go.mod lives in daemon/ (its own module), so builds `dir` into it.
+# Run manually with `goreleaser release --clean` (needs a `vX.Y.Z` tag),
+# or via .github/workflows/release.yml on tag push.
+version: 2
+
+project_name: zsh-autopilot
+
+before:
+  hooks:
+    - cmd: go mod tidy
+      dir: daemon
+
+builds:
+  - id: autopilotd
+    dir: daemon
+    main: ./cmd/autopilotd
+    binary: autopilotd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: autopilotd
+    ids: [autopilotd]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: naasanov
+    name: zeta

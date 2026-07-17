@@ -15,6 +15,27 @@ typeset -g ZSH_AUTOPILOT_SESSION_ID=${ZSH_AUTOPILOT_SESSION_ID:-$$-$RANDOM}
 typeset -gi _ZSH_AUTOPILOT_SEQ=0
 typeset -g _ZSH_AUTOPILOT_REQ_ID=
 
+# Fork the daemon in a subshell so it outlives this shell (no job-table entry
+# to disown — the subshell itself exits right after backgrounding; nohup
+# guards against SIGHUP on the off chance one is delivered first).
+# Only tried once per shell session (_ZSH_AUTOPILOT_SPAWN_TRIED) — if the
+# daemon is crash-looping, hammering fork on every connect attempt would make
+# it worse, not better. The daemon's own single-instance guard (server.go)
+# makes concurrent spawns from multiple shells race-safe: only one wins the
+# socket bind, the rest exit immediately.
+_zsh_autopilot_spawn_daemon() {
+  (( _ZSH_AUTOPILOT_SPAWN_TRIED )) && return 1
+  typeset -g _ZSH_AUTOPILOT_SPAWN_TRIED=1
+
+  [[ -n $ZSH_AUTOPILOT_DAEMON_BIN ]] || return 1
+  (( $+commands[$ZSH_AUTOPILOT_DAEMON_BIN] )) || return 1
+
+  local log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/autopilot"
+  mkdir -p "$log_dir" 2>/dev/null
+
+  ( nohup "$ZSH_AUTOPILOT_DAEMON_BIN" -socket "$ZSH_AUTOPILOT_SOCKET" >>"$log_dir/daemon.log" 2>&1 & )
+}
+
 _zsh_autopilot_connect() {
   zmodload zsh/net/socket 2>/dev/null || return 1
 
@@ -23,7 +44,23 @@ _zsh_autopilot_connect() {
 
   if ! zsocket $ZSH_AUTOPILOT_SOCKET 2>/dev/null; then
     unset ZSH_AUTOPILOT_SOCKET_FD
-    return 1 # daemon not up - caller degrades gracefully
+
+    # Daemon not up (or not up yet) — spawn it once and give it a moment to
+    # bind the socket, then retry. Short/bounded so a broken binary doesn't
+    # stall shell startup.
+    if _zsh_autopilot_spawn_daemon; then
+      local -i tries=0 connected=0
+      while (( tries++ < 10 )); do
+        zsocket $ZSH_AUTOPILOT_SOCKET 2>/dev/null && { connected=1; break }
+        sleep 0.05
+      done
+      if (( connected )); then
+        typeset -g ZSH_AUTOPILOT_SOCKET_FD=$REPLY
+        zle -F $ZSH_AUTOPILOT_SOCKET_FD _zsh_autopilot_receive
+        return 0
+      fi
+    fi
+    return 1 # still not up - caller degrades gracefully
   fi
   typeset -g ZSH_AUTOPILOT_SOCKET_FD=$REPLY
 

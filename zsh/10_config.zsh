@@ -19,6 +19,13 @@ typeset -g ZSH_AUTOPILOT_ORIGINAL_WIDGET_PREFIX=autopilot-orig-
 (( ! ${+ZSH_AUTOPILOT_SOCKET} )) &&
 typeset -g ZSH_AUTOPILOT_SOCKET=/tmp/zsh-autopilot.sock
 
+# Daemon binary to lazy-spawn (must be on $PATH) when the socket isn't up —
+# see 50_socket.zsh's _zsh_autopilot_spawn_daemon. Set to empty to disable
+# autostart and rely on the daemon being launched some other way (a launchd/
+# systemd unit, the VS Code debug launch, manual `autopilotd &`).
+(( ! ${+ZSH_AUTOPILOT_DAEMON_BIN} )) &&
+typeset -g ZSH_AUTOPILOT_DAEMON_BIN=autopilotd
+
 # Number of recent commands kept for the "history" context field sent with
 # each request (oldest first). Small and bounded — this rides along on every
 # keystroke burst, not just next-command requests, so keep it short.
