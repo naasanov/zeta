@@ -671,11 +671,18 @@ _zsh_autopilot_refresh_dir
 # One-shot: seed _ZSH_AUTOPILOT_HISTORY from zsh's own in-memory history (fc)
 # so a brand-new shell starts with recency context instead of an empty array,
 # waiting for commands to run before it has anything to send. `fc -ln` reads
-# history already loaded from $HISTFILE at shell startup — no file parsing,
-# no fork. Guarded so it never clobbers if the array is somehow already
-# populated (e.g. this fragment gets re-sourced).
+# the loaded history list — no file parsing, no fork.
+#
+# Deferred to the FIRST precmd, NOT run at source time: while .zshrc (and this
+# plugin) is still sourcing, zsh has not yet read $HISTFILE into the in-memory
+# list, so `fc` would see zero entries. By the first precmd it's fully loaded
+# (verified: 0 entries at source time, full history by first precmd). The hook
+# removes itself after one run. It's registered in this fragment (47), so it
+# runs before 60_start's _zsh_autopilot_precmd — the first next-command request
+# already has the seeded history.
 _zsh_autopilot_seed_history() {
   emulate -L zsh -o extendedglob
+  add-zsh-hook -d precmd _zsh_autopilot_seed_history
 
   (( ${#_ZSH_AUTOPILOT_HISTORY} > 0 )) && return
 
@@ -697,7 +704,7 @@ _zsh_autopilot_seed_history() {
 
   (( ${#seeded} > 0 )) && _ZSH_AUTOPILOT_HISTORY=("${seeded[@]}")
 }
-_zsh_autopilot_seed_history
+add-zsh-hook precmd _zsh_autopilot_seed_history
 #--------------------------------------------------------------------#
 # Daemon Socket Transport                                            #
 #--------------------------------------------------------------------#

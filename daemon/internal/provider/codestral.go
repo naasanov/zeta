@@ -143,26 +143,51 @@ func (c *codestralClient) Model() string {
 }
 
 // RenderFIM renders a Prompt for a FIM endpoint. FIM models take no system
-// role, so the context block is encoded as shell comment lines above the
-// buffer. Suffix is "" today, making this pure prefix continuation — exactly
-// what FIM models are trained to nail.
+// role, so ambient context (cwd/files/git/last-exit) is encoded as shell
+// comment lines above the buffer, same as before.
+//
+// Recent shell history gets different treatment: it is rendered as RAW,
+// uncommented command lines contiguous with the buffer, not as a "#"
+// comment. Codestral is a base code-completion model — it continues
+// in-distribution code far better than it "reasons" over commented metadata,
+// and shell history entries are themselves valid shell commands, i.e. real
+// code. So the rendered prompt looks like an actual shell session ("git add
+// .\ngit commit -m \"wip\"\ngit status\n" + buffer) rather than a comment
+// block, priming the model to continue the session instead of summarizing
+// it. The ambient context block's own "recent commands" line (from
+// prompt.contextBlock, labeled via prompt.RecentCommandsLabel) is skipped
+// here to avoid rendering the same req.History data twice.
+//
+// Suffix is "" today, making this pure prefix continuation — exactly what
+// FIM models are trained to nail.
 func RenderFIM(p prompt.Prompt) (fimPrompt, suffix string) {
 	// p.Context is pre-rendered like "Context:\n- cwd: ...\n- git: ...\n\n"
 	// (prompt.contextBlock). Strip the "Context:" header and the trailing
 	// blank-line separator, then re-render each remaining "- " line as a "#"
-	// shell comment. p.System and p.Instruction are chat-model append-contract
-	// text a FIM model neither needs nor benefits from, so they are
-	// deliberately excluded.
+	// shell comment, EXCEPT the recent-commands line, which is rendered raw
+	// (below) instead. p.System and p.Instruction are chat-model
+	// append-contract text a FIM model neither needs nor benefits from, so
+	// they are deliberately excluded.
 	ctx := strings.TrimPrefix(p.Context, "Context:\n")
 	ctx = strings.TrimSuffix(ctx, "\n\n")
-	if ctx == "" {
-		return p.Prefix, p.Suffix
-	}
 
 	var b strings.Builder
-	for _, line := range strings.Split(ctx, "\n") {
-		b.WriteString("# ")
-		b.WriteString(strings.TrimPrefix(line, "- "))
+	if ctx != "" {
+		for _, line := range strings.Split(ctx, "\n") {
+			stripped := strings.TrimPrefix(line, "- ")
+			if strings.HasPrefix(stripped, prompt.RecentCommandsLabel) {
+				continue
+			}
+			b.WriteString("# ")
+			b.WriteString(stripped)
+			b.WriteString("\n")
+		}
+	}
+	// History as raw command lines, oldest-first, contiguous with the
+	// buffer — no "#" prefix, so the model sees a real shell session to
+	// continue rather than commented-out metadata.
+	for _, cmd := range p.History {
+		b.WriteString(cmd)
 		b.WriteString("\n")
 	}
 	// Buffer goes last, with no trailing newline, so the model's completion

@@ -298,6 +298,48 @@ func TestRenderFIM_ContextPresent(t *testing.T) {
 	}
 }
 
+// TestRenderFIM_HistoryRenderedRaw pins the FIM raw-history contract: History
+// entries are rendered as raw, uncommented command lines (not "#"-prefixed),
+// contiguous with the buffer, and the ambient context block's own
+// recent-commands line is skipped (not double-rendered as a comment).
+// Ordering must be ambient-comments -> raw-history -> prefix.
+func TestRenderFIM_HistoryRenderedRaw(t *testing.T) {
+	p := prompt.Prompt{
+		Context: "Context:\n- cwd: /Users/x/project\n- git: branch main (dirty)\n- last command failed (exit 1)\n- recent commands: git add .; git commit -m \"wip\"; git status\n\n",
+		Prefix:  "git com",
+		History: []string{"git add .", "git commit -m \"wip\"", "git status"},
+	}
+	gotPrompt, gotSuffix := RenderFIM(p)
+	want := "# cwd: /Users/x/project\n# git: branch main (dirty)\n# last command failed (exit 1)\n" +
+		"git add .\ngit commit -m \"wip\"\ngit status\n" +
+		"git com"
+	if gotPrompt != want {
+		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
+	}
+	if gotSuffix != "" {
+		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)
+	}
+	if strings.Contains(gotPrompt, "# recent commands") {
+		t.Errorf("RenderFIM() prompt unexpectedly comments the recent-commands line: %q", gotPrompt)
+	}
+}
+
+// TestRenderFIM_NoHistoryJustAmbientContext checks that with no history but
+// present ambient context, output is just the comment lines plus the prefix
+// (no stray blank raw-history section).
+func TestRenderFIM_NoHistoryJustAmbientContext(t *testing.T) {
+	p := prompt.Prompt{
+		Context: "Context:\n- cwd: /tmp\n\n",
+		Prefix:  "git com",
+		History: nil,
+	}
+	gotPrompt, _ := RenderFIM(p)
+	want := "# cwd: /tmp\ngit com"
+	if gotPrompt != want {
+		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
+	}
+}
+
 // TestRenderFIM_ContextAbsent checks the empty-context case is just the
 // buffer, with no stray comment lines or leading newline.
 func TestRenderFIM_ContextAbsent(t *testing.T) {

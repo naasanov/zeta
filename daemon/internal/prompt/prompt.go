@@ -53,6 +53,13 @@ const (
 	nextCommandUserPrefix = "The prompt is empty. Based on the recent commands and context above, predict the single most likely next command. Keep it short and common:\n"
 )
 
+// RecentCommandsLabel is the exact label prefixing the recent-commands line
+// in contextBlock's output ("- " + RecentCommandsLabel + "cmd1; cmd2..."). It
+// is exported so RenderFIM (codestral.go) can identify and skip that line
+// when re-rendering ambient context as comments — history is rendered raw
+// there instead, via Prompt.History, so this avoids double-rendering it.
+const RecentCommandsLabel = "recent commands: "
+
 // contextBlock renders whatever step-5 context fields (design §7) are present
 // on req into a compact "Context:" block for the user turn, one line per
 // present field, omitting lines for absent/zero fields entirely (no "git:"
@@ -82,7 +89,7 @@ func contextBlock(req protocol.Request) string {
 		lines = append(lines, "- last command failed (exit "+strconv.Itoa(req.LastExit)+")")
 	}
 	if len(req.History) > 0 {
-		lines = append(lines, "- recent commands: "+strings.Join(req.History, "; "))
+		lines = append(lines, "- "+RecentCommandsLabel+strings.Join(req.History, "; "))
 	}
 	if len(lines) == 0 {
 		return ""
@@ -94,11 +101,15 @@ func contextBlock(req protocol.Request) string {
 // chat adapters build messages (System + ChatUser()), the FIM adapter builds
 // prompt+suffix directly from Prefix/Suffix.
 type Prompt struct {
-	System      string // stable across every request — the prompt-cache anchor
-	Instruction string // typing vs next-command append contract; static per mode
-	Context     string // "Context:\n cwd: ...\n" — changes on chpwd/precmd
-	Prefix      string // the buffer being completed; may be ""
-	Suffix      string // always "" in Phase 2; the FIM infill hook
+	System      string   // stable across every request — the prompt-cache anchor
+	Instruction string   // typing vs next-command append contract; static per mode
+	Context     string   // "Context:\n cwd: ...\n" — changes on chpwd/precmd
+	Prefix      string   // the buffer being completed; may be ""
+	Suffix      string   // always "" in Phase 2; the FIM infill hook
+	History     []string // raw recent commands, oldest-first (design §7/FIM raw-history). FIM
+	// renders these as raw command lines contiguous with Prefix (a code model
+	// continues real preceding code better than commented metadata); chat
+	// adapters keep history in the Context block instead (see contextBlock).
 }
 
 // Build assembles the provider-neutral Prompt for a request. The system turn
@@ -115,6 +126,7 @@ func Build(req protocol.Request) Prompt {
 		Context:     contextBlock(req),
 		Prefix:      req.Buf,
 		Suffix:      "",
+		History:     req.History,
 	}
 }
 

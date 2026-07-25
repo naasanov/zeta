@@ -165,6 +165,28 @@ func TestPromptUsesOneSystemPromptForBothModes(t *testing.T) {
 	}
 }
 
+// TestBuildPopulatesHistory asserts Build copies req.History onto the
+// resulting Prompt.History field verbatim (oldest-first), which is what
+// RenderFIM (codestral.go) uses to render raw command lines for the FIM
+// adapter.
+func TestBuildPopulatesHistory(t *testing.T) {
+	req := protocol.Request{
+		Kind:    protocol.KindTyping,
+		Buf:     "git com",
+		History: []string{"git add .", "git commit -m \"wip\"", "git status"},
+	}
+	got := Build(req).History
+	want := []string{"git add .", "git commit -m \"wip\"", "git status"}
+	if len(got) != len(want) {
+		t.Fatalf("Build().History = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Build().History[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // TestNextCommandPromptCarriesContextAndNoFakeBufferMarker checks that
 // next-command mode keeps using the real request context but no longer needs a
 // special "(prompt is empty)" sentinel in the user turn.
