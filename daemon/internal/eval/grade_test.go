@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"context"
 	"testing"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
@@ -19,7 +20,7 @@ func runGrader(t *testing.T, g Grader, cases []gcase) {
 	t.Helper()
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := g.Grade(c.in, c.out)
+			got, err := g.Grade(context.Background(), c.in, c.out)
 			if err != nil {
 				t.Fatalf("Grade: unexpected error: %v", err)
 			}
@@ -281,7 +282,7 @@ func TestStartsWithSeparator(t *testing.T) {
 func TestAnyOf(t *testing.T) {
 	g := AnyOf("empty-or-short", IsEmpty(), func() Grader {
 		return GraderFunc{N: "not-longer-than-8", F: func(_ protocol.Request, out string) (bool, error) {
-			present, err := LongerThan(8).Grade(protocol.Request{}, out)
+			present, err := LongerThan(8).Grade(context.Background(), protocol.Request{}, out)
 			return !present, err
 		}}
 	}())
@@ -296,7 +297,7 @@ func TestAllOf(t *testing.T) {
 	g := AllOf("space-and-short", HasLeadingSpace(), GraderFunc{
 		N: "short",
 		F: func(_ protocol.Request, out string) (bool, error) {
-			present, err := LongerThan(5).Grade(protocol.Request{}, out)
+			present, err := LongerThan(5).Grade(context.Background(), protocol.Request{}, out)
 			return !present, err
 		},
 	})

@@ -246,7 +246,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 		s := Sample{Output: strings.TrimRight(completion.Text, " \t\r\n")}
 		samples = append(samples, s)
 		for i, a := range c.Asserts {
-			ok, gerr := a.Grader.Grade(c.Req, s.Output)
+			ok, gerr := a.Grader.Grade(ctx, c.Req, s.Output)
 			if gerr != nil {
 				// A grader error excludes this (case, assertion, sample)
 				// triple from grading — it is neither a run error (the

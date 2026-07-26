@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
@@ -478,9 +479,9 @@ func StartsWithSeparator() Grader {
 // separately. Use AnyOf only for a genuine disjunction (e.g. F1's "empty or
 // short").
 func AnyOf(name string, gs ...Grader) Grader {
-	return GraderFunc{N: name, F: func(in protocol.Request, out string) (bool, error) {
+	return CtxGraderFunc{N: name, F: func(ctx context.Context, in protocol.Request, out string) (bool, error) {
 		for _, g := range gs {
-			ok, err := g.Grade(in, out)
+			ok, err := g.Grade(ctx, in, out)
 			if err != nil {
 				return false, err
 			}
@@ -495,9 +496,9 @@ func AnyOf(name string, gs ...Grader) Grader {
 // AllOf reports whether ALL of gs are present. See AnyOf's doc comment on
 // when compound graders are (and mostly aren't) the right call.
 func AllOf(name string, gs ...Grader) Grader {
-	return GraderFunc{N: name, F: func(in protocol.Request, out string) (bool, error) {
+	return CtxGraderFunc{N: name, F: func(ctx context.Context, in protocol.Request, out string) (bool, error) {
 		for _, g := range gs {
-			ok, err := g.Grade(in, out)
+			ok, err := g.Grade(ctx, in, out)
 			if err != nil {
 				return false, err
 			}
@@ -514,8 +515,8 @@ func AllOf(name string, gs ...Grader) Grader {
 // F1 needs "not longer than 8 chars" as one leg of an AnyOf, and negating
 // LongerThan is more honest than adding a parallel NotLongerThan primitive.
 func Not(g Grader) Grader {
-	return GraderFunc{N: "not-" + g.Name(), F: func(in protocol.Request, out string) (bool, error) {
-		ok, err := g.Grade(in, out)
+	return CtxGraderFunc{N: "not-" + g.Name(), F: func(ctx context.Context, in protocol.Request, out string) (bool, error) {
+		ok, err := g.Grade(ctx, in, out)
 		if err != nil {
 			return false, err
 		}

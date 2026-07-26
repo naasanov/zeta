@@ -22,6 +22,7 @@
 package eval
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 
@@ -50,13 +51,19 @@ const (
 //
 // out is a Sample.Output: the raw completion suffix, NOT req.Buf+suffix. See
 // Sample's doc comment for why.
+// ctx is threaded through for graders that do I/O — in practice the LLM judge,
+// which must be cancellable and time-limited like any other network call.
+// Deterministic graders ignore it; GraderFunc drops it so the ~20 regex and
+// string graders need no ctx parameter they would never use.
 type Grader interface {
 	Name() string
-	Grade(in protocol.Request, out string) (present bool, err error)
+	Grade(ctx context.Context, in protocol.Request, out string) (present bool, err error)
 }
 
 // GraderFunc adapts a plain func to Grader, the same shape http.HandlerFunc
-// takes for http.Handler.
+// takes for http.Handler. Its F takes no ctx: a deterministic grader has
+// nothing to cancel, and making every one of them accept a parameter they
+// discard would be noise at ~20 call sites.
 type GraderFunc struct {
 	N string
 	F func(protocol.Request, string) (bool, error)
@@ -64,8 +71,24 @@ type GraderFunc struct {
 
 func (g GraderFunc) Name() string { return g.N }
 
-func (g GraderFunc) Grade(in protocol.Request, out string) (bool, error) {
+func (g GraderFunc) Grade(_ context.Context, in protocol.Request, out string) (bool, error) {
 	return g.F(in, out)
+}
+
+// CtxGraderFunc adapts a ctx-aware func to Grader. Two kinds of grader need
+// it: those doing I/O (the LLM judge), and the combinators — AnyOf/AllOf/Not
+// must FORWARD ctx to the graders they wrap. Building a combinator out of
+// GraderFunc would silently drop it, so a judge nested inside AnyOf would
+// quietly become uncancellable.
+type CtxGraderFunc struct {
+	N string
+	F func(context.Context, protocol.Request, string) (bool, error)
+}
+
+func (g CtxGraderFunc) Name() string { return g.N }
+
+func (g CtxGraderFunc) Grade(ctx context.Context, in protocol.Request, out string) (bool, error) {
+	return g.F(ctx, in, out)
 }
 
 // Assertion pairs a Grader with how its result should be scored.
