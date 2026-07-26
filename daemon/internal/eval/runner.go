@@ -266,15 +266,12 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 	}
 
 	if r.FixedN > 0 {
-		n := r.FixedN
-		if n > maxRuns {
-			n = maxRuns
-		}
-		for i := 0; i < n; i++ {
+		n := min(r.FixedN, maxRuns)
+		for range n {
 			runOne()
 		}
 	} else {
-		for i := 0; i < minRuns; i++ {
+		for range minRuns {
 			runOne()
 		}
 		if !allAgree(present) {
