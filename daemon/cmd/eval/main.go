@@ -52,10 +52,37 @@ func main() {
 		matrix        = flag.Bool("matrix", false, "shorthand for every provider (matrixProviders) x every registered variant; the occasional full run, not the default")
 		modelOverride = flag.String("model", "", "override the resolved model for every selected provider (see eval.NewLiveProvider); empty keeps each provider's preset default")
 		importPath    = flag.String("import", "", "read a §12 metrics events.jsonl, print case stubs + import stats to stdout/stderr, and exit without running anything")
+		diffMode      = flag.Bool("diff", false, "compare two scorecard JSON dumps (positional args: old.json new.json), print the diff, and exit non-zero if anything regressed; a terminal mode like -import — never runs cases")
 	)
 	flag.Parse()
 
+	// setFlags is which flags were actually passed on the command line (as
+	// opposed to left at their default), so the terminal modes below (-diff,
+	// -import) can detect run-only flags that would otherwise be silently
+	// ignored rather than quietly dropping them — see runOnlyFlagNames.
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	if *diffMode && *importPath != "" {
+		log.Fatalf("eval: -diff and -import are mutually exclusive terminal modes; run one at a time")
+	}
+
+	if *diffMode {
+		if ignored := setRunOnlyFlags(setFlags); len(ignored) > 0 {
+			log.Fatalf("eval: -diff never runs cases, so %s would be silently ignored; drop them", strings.Join(ignored, ", "))
+		}
+		args := flag.Args()
+		if len(args) != 2 {
+			log.Fatalf("eval: -diff requires exactly two positional args (old.json new.json), got %d: %v", len(args), args)
+		}
+		runDiff(args[0], args[1])
+		return
+	}
+
 	if *importPath != "" {
+		if ignored := setRunOnlyFlags(setFlags); len(ignored) > 0 {
+			log.Fatalf("eval: -import never runs cases, so %s would be silently ignored; drop them", strings.Join(ignored, ", "))
+		}
 		runImport(*importPath)
 		return
 	}
@@ -268,6 +295,69 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// runOnlyFlagNames are the flags that only mean something for an actual run
+// (cases + a provider matrix + a report). Both terminal modes (-diff,
+// -import) exit before ever reaching that code, so any of these being set
+// alongside one would be silently dropped rather than honored — surfacing
+// that explicitly is better than a report that quietly ran a smaller (or
+// different) thing than what was asked for.
+var runOnlyFlagNames = []string{"n", "cases", "out", "providers", "variants", "matrix", "model"}
+
+// setRunOnlyFlags returns which of runOnlyFlagNames were explicitly passed on
+// the command line, each rendered as "-name", in flag-declaration order.
+func setRunOnlyFlags(setFlags map[string]bool) []string {
+	var ignored []string
+	for _, name := range runOnlyFlagNames {
+		if setFlags[name] {
+			ignored = append(ignored, "-"+name)
+		}
+	}
+	return ignored
+}
+
+// runDiff is -diff's whole flow: load both scorecard dumps, render the text
+// diff to stdout, and exit(1) if anything regressed — the CI/pre-commit gate
+// the plan doc's "Regression use" section describes. It never touches
+// providers, cases, or the report writer used by a real run.
+func runDiff(beforePath, afterPath string) {
+	before, err := loadRunFile(beforePath)
+	if err != nil {
+		log.Fatalf("eval: -diff: %v", err)
+	}
+	after, err := loadRunFile(afterPath)
+	if err != nil {
+		log.Fatalf("eval: -diff: %v", err)
+	}
+
+	report := eval.DiffRuns(before, after)
+	if err := report.Text(os.Stdout); err != nil {
+		log.Fatalf("eval: -diff: writing report: %v", err)
+	}
+
+	if report.Regressed() {
+		os.Exit(1)
+	}
+}
+
+// loadRunFile opens path and decodes it as a scorecard dump, wrapping any
+// failure (missing file, unreadable, not valid JSON, wrong shape) with the
+// path so a bad "before"/"after" argument never resolves to a silent
+// zero-value Run that would misread as "nothing changed" — see LoadRun's own
+// doc comment on exactly that failure mode.
+func loadRunFile(path string) (eval.Run, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return eval.Run{}, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer f.Close()
+
+	run, err := eval.LoadRun(f)
+	if err != nil {
+		return eval.Run{}, fmt.Errorf("loading %s: %w", path, err)
+	}
+	return run, nil
 }
 
 // runImport is -import's whole flow: read a §12 metrics events.jsonl, print
