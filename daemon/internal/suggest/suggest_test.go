@@ -47,7 +47,7 @@ func TestLLM_EmitsRequestEvent(t *testing.T) {
 	var got []metrics.RequestEvent
 	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
 
-	fn := LLM(client, slog.Default(), emit)
+	fn := LLM(client, slog.Default(), emit, false)
 
 	req := protocol.Request{
 		V:    protocol.Version,
@@ -135,7 +135,7 @@ func TestLLM_NilEmitDoesNotPanic(t *testing.T) {
 	defer srv.Close()
 
 	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
-	fn := LLM(client, slog.Default(), nil)
+	fn := LLM(client, slog.Default(), nil, false)
 
 	req := protocol.Request{V: protocol.Version, ID: "s.1", Kind: protocol.KindTyping, Buf: "git"}
 	reply, err := fn(context.Background(), req)
@@ -167,7 +167,7 @@ func TestLLM_CancelledEmitsCancelledEvent(t *testing.T) {
 
 	var got []metrics.RequestEvent
 	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
-	fn := LLM(client, slog.Default(), emit)
+	fn := LLM(client, slog.Default(), emit, false)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -224,7 +224,7 @@ func TestLLM_StubProvider(t *testing.T) {
 
 	var got []metrics.RequestEvent
 	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
-	fn := LLM(stub, slog.Default(), emit)
+	fn := LLM(stub, slog.Default(), emit, false)
 
 	req := protocol.Request{V: protocol.Version, ID: "s.1", Kind: protocol.KindTyping, Buf: "git"}
 	reply, err := fn(context.Background(), req)
@@ -257,7 +257,7 @@ func TestLLM_StubProviderErrorSetsErrorType(t *testing.T) {
 
 	var got []metrics.RequestEvent
 	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
-	fn := LLM(stub, slog.Default(), emit)
+	fn := LLM(stub, slog.Default(), emit, false)
 
 	req := protocol.Request{V: protocol.Version, ID: "s.1", Kind: protocol.KindTyping, Buf: "git"}
 	_, err := fn(context.Background(), req)
@@ -271,4 +271,141 @@ func TestLLM_StubProviderErrorSetsErrorType(t *testing.T) {
 	if got[0].ErrorType != string(provider.ErrRateLimited) {
 		t.Errorf("ev.ErrorType = %q, want %q", got[0].ErrorType, provider.ErrRateLimited)
 	}
+}
+
+// rawTextReq is a protocol.Request with every raw-text-relevant field set,
+// shared by the two raw-text capture tests below.
+func rawTextReq() protocol.Request {
+	return protocol.Request{
+		V:          protocol.Version,
+		ID:         "s.1",
+		Kind:       protocol.KindTyping,
+		Buf:        "git",
+		Cwd:        "/Users/nico/project",
+		GitBranch:  "main",
+		GitDirty:   true,
+		LastExit:   1,
+		History:    []string{"git add .", "git commit -m wip"},
+		DirEntries: []string{"README.md", "src"},
+	}
+}
+
+// METRICS(§12): TestLLM_RawTextDisabledLeavesFieldsZero asserts that with
+// rawText=false (the default), none of the opt-in raw-text fields are
+// populated on the emitted event even though the originating request carries
+// values for all of them — this is what keeps the emitted JSON
+// byte-identical to before the raw-text capture feature existed.
+func TestLLM_RawTextDisabledLeavesFieldsZero(t *testing.T) {
+	stub := stubProvider{
+		completion: provider.Completion{Text: " status", HTTPStatus: 200, StopReason: "stop"},
+		name:       "codestral",
+		model:      "codestral-latest",
+	}
+
+	var got []metrics.RequestEvent
+	emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
+	fn := LLM(stub, slog.Default(), emit, false)
+
+	req := rawTextReq()
+	if _, err := fn(context.Background(), req); err != nil {
+		t.Fatalf("LLM() err = %v, want nil", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("emit called %d times, want 1", len(got))
+	}
+	ev := got[0]
+	if ev.Buf != "" || ev.Suggestion != "" || ev.Cwd != "" || ev.GitBranch != "" ||
+		ev.GitDirty || ev.LastExit != 0 || ev.History != nil || ev.DirEntries != nil {
+		t.Errorf("rawText=false but raw-text fields populated: %+v", ev)
+	}
+}
+
+// METRICS(§12): TestLLM_RawTextEnabledRoundTripsRequest asserts that with
+// rawText=true, the emitted event's raw-text fields round-trip everything
+// needed to reconstruct the originating protocol.Request, on both the
+// success path (where Suggestion is also captured) and the error path (where
+// Suggestion stays empty but the request-side fields are still filled).
+func TestLLM_RawTextEnabledRoundTripsRequest(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		stub := stubProvider{
+			completion: provider.Completion{Text: " status", HTTPStatus: 200, StopReason: "stop"},
+			name:       "codestral",
+			model:      "codestral-latest",
+		}
+
+		var got []metrics.RequestEvent
+		emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
+		fn := LLM(stub, slog.Default(), emit, true)
+
+		req := rawTextReq()
+		reply, err := fn(context.Background(), req)
+		if err != nil {
+			t.Fatalf("LLM() err = %v, want nil", err)
+		}
+
+		if len(got) != 1 {
+			t.Fatalf("emit called %d times, want 1", len(got))
+		}
+		ev := got[0]
+		if ev.Buf != req.Buf {
+			t.Errorf("ev.Buf = %q, want %q", ev.Buf, req.Buf)
+		}
+		if ev.Suggestion != reply.Suggestion {
+			t.Errorf("ev.Suggestion = %q, want reply.Suggestion %q", ev.Suggestion, reply.Suggestion)
+		}
+		if ev.Cwd != req.Cwd {
+			t.Errorf("ev.Cwd = %q, want %q", ev.Cwd, req.Cwd)
+		}
+		if ev.GitBranch != req.GitBranch {
+			t.Errorf("ev.GitBranch = %q, want %q", ev.GitBranch, req.GitBranch)
+		}
+		if ev.GitDirty != req.GitDirty {
+			t.Errorf("ev.GitDirty = %v, want %v", ev.GitDirty, req.GitDirty)
+		}
+		if ev.LastExit != req.LastExit {
+			t.Errorf("ev.LastExit = %d, want %d", ev.LastExit, req.LastExit)
+		}
+		if len(ev.History) != len(req.History) {
+			t.Errorf("ev.History = %v, want %v", ev.History, req.History)
+		}
+		if len(ev.DirEntries) != len(req.DirEntries) {
+			t.Errorf("ev.DirEntries = %v, want %v", ev.DirEntries, req.DirEntries)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		stub := stubProvider{
+			err:   &provider.Error{Kind: provider.ErrRateLimited, HTTPStatus: 429, Provider: "codestral"},
+			name:  "codestral",
+			model: "codestral-latest",
+		}
+
+		var got []metrics.RequestEvent
+		emit := func(ev metrics.RequestEvent) { got = append(got, ev) }
+		fn := LLM(stub, slog.Default(), emit, true)
+
+		req := rawTextReq()
+		_, err := fn(context.Background(), req)
+		if err == nil {
+			t.Fatalf("LLM() err = nil, want non-nil")
+		}
+
+		if len(got) != 1 {
+			t.Fatalf("emit called %d times, want 1", len(got))
+		}
+		ev := got[0]
+		if ev.Suggestion != "" {
+			t.Errorf("ev.Suggestion = %q on error path, want empty (no suggestion exists)", ev.Suggestion)
+		}
+		if ev.Buf != req.Buf {
+			t.Errorf("ev.Buf = %q, want %q (request-side fields still fill on error)", ev.Buf, req.Buf)
+		}
+		if ev.Cwd != req.Cwd {
+			t.Errorf("ev.Cwd = %q, want %q", ev.Cwd, req.Cwd)
+		}
+		if len(ev.History) != len(req.History) {
+			t.Errorf("ev.History = %v, want %v", ev.History, req.History)
+		}
+	})
 }

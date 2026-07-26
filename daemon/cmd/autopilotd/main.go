@@ -73,6 +73,11 @@ func main() {
 	// only exists on the LLM path since only suggest.LLM has anything to
 	// report.
 	var emit func(metrics.RequestEvent)
+	// METRICS(§12): rawText is passed into suggest.LLM below; false unless
+	// metrics are enabled AND the opt-in raw-text capture flag is also set
+	// (ZSH_AUTOPILOT_METRICS_RAW_TEXT). It stays false whenever metrics
+	// themselves are off, since there is nowhere for the raw text to go.
+	rawText := false
 	if mcfg, ok := metrics.ConfigFromEnv(); ok {
 		mlog, err := metrics.New(mcfg.LogPath, mcfg.User)
 		if err != nil {
@@ -86,6 +91,15 @@ func main() {
 			}()
 			emit = mlog.EmitRequest
 			log.Info("metrics enabled", "log", mcfg.LogPath, "socket", mcfg.SocketPath, "user", mcfg.User)
+			rawText = mcfg.RawText
+			if rawText {
+				// METRICS(§12): raw-text capture is TEMPORARILY default-ON for
+				// dogfooding, so this warning now fires on almost every start —
+				// deliberately. Users must never have their command buffers,
+				// suggestions and cwd written verbatim to a log without knowing,
+				// least of all when it's the default. Name the opt-out.
+				log.Warn("raw-text metrics capture ENABLED (default) — command buffers, suggestions and cwd are written verbatim to the event log; set "+metrics.EnvRawText+"=0 to disable", "log", mcfg.LogPath)
+			}
 		}
 	}
 
@@ -135,7 +149,7 @@ func main() {
 			log.Error("provider: failed to construct, falling back to echo mode", "provider", selected, "err", err)
 			srv.SetSuggest(echoMissingKey(resolved.APIKeyEnv))
 		} else {
-			srv.SetSuggest(suggest.LLM(p, log, emit))
+			srv.SetSuggest(suggest.LLM(p, log, emit, rawText))
 			// Never log the key itself.
 			log.Info("llm mode", "provider", selected, "adapter", resolved.Adapter, "model", resolved.Model)
 		}

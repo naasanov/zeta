@@ -29,7 +29,17 @@ import (
 // METRICS(§12): emit, when non-nil, receives the "request" event built from
 // req + the provider's Completion stats after every call (success or
 // error). nil disables metrics entirely with zero added cost on this path.
-func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent)) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
+//
+// METRICS(§12): rawText gates opt-in raw-text capture (design §12; see
+// metrics.Config.RawText). When true, the emitted event's raw-text fields
+// (Buf/Suggestion/Cwd/GitBranch/GitDirty/LastExit/History/DirEntries) are
+// filled from req (and, on success, reply.Suggestion) so the event alone is
+// enough to reconstruct the originating protocol.Request for eval-harness
+// replay. When false, none of those fields are touched — they stay zero and
+// omitempty, so the emitted JSON is unchanged from before this parameter
+// existed. This is the flag the Phase-3 metrics strip should grep for
+// (METRICS(§12)) alongside everything else in this package.
+func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent), rawText bool) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 		built := prompt.Build(req)
 
@@ -71,6 +81,19 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent))
 					ev.Cancelled = true
 					ev.CancelledAtStage = "in_flight"
 				}
+				// METRICS(§12): raw-text capture, error path — no Suggestion
+				// exists (the call failed), but the request-side fields are
+				// still filled: a failed/cancelled request is still a valid
+				// eval-harness input to replay.
+				if rawText {
+					ev.Buf = req.Buf
+					ev.Cwd = req.Cwd
+					ev.GitBranch = req.GitBranch
+					ev.GitDirty = req.GitDirty
+					ev.LastExit = req.LastExit
+					ev.History = req.History
+					ev.DirEntries = req.DirEntries
+				}
 				emit(ev)
 			}
 			// Coordinator logs and skips the write on error — graceful
@@ -88,7 +111,7 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent))
 
 		// METRICS(§12): build + emit the "request" event on the success path.
 		if emit != nil {
-			emit(metrics.RequestEvent{
+			ev := metrics.RequestEvent{
 				V:                 1,
 				Event:             "request",
 				TS:                float64(time.Now().UnixNano()) / 1e9,
@@ -109,7 +132,22 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent))
 				Model:             p.Model(),
 				CostUSD:           metrics.CostUSD(p.Name(), p.Model(), completion.InputTokens, completion.OutputTokens, completion.CachedTokens),
 				PriceTableVersion: metrics.PriceTableVersion,
-			})
+			}
+			// METRICS(§12): raw-text capture, success path — the full
+			// reply.Suggestion (which by contract starts with req.Buf) is
+			// captured alongside the request-side fields, enough to
+			// reconstruct req verbatim and replay it as an eval case.
+			if rawText {
+				ev.Buf = req.Buf
+				ev.Suggestion = reply.Suggestion
+				ev.Cwd = req.Cwd
+				ev.GitBranch = req.GitBranch
+				ev.GitDirty = req.GitDirty
+				ev.LastExit = req.LastExit
+				ev.History = req.History
+				ev.DirEntries = req.DirEntries
+			}
+			emit(ev)
 		}
 
 		return reply, nil

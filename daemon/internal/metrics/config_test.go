@@ -95,6 +95,56 @@ func TestDefaultLogPath_FallsBackToHome(t *testing.T) {
 	}
 }
 
+// TestConfigFromEnv_RawTextEnabledByDefault pins the TEMPORARY dogfooding
+// default-ON: with EnvRawText unset, Config.RawText must be true so friends'
+// installs emit replayable eval cases without editing .zshrc. This inverts
+// design §12's "no command/buffer text by default, even locally" on purpose
+// (see the warning on EnvRawText); when raw-text capture reverts to opt-in
+// before real release, this test flips back to asserting false.
+func TestConfigFromEnv_RawTextEnabledByDefault(t *testing.T) {
+	t.Setenv(EnvEnable, "1")
+	t.Setenv(EnvRawText, "")
+
+	cfg, ok := ConfigFromEnv()
+	if !ok {
+		t.Fatal("ConfigFromEnv() disabled, want enabled")
+	}
+	if !cfg.RawText {
+		t.Error("cfg.RawText = false with EnvRawText unset, want true (dogfooding default-ON)")
+	}
+}
+
+// TestConfigFromEnv_RawTextOnlyExplicitZeroDisables guards the opt-OUT
+// contract: only the literal "0" or "false" turns raw-text capture off; every
+// other value (including unset and arbitrary junk like "yes") leaves it on.
+// Mirrors TestConfigFromEnv_OnlyExplicitZeroDisables for EnvEnable, and is
+// temporary in exactly the same way.
+func TestConfigFromEnv_RawTextOnlyExplicitZeroDisables(t *testing.T) {
+	t.Setenv(EnvEnable, "1")
+
+	for _, v := range []string{"0", "false"} {
+		t.Setenv(EnvRawText, v)
+		cfg, ok := ConfigFromEnv()
+		if !ok {
+			t.Fatal("ConfigFromEnv() disabled, want enabled")
+		}
+		if cfg.RawText {
+			t.Errorf("%s=%q gave RawText=true, want false", EnvRawText, v)
+		}
+	}
+
+	for _, v := range []string{"", "1", "true", "yes", "on", "2"} {
+		t.Setenv(EnvRawText, v)
+		cfg, ok := ConfigFromEnv()
+		if !ok {
+			t.Fatal("ConfigFromEnv() disabled, want enabled")
+		}
+		if !cfg.RawText {
+			t.Errorf("%s=%q gave RawText=false, want true", EnvRawText, v)
+		}
+	}
+}
+
 // TestDefaultUser_NeverEmpty is the invariant that matters: whatever happens,
 // DefaultUser must return something attributable rather than "". An empty user
 // fails silently — it yields a well-formed event whose only symptom is

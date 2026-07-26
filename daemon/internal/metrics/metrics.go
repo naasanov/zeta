@@ -250,6 +250,29 @@ type RequestEvent struct {
 	Model     string `json:"model"`
 	Profile   string `json:"profile"`
 	ErrorType string `json:"error_type"`
+
+	// METRICS(§12): the fields below are the opt-in raw-text capture (see
+	// EnvRawText/Config.RawText), for harvesting real dogfooding suggestion
+	// inputs+outputs as eval-harness replay cases. They are populated ONLY
+	// when raw-text capture is enabled; otherwise every one of them stays zero
+	// and — being all `omitempty` — is simply absent from the emitted JSON
+	// line, byte-identical to before this field set existed. They are
+	// additive (v is NOT bumped for them).
+	//
+	// Together, Buf + Cwd + GitBranch + GitDirty + LastExit + History +
+	// DirEntries are enough to reconstruct the originating protocol.Request
+	// verbatim. Suggestion is the FULL reply.Suggestion text (not just the
+	// completed suffix) — by contract it starts with req.Buf, which matters
+	// when replaying a case: a case built from Suggestion must not double-
+	// prepend Buf.
+	Buf        string   `json:"buf,omitempty"`
+	Suggestion string   `json:"suggestion,omitempty"`
+	Cwd        string   `json:"cwd,omitempty"`
+	GitBranch  string   `json:"git_branch,omitempty"`
+	GitDirty   bool     `json:"git_dirty,omitempty"`
+	LastExit   int      `json:"last_exit,omitempty"`
+	History    []string `json:"history,omitempty"`
+	DirEntries []string `json:"dir_entries,omitempty"`
 }
 
 // SessionID derives the session portion of a request id: everything before

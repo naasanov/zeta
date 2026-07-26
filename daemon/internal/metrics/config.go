@@ -15,6 +15,23 @@ const (
 	EnvLogPath = "ZSH_AUTOPILOT_METRICS_LOG"    // JSONL path; default DefaultLogPath()
 	EnvSocket  = "ZSH_AUTOPILOT_METRICS_SOCKET" // metrics socket; default DefaultSocket
 	EnvUser    = "ZSH_AUTOPILOT_USER"           // overrides DefaultUser()
+
+	// EnvRawText (design §12) gates raw-text capture: buffer, suggestion text,
+	// and ambient context (cwd/git/history/dir entries) written verbatim into
+	// the "request" event, for harvesting real eval-harness cases from
+	// dogfooding.
+	//
+	// ⚠️ TEMPORARILY DEFAULT-ON, same as EnvEnable above, and for the same
+	// reason: friends' installs must emit replayable cases without editing
+	// .zshrc. This inverts design §12's "no command/buffer text by default,
+	// even locally" — a STRONGER invariant than the one EnvEnable inverts,
+	// because raw command lines carry secrets (inline `API_KEY=... cmd`, a
+	// token in a `curl -H`, a password in a connection string) and Phase-3
+	// redaction is not built yet. Revert to default-OFF before real release
+	// (grep METRICS(§12)); TestConfigFromEnv_RawTextEnabledByDefault and
+	// TestConfigFromEnv_RawTextOnlyExplicitZeroDisables encode the temporary
+	// contract and flip back with it.
+	EnvRawText = "ZSH_AUTOPILOT_METRICS_RAW_TEXT"
 )
 
 // envOr returns the environment variable named key, or fallback if unset or
@@ -39,6 +56,9 @@ type Config struct {
 	LogPath    string
 	SocketPath string
 	User       string
+
+	// RawText gates opt-in raw-text capture (see EnvRawText); default false.
+	RawText bool
 }
 
 // ConfigFromEnv resolves the metrics configuration from the environment. The
@@ -55,10 +75,16 @@ func ConfigFromEnv() (Config, bool) {
 	if v := os.Getenv(EnvEnable); v == "0" || v == "false" {
 		return Config{}, false
 	}
+	// TEMPORARY dogfooding default: raw-text capture is ON unless EnvRawText is
+	// explicitly "0" or "false" — same polarity as EnvEnable above. See the
+	// warning on EnvRawText; revert to default-OFF before real release.
+	rt := os.Getenv(EnvRawText)
+	rawText := rt != "0" && rt != "false"
 	return Config{
 		LogPath:    envOr(EnvLogPath, DefaultLogPath()),
 		SocketPath: envOr(EnvSocket, DefaultSocket),
 		User:       envOr(EnvUser, DefaultUser()),
+		RawText:    rawText,
 	}, true
 }
 
