@@ -1,0 +1,296 @@
+package eval
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
+)
+
+// containsGrader reports whether out contains sub.
+func containsGrader(sub string) Grader {
+	return GraderFunc{
+		N: "contains:" + sub,
+		F: func(_ protocol.Request, out string) (bool, error) {
+			return strings.Contains(out, sub), nil
+		},
+	}
+}
+
+func basicCase(asserts ...Assertion) Case {
+	return Case{ID: "T1", Category: "test", Req: protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"}, Asserts: asserts}
+}
+
+func TestRun_IdenticalOutputsSaturateAtMinRuns(t *testing.T) {
+	p := NewStubProvider(StubResult{Output: "d"})
+	r := &Runner{Provider: p}
+	c := basicCase(Assertion{Label: "has-d", Polarity: Must, Threshold: 0.8, Grader: containsGrader("d")})
+
+	results := r.Run(context.Background(), []Case{c})
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	got := results[0]
+	if got.Runs != defaultMinRuns {
+		t.Fatalf("want %d runs (saturated), got %d", defaultMinRuns, got.Runs)
+	}
+	if got.Errors != 0 {
+		t.Fatalf("want 0 errors, got %d", got.Errors)
+	}
+	if !got.Asserts[0].Pass {
+		t.Fatalf("want assertion to pass, got %+v", got.Asserts[0])
+	}
+}
+
+func TestRun_DisagreementEscalatesToMaxRuns(t *testing.T) {
+	// Alternates present/absent for the "has-d" grader every other sample,
+	// so the first 3 samples cannot possibly all agree.
+	p := NewStubProvider(StubResult{Output: "d"}, StubResult{Output: "x"})
+	r := &Runner{Provider: p}
+	c := basicCase(Assertion{Label: "has-d", Polarity: Measure, Grader: containsGrader("d")})
+
+	results := r.Run(context.Background(), []Case{c})
+	got := results[0]
+	if got.Runs != defaultMaxRuns {
+		t.Fatalf("want %d runs (escalated), got %d", defaultMaxRuns, got.Runs)
+	}
+}
+
+func TestRun_FixedNOverridesAdaptivity(t *testing.T) {
+	// Alternating outputs would normally escalate; FixedN must skip that.
+	p := NewStubProvider(StubResult{Output: "d"}, StubResult{Output: "x"})
+	r := &Runner{Provider: p, FixedN: 5}
+	c := basicCase(Assertion{Label: "has-d", Polarity: Measure, Grader: containsGrader("d")})
+
+	results := r.Run(context.Background(), []Case{c})
+	got := results[0]
+	if got.Runs != 5 {
+		t.Fatalf("want exactly 5 runs, got %d", got.Runs)
+	}
+}
+
+func TestRun_FixedNClampedToMaxRuns(t *testing.T) {
+	p := NewStubProvider(StubResult{Output: "d"})
+	r := &Runner{Provider: p, FixedN: 1000, MaxRuns: 10}
+	c := basicCase(Assertion{Label: "has-d", Polarity: Measure, Grader: containsGrader("d")})
+
+	results := r.Run(context.Background(), []Case{c})
+	got := results[0]
+	if got.Runs != 10 {
+		t.Fatalf("want FixedN clamped to MaxRuns=10, got %d", got.Runs)
+	}
+}
+
+func TestRun_ErrorsExcludedFromGradingButCounted(t *testing.T) {
+	p := NewStubProvider(
+		StubResult{Output: "d"},
+		StubResult{Err: errors.New("boom")},
+		StubResult{Output: "d"},
+	)
+	r := &Runner{Provider: p, FixedN: 3}
+	c := basicCase(Assertion{Label: "has-d", Polarity: Must, Threshold: 1.0, Grader: containsGrader("d")})
+
+	results := r.Run(context.Background(), []Case{c})
+	got := results[0]
+	if got.Runs != 2 {
+		t.Fatalf("want 2 successful runs, got %d", got.Runs)
+	}
+	if got.Errors != 1 {
+		t.Fatalf("want 1 error, got %d", got.Errors)
+	}
+	ar := got.Asserts[0]
+	if ar.Graded != 2 {
+		t.Fatalf("want Graded=2 (errors excluded), got %d", ar.Graded)
+	}
+	if ar.Present != 2 {
+		t.Fatalf("want Present=2, got %d", ar.Present)
+	}
+	if !ar.Pass {
+		t.Fatalf("want must-assertion to pass at 2/2, got %+v", ar)
+	}
+}
+
+func TestRun_AllErroredNeverPasses(t *testing.T) {
+	p := NewStubProvider(StubResult{Err: errors.New("boom")})
+	r := &Runner{Provider: p, FixedN: 3}
+	c := basicCase(
+		Assertion{Label: "must", Polarity: Must, Threshold: 0.0, Grader: containsGrader("d")},
+		Assertion{Label: "mustnot", Polarity: MustNot, Threshold: 1.0, Grader: containsGrader("d")},
+	)
+
+	results := r.Run(context.Background(), []Case{c})
+	got := results[0]
+	if got.Errors != 3 || got.Runs != 0 {
+		t.Fatalf("want 3 errors 0 runs, got errors=%d runs=%d", got.Errors, got.Runs)
+	}
+	for _, ar := range got.Asserts {
+		if ar.Graded != 0 {
+			t.Fatalf("want Graded=0 when every sample errored, got %d", ar.Graded)
+		}
+		if ar.Pass {
+			t.Fatalf("want Graded==0 to never pass (even with a permissive threshold), got %+v", ar)
+		}
+	}
+}
+
+func TestScoring_Must(t *testing.T) {
+	cases := []struct {
+		name      string
+		present   int
+		graded    int
+		threshold float64
+		wantPass  bool
+	}{
+		{"above threshold", 9, 10, 0.8, true},
+		{"at threshold", 8, 10, 0.8, true},
+		{"below threshold", 7, 10, 0.8, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pass := tc.graded > 0 && float64(tc.present)/float64(tc.graded) >= tc.threshold
+			if pass != tc.wantPass {
+				t.Fatalf("Must(%d/%d, thresh=%.2f) = %v, want %v", tc.present, tc.graded, tc.threshold, pass, tc.wantPass)
+			}
+		})
+	}
+}
+
+func TestScoring_MustNot(t *testing.T) {
+	cases := []struct {
+		name      string
+		present   int
+		graded    int
+		threshold float64
+		wantPass  bool
+	}{
+		{"above ceiling", 2, 10, 0.1, false},
+		{"at ceiling", 1, 10, 0.1, false}, // 0.1 is NOT < 0.1
+		{"below ceiling", 0, 10, 0.1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pass := tc.graded > 0 && float64(tc.present)/float64(tc.graded) < tc.threshold
+			if pass != tc.wantPass {
+				t.Fatalf("MustNot(%d/%d, thresh=%.2f) = %v, want %v", tc.present, tc.graded, tc.threshold, pass, tc.wantPass)
+			}
+		})
+	}
+}
+
+func TestRun_TripWireRecordsOnlyFirstOffending(t *testing.T) {
+	p := NewStubProvider(
+		StubResult{Output: "ok"},
+		StubResult{Output: "&& bad1"},
+		StubResult{Output: "&& bad2"},
+	)
+	r := &Runner{Provider: p, FixedN: 3}
+	c := basicCase(Assertion{Label: "no-leading-op", Polarity: TripWire, Grader: containsGrader("&&")})
+
+	results := r.Run(context.Background(), []Case{c})
+	ar := results[0].Asserts[0]
+	if ar.Pass {
+		t.Fatalf("want trip wire to fail once tripped")
+	}
+	if ar.FirstOffending != "&& bad1" {
+		t.Fatalf("want FirstOffending=%q, got %q", "&& bad1", ar.FirstOffending)
+	}
+}
+
+func TestRun_TripWirePassesWhenNeverPresent(t *testing.T) {
+	p := NewStubProvider(StubResult{Output: "ok"})
+	r := &Runner{Provider: p, FixedN: 3}
+	c := basicCase(Assertion{Label: "no-leading-op", Polarity: TripWire, Grader: containsGrader("&&")})
+
+	results := r.Run(context.Background(), []Case{c})
+	ar := results[0].Asserts[0]
+	if !ar.Pass {
+		t.Fatalf("want trip wire to pass when never present, got %+v", ar)
+	}
+	if ar.FirstOffending != "" {
+		t.Fatalf("want empty FirstOffending, got %q", ar.FirstOffending)
+	}
+}
+
+func TestRun_Measure_AlwaysPasses(t *testing.T) {
+	p := NewStubProvider(StubResult{Output: "x"})
+	r := &Runner{Provider: p, FixedN: 3}
+	c := basicCase(Assertion{Label: "tracked", Polarity: Measure, Grader: containsGrader("d")})
+
+	results := r.Run(context.Background(), []Case{c})
+	if !results[0].Asserts[0].Pass {
+		t.Fatalf("Measure assertions must always report Pass=true")
+	}
+}
+
+func TestRun_MultipleCasesPreserveOrderAndIndependence(t *testing.T) {
+	p := NewStubProvider(StubResult{Output: "d"})
+	r := &Runner{Provider: p}
+	c1 := Case{ID: "A", Category: "cat1", Req: protocol.Request{}, Asserts: []Assertion{
+		{Label: "a", Polarity: Must, Threshold: 1.0, Grader: containsGrader("d")},
+	}}
+	c2 := Case{ID: "B", Category: "cat2", Req: protocol.Request{}, Asserts: []Assertion{
+		{Label: "b", Polarity: Must, Threshold: 1.0, Grader: containsGrader("d")},
+	}}
+	results := r.Run(context.Background(), []Case{c1, c2})
+	if len(results) != 2 || results[0].CaseID != "A" || results[1].CaseID != "B" {
+		t.Fatalf("want results in input order [A B], got %+v", results)
+	}
+}
+
+func TestRun_EmptyCasesReturnsEmptyResults(t *testing.T) {
+	p := NewStubProvider(StubResult{Output: "d"})
+	r := &Runner{Provider: p}
+	results := r.Run(context.Background(), nil)
+	if len(results) != 0 {
+		t.Fatalf("want 0 results for 0 cases, got %d", len(results))
+	}
+}
+
+func TestRun_ProviderAndModelPopulated(t *testing.T) {
+	p := &StubProvider{Script: []StubResult{{Output: "d"}}, PName: "codestral", PModel: "codestral-2601"}
+	r := &Runner{Provider: p}
+	c := basicCase()
+	results := r.Run(context.Background(), []Case{c})
+	if results[0].Provider != "codestral" || results[0].Model != "codestral-2601" {
+		t.Fatalf("want provider/model populated from Provider, got %+v", results[0])
+	}
+}
+
+// TestRunCase_GraderErrorsNeverPass guards the hole found reviewing Part 1:
+// a Grader that always errors produces zero graded samples, and the natural
+// formulation of each polarity would then read as a pass — most dangerously
+// for TripWire, whose "no occurrences seen" is indistinguishable from "never
+// looked". An assertion that never ran must fail loudly for EVERY polarity,
+// and the grader errors must be counted rather than swallowed.
+func TestRunCase_GraderErrorsNeverPass(t *testing.T) {
+	boom := GraderFunc{N: "boom", F: func(protocol.Request, string) (bool, error) {
+		return false, errors.New("grader exploded")
+	}}
+
+	for _, pol := range []Polarity{Must, MustNot, TripWire, Measure} {
+		t.Run(string(pol), func(t *testing.T) {
+			r := &Runner{Provider: NewStubProvider(StubResult{Output: " status"})}
+			c := Case{
+				ID:      "G1",
+				Asserts: []Assertion{{Label: "always errors", Polarity: pol, Threshold: 0.8, Grader: boom}},
+			}
+			got := r.Run(context.Background(), []Case{c})[0]
+			ar := got.Asserts[0]
+
+			if ar.Graded != 0 {
+				t.Fatalf("Graded = %d, want 0 (grader always errors)", ar.Graded)
+			}
+			if ar.GraderErrors == 0 {
+				t.Error("GraderErrors = 0, want the grader failures to be counted, not swallowed")
+			}
+			if ar.Pass {
+				t.Errorf("polarity %s passed with 0 graded samples; an assertion that never ran must never pass", pol)
+			}
+			if got.Errors != 0 {
+				t.Errorf("Errors = %d, want 0 — a grader error is not a provider error", got.Errors)
+			}
+		})
+	}
+}
