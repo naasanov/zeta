@@ -3,21 +3,21 @@ package eval
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
-// wantIDs is exactly the Part 2 case set the plan doc's "Test cases" tables
-// list: categories A, B, D, F1 in full, plus the deterministic C cases
-// (C1/C2) and the deterministic E cases (E1, E2, E4, E5, E6, E8). C3, E3,
-// E7, F2 are judged and belong to Part 3 — their absence here is
-// deliberate, not a gap.
+// wantIDs is the full case set the plan doc's "Test cases" tables list:
+// categories A, B, D, F1/F2 in full, plus every C and E case — the
+// deterministic ones from Part 2 and the four Part 3 judged cases
+// (C3, E3, E7, F2).
 var wantIDs = []string{
 	"A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8",
 	"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8",
-	"C1", "C2",
+	"C1", "C2", "C3",
 	"D1", "D2", "D3", "D4",
-	"E1", "E2", "E4", "E5", "E6", "E8",
-	"F1",
+	"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8",
+	"F1", "F2",
 }
 
 func TestCases_ExactIDSet(t *testing.T) {
@@ -37,13 +37,21 @@ func TestCases_ExactIDSet(t *testing.T) {
 	}
 }
 
-func TestCases_JudgedIDsAbsent(t *testing.T) {
-	// C3, E3, E7, F2 are Part 3 (judged) cases. If one of these IDs shows up
-	// here, Part 2's scope was violated.
+func TestCases_JudgedIDsUseJudgeGrader(t *testing.T) {
+	// C3, E3, E7, F2 are Part 3's judged cases: each of their assertions
+	// must be graded by a judge.go grader (name prefix "judge:"), never a
+	// deterministic one — otherwise the case looks judged in the plan doc's
+	// tables but silently isn't.
 	judged := map[string]bool{"C3": true, "E3": true, "E7": true, "F2": true}
 	for _, c := range Cases() {
-		if judged[c.ID] {
-			t.Errorf("case %q is a judged case (Part 3) and must not be in the deterministic corpus", c.ID)
+		if !judged[c.ID] {
+			continue
+		}
+		for _, a := range c.Asserts {
+			if !strings.HasPrefix(a.Grader.Name(), "judge:") {
+				t.Errorf("case %s assertion %q uses grader %q, want a judge.go grader (name prefix \"judge:\")",
+					c.ID, a.Label, a.Grader.Name())
+			}
 		}
 	}
 }

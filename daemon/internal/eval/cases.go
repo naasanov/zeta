@@ -2,19 +2,24 @@ package eval
 
 import "github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 
-// This file is the deterministic case corpus (plan doc "Test cases" — Part
-// 2's scope: categories A, B, D, F1, plus the deterministic E cases E1, E2,
-// E4, E5, E6, E8, and the deterministic C cases C1/C2). The judged cases
-// (C3, E3, E7, F2) are Part 3's business and are NOT here.
+// This file is the full case corpus (plan doc "Test cases"): categories A,
+// B, D, F1, the deterministic E cases (E1, E2, E4, E5, E6, E8), the
+// deterministic C cases (C1/C2) from Part 2, plus Part 3's four judged
+// cases (C3, E3, E7, F2), each backed by a rubric graded through
+// defaultJudgeGrader (judge.go) rather than a deterministic Grader.
 //
 // Cases() is the single accessor cmd/eval drives; keep it in the plan doc's
 // table order (A -> B -> C -> D -> E -> F) so a diff against the plan is a
 // visual scan, not a search.
 
-// Cases returns the full deterministic corpus, in stable ID order. Calling
-// it repeatedly returns equivalent (fresh) slices/values — see
-// cases_test.go's determinism check — since every Case is built fresh here
-// rather than shared as package-level mutable state.
+// Cases returns the full corpus, in stable ID order. Calling it repeatedly
+// returns equivalent (fresh) slices/values — see cases_test.go's determinism
+// check — since every Case is built fresh here rather than shared as
+// package-level mutable state. This holds for the judged cases too:
+// defaultJudgeGrader re-resolves the judge from the environment on every
+// call rather than caching a package-level Judge, so two Cases() calls in
+// the same process/environment produce Graders with equal Name() (the only
+// thing TestCases_Deterministic compares a Grader on).
 func Cases() []Case {
 	var cases []Case
 	cases = append(cases, syntaxCases()...)
@@ -230,9 +235,28 @@ func fabricationCases() []Case {
 	}
 }
 
-// ---- C. Nonsense incrementing (deterministic cases only: C1/C2) ----------
+// ---- C. Nonsense incrementing ---------------------------------------------
 //
-// C3 (the general judged case) is Part 3's business.
+// C1/C2 are Part 2's narrow deterministic graders (normalize + diff, flag a
+// numeric-only delta). C3 is the general case they can't catch: a
+// mechanically-plausible-looking next command that isn't actually what a
+// developer would do next, which needs a judge's judgment rather than a
+// regex.
+
+// c3Rubric is deliberately concrete: "plausible" alone is exactly the vague
+// criterion the plan doc warns produces a noisy judge, so it names the
+// specific failure mode (mechanical version-bump for no reason) as the fail
+// example.
+const c3Rubric = `The context is a shell history ending in a git tag-and-push sequence. You
+are shown a suggested next command. Answer: is this suggestion a plausible
+next command a developer would actually run in this situation (e.g.
+verifying the release, checking CI, opening a PR, bumping a changelog),
+rather than mechanical pattern-continuation with no real justification (e.g.
+bumping the version number again to tag ANOTHER release immediately, or
+repeating the same tag/push with a trivial numeric change)? Pass if it is a
+plausible, purposeful next step; fail if it is mechanical continuation of
+the version-bump pattern for its own sake. You are looking only at this
+question, not at syntax or formatting.`
 
 func incrementingCases() []Case {
 	return []Case{
@@ -256,6 +280,18 @@ func incrementingCases() []Case {
 			},
 			Asserts: []Assertion{
 				{Label: "mechanical-digit-bump", Polarity: MustNot, Threshold: 0.20, Grader: EqualsHistoryModuloNumber()},
+			},
+		},
+		{
+			ID:       "C3",
+			Category: "incrementing",
+			Req: protocol.Request{
+				Kind:    protocol.KindNextCommand,
+				History: []string{"git tag v0.1.6", "git push origin v0.1.6"},
+			},
+			Asserts: []Assertion{
+				{Label: "plausible-next-command", Polarity: Must, Threshold: 0.70,
+					Grader: defaultJudgeGrader("C3", "plausible-next-command", c3Rubric)},
 			},
 		},
 	}
@@ -321,10 +357,43 @@ func loopingCases() []Case {
 	}
 }
 
-// ---- E. Context usage (deterministic cases only) --------------------------
+// ---- E. Context usage -------------------------------------------------------
 //
-// C3/E3/E7/F2's judged siblings are Part 3's business; the deterministic E
-// cases here (E1, E2, E4, E5, E6, E8) are the reason the harness exists.
+// E1, E2, E4, E5, E6, E8 (Part 2, deterministic) are the reason the harness
+// exists. E3 and E7 (Part 3, judged) cover context-usage questions no regex
+// can answer: "did it react to the failure" and "did it follow the CURRENT
+// directory over stale history" both require judging the suggestion's
+// intent, not just matching a substring.
+
+// e3Rubric: a failed build is the single most common signal a next-command
+// prediction should react to. The fail example is explicit so the judge
+// doesn't credit an unrelated-but-superficially-plausible suggestion.
+const e3Rubric = `The context shows the last command in history was "go build ./..." and it
+exited with a non-zero status (a failed build). Answer: does the suggested
+next command respond to that failure — e.g. retrying the build, running a
+narrower build/vet/test to see the error, inspecting the error output
+(cat/less/grep on a log), or editing the file that likely failed? Fail if
+the suggestion ignores the failure entirely and moves on to unrelated work
+(e.g. a plain "git status", "ls", or starting a new, unrelated task) as if
+the previous command had succeeded. You are looking only at this question,
+not at syntax or formatting.`
+
+// e7Rubric: the history is deliberately from a DIFFERENT project (Node,
+// npm/yarn) than the live cwd/dir_entries/git_branch (a Go project) — this
+// is the open-question (a) probe from the plan doc ("FIM prompt shape"):
+// does top-placed cwd/git make the model assume all history ran in the
+// current directory? The rubric asks the judge to grade exactly that
+// tension, not whether the suggestion is "good" in general.
+const e7Rubric = `The shell history shown is from a DIFFERENT project than the current
+directory: the history lines are Node.js/npm commands, but the current
+working directory, directory listing, and git branch all describe a Go
+project (go.mod, .go files) with no package.json in sight. Answer: does the
+suggested next command follow the CURRENT directory/project (e.g. a
+go/git/shell command appropriate to a Go project) rather than continuing
+the STALE npm/yarn history as if it still applied? Fail if the suggestion
+is an npm/yarn/node command, or otherwise assumes the history's project
+context still holds. You are looking only at this question, not at syntax
+or formatting.`
 
 func contextCases() []Case {
 	return []Case{
@@ -352,6 +421,19 @@ func contextCases() []Case {
 			},
 			Asserts: []Assertion{
 				{Label: "suggests-push", Polarity: Must, Threshold: 0.70, Grader: Contains("push")},
+			},
+		},
+		{
+			ID:       "E3",
+			Category: "context",
+			Req: protocol.Request{
+				Kind:     protocol.KindNextCommand,
+				LastExit: 1,
+				History:  []string{"vim main.go", "go build ./..."},
+			},
+			Asserts: []Assertion{
+				{Label: "responds-to-failed-build", Polarity: Must, Threshold: 0.70,
+					Grader: defaultJudgeGrader("E3", "responds-to-failed-build", e3Rubric)},
 			},
 		},
 		{
@@ -416,6 +498,33 @@ func contextCases() []Case {
 			},
 		},
 		{
+			// E7 is E6's judged sibling, same open-question (a) probe, but
+			// asking the general question directly instead of pattern-
+			// matching for "npm": does the suggestion follow the CURRENT
+			// directory over stale cross-project history.
+			ID:       "E7",
+			Category: "context",
+			Req: protocol.Request{
+				Kind:      protocol.KindNextCommand,
+				Cwd:       "/x/gotool",
+				GitBranch: "main",
+				DirEntries: []string{
+					"go.mod", "main.go",
+				},
+				History: []string{
+					"npm install",
+					"npm run build",
+					"npm test",
+					"npm run lint",
+					"npm start",
+				},
+			},
+			Asserts: []Assertion{
+				{Label: "follows-current-directory", Polarity: Must, Threshold: 0.60,
+					Grader: defaultJudgeGrader("E7", "follows-current-directory", e7Rubric)},
+			},
+		},
+		{
 			// E8: with genuinely no context (no history, no cwd/git/dir
 			// signal) there is nothing to predict from, so abstaining
 			// (empty output) IS the correct behavior. This is the abstain
@@ -431,10 +540,28 @@ func contextCases() []Case {
 	}
 }
 
-// ---- F. Abstention (deterministic case only: F1) --------------------------
+// ---- F. Abstention ----------------------------------------------------------
 //
-// F2 (the judged "sensible continuation vs. noise" rubric) is Part 3's
-// business.
+// F1 (Part 2, deterministic) covers plain garbage input. F2 (Part 3, judged)
+// covers the harder case a regex can't grade: a buffer that's already a
+// complete, valid command, where the ONLY correct behaviors are "append a
+// sensible continuation" or "abstain" — never noise.
+
+// f2Rubric explicitly states that an empty suggestion is a GOOD outcome
+// here, per the task brief: without that line a judge grading "is the
+// appended text a sensible continuation" naively would penalize a correct
+// abstention for having no continuation to evaluate.
+const f2Rubric = `The buffer already typed is "ls -la" — a complete, valid, self-contained
+shell command with common flags. You are shown what (if anything) the
+system suggests appending after it. An EMPTY suggestion is a GOOD, correct
+outcome here: there is nothing useful to add after a command this complete,
+so abstaining is not a failure. Answer: is the appended text (if any) either
+(a) empty/whitespace-only (a correct abstention), or (b) a sensible,
+plausible continuation a developer might actually type after "ls -la" (e.g.
+piping to grep/less/wc, redirecting output)? Fail only if the appended text
+is noise: nonsense, restates/repeats the buffer, prose/explanation, or an
+unrelated fabricated command chained on. You are looking only at this
+question, not at other syntax or formatting concerns.`
 
 func abstentionCases() []Case {
 	return []Case{
@@ -451,6 +578,15 @@ func abstentionCases() []Case {
 				{Label: "empty-or-short", Polarity: Must, Threshold: 0.70,
 					Grader: AnyOf("empty-or-not-longer-than-8", IsEmpty(), Not(LongerThan(8)))},
 				{Label: "prose-markers", Polarity: TripWire, Grader: LooksLikeProse()},
+			},
+		},
+		{
+			ID:       "F2",
+			Category: "abstention",
+			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "ls -la"},
+			Asserts: []Assertion{
+				{Label: "sensible-continuation-or-abstain", Polarity: Must, Threshold: 0.70,
+					Grader: defaultJudgeGrader("F2", "sensible-continuation-or-abstain", f2Rubric)},
 			},
 		},
 	}
