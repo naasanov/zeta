@@ -1,0 +1,4 @@
+# Diagnostic labels — minimal set to surface judge transport errors.
+# Real calibration set follows once the judge is reachable.
+{"case_id":"F2","suggestion":"h","verdict":"fail","note":"appending 'h' to a complete 'ls -la' is noise, not a continuation"}
+{"case_id":"F2","suggestion":"","verdict":"pass","note":"empty is the correct outcome for an already-complete command"}

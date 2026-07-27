@@ -16,9 +16,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/config"
@@ -53,6 +55,9 @@ func main() {
 		modelOverride = flag.String("model", "", "override the resolved model for every selected provider (see eval.NewLiveProvider); empty keeps each provider's preset default")
 		importPath    = flag.String("import", "", "read a §12 metrics events.jsonl, print case stubs + import stats to stdout/stderr, and exit without running anything")
 		diffMode      = flag.Bool("diff", false, "compare two scorecard JSON dumps (positional args: old.json new.json), print the diff, and exit non-zero if anything regressed; a terminal mode like -import — never runs cases")
+		judgeValidate = flag.Bool("judge-validate", false, "score candidate judge models (-judges) against hand labels (-labels) and exit non-zero unless the best clears the plan doc's >=90% agreement gate; a terminal mode like -diff/-import — never runs cases")
+		judgesFlag    = flag.String("judges", "", "comma-separated judge model ids to validate (\"gemini-3.5-flash-lite,gpt-5-mini\"); empty defaults to the single configured judge model (ZSH_AUTOPILOT_EVAL_JUDGE_MODEL or its default)")
+		labelsPath    = flag.String("labels", eval.DefaultJudgeLabelsPath, "path to the hand-labeled judge_labels.jsonl (see .docs/eval_harness_plan.md, \"The judge\")")
 	)
 	flag.Parse()
 
@@ -63,8 +68,14 @@ func main() {
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
-	if *diffMode && *importPath != "" {
-		log.Fatalf("eval: -diff and -import are mutually exclusive terminal modes; run one at a time")
+	terminalModesSet := 0
+	for _, set := range []bool{*diffMode, *importPath != "", *judgeValidate} {
+		if set {
+			terminalModesSet++
+		}
+	}
+	if terminalModesSet > 1 {
+		log.Fatalf("eval: -diff, -import, and -judge-validate are mutually exclusive terminal modes; run one at a time")
 	}
 
 	if *diffMode {
@@ -84,6 +95,14 @@ func main() {
 			log.Fatalf("eval: -import never runs cases, so %s would be silently ignored; drop them", strings.Join(ignored, ", "))
 		}
 		runImport(*importPath)
+		return
+	}
+
+	if *judgeValidate {
+		if ignored := setRunOnlyFlags(setFlags); len(ignored) > 0 {
+			log.Fatalf("eval: -judge-validate never runs cases, so %s would be silently ignored; drop them", strings.Join(ignored, ", "))
+		}
+		runJudgeValidate(*judgesFlag, *labelsPath)
 		return
 	}
 
@@ -401,5 +420,134 @@ func runImport(path string) {
 	if stats.LinesRead > 0 && stats.Imported*10 < stats.LinesRead {
 		fmt.Fprintf(os.Stderr, "eval: WARNING - imported only %d of %d lines read (<10%%); "+
 			"check the skip counts above before assuming this is a healthy import\n", stats.Imported, stats.LinesRead)
+	}
+}
+
+// judgeAgreementGate is the plan doc's non-negotiable bar ("The judge" ->
+// "Validate before trusting"): no judged number (C3/E3/E7/F2) may be quoted
+// until some candidate judge clears this on the hand-labeled set.
+const judgeAgreementGate = 0.90
+
+// runJudgeValidate is -judge-validate's whole flow (Part 5's build half):
+// resolve one or more candidate judge models from -judges (defaulting to the
+// single configured judge), score each against -labels via
+// eval.ValidateJudges, print a ranked table plus the disagreement detail,
+// and exit(1) unless the best-agreeing candidate clears judgeAgreementGate —
+// so this reads as a gate, not just a report. It never constructs a
+// suggestion provider and never runs a case.
+func runJudgeValidate(judgesFlag, labelsPath string) {
+	cfg := eval.JudgeConfigFromEnv()
+	if cfg.APIKey == "" {
+		log.Fatalf("eval: -judge-validate requires a judge API key; set ZSH_AUTOPILOT_EVAL_JUDGE_KEY " +
+			"(see .docs/eval_harness_plan.md, \"The judge\")")
+	}
+
+	models := splitCSV(judgesFlag)
+	if len(models) == 0 {
+		models = []string{cfg.Model}
+	}
+
+	judges := make([]eval.Judge, 0, len(models))
+	for _, m := range models {
+		jcfg := cfg
+		jcfg.Model = m
+		j, err := eval.NewGeminiJudge(jcfg)
+		if err != nil {
+			log.Fatalf("eval: -judge-validate: building judge %q: %v", m, err)
+		}
+		judges = append(judges, j)
+	}
+
+	f, err := os.Open(labelsPath)
+	if err != nil {
+		log.Fatalf("eval: -judge-validate: no hand labels at %s (write them first — see .docs/eval_harness_plan.md, "+
+			"\"The judge\": \"hand-label 30 outputs\"): %v", labelsPath, err)
+	}
+	defer f.Close()
+
+	cases := eval.Cases()
+	labels, err := eval.LoadLabels(f, cases)
+	if err != nil {
+		log.Fatalf("eval: -judge-validate: %v", err)
+	}
+	if len(labels) == 0 {
+		log.Fatalf("eval: -judge-validate: %s contains no labels", labelsPath)
+	}
+
+	if fracPass, imbalanced := eval.LabelImbalance(labels); imbalanced {
+		fmt.Fprintf(os.Stderr, "eval: WARNING - label set is imbalanced (%.0f%% pass, n=%d); raw agreement is "+
+			"inflated by chance here, read Kappa, not just Agreement\n", fracPass*100, len(labels))
+	}
+
+	fmt.Fprintf(os.Stderr, "eval: scoring %d judge(s) against %d hand label(s) from %s (verdict cache bypassed)\n",
+		len(judges), len(labels), labelsPath)
+
+	scores := eval.ValidateJudges(context.Background(), labels, cases, judges)
+	ranked := eval.RankByAgreementPerDollar(scores)
+
+	printJudgeScoreboard(os.Stdout, ranked)
+	printJudgeDisagreements(os.Stdout, ranked)
+
+	bestAgreement := 0.0
+	for _, s := range ranked {
+		if s.Agreement > bestAgreement {
+			bestAgreement = s.Agreement
+		}
+	}
+	if bestAgreement < judgeAgreementGate {
+		fmt.Fprintf(os.Stderr, "eval: FAIL - best judge agreement %.1f%% is below the %.0f%% gate; "+
+			"per the plan doc, the rubric is the problem — rewrite, re-label, re-measure before quoting any judged number\n",
+			bestAgreement*100, judgeAgreementGate*100)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "eval: PASS - best judge agreement %.1f%% clears the %.0f%% gate\n",
+		bestAgreement*100, judgeAgreementGate*100)
+}
+
+// printJudgeScoreboard prints the ranked judge/agreement/kappa/errors/cost
+// table -judge-validate's spec calls for.
+func printJudgeScoreboard(w io.Writer, ranked []eval.JudgeScore) {
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "judge\tagreement\tkappa\terrors\tcost_usd\tagreement/$")
+	for _, s := range ranked {
+		fmt.Fprintf(tw, "%s\t%.1f%% (%d/%d)\t%.3f\t%d\t$%.4f\t%s\n",
+			s.Judge, s.Agreement*100, s.Agreed, s.Total, s.Kappa, s.Errors, s.CostUSD, formatAgreementPerDollar(s))
+	}
+	tw.Flush()
+	// The table's "errors" column is a bare count — a judge that fails every
+	// call renders as "0.0% (0/0)  errors 2" with nothing pointing at why.
+	// Print the first error per judge that had one, right below the table,
+	// same reasoning as report.go's NEVER EVALUATED line.
+	for _, s := range ranked {
+		if s.Errors > 0 && s.FirstError != "" {
+			fmt.Fprintf(w, "  %s: first error — %s\n", s.Judge, s.FirstError)
+		}
+	}
+}
+
+func formatAgreementPerDollar(s eval.JudgeScore) string {
+	if s.CostUSD <= 0 {
+		if s.Agreement > 0 {
+			return "inf (cost unpriced)"
+		}
+		return "0"
+	}
+	return fmt.Sprintf("%.1f", s.Agreement/s.CostUSD)
+}
+
+// printJudgeDisagreements prints every sample where a candidate's verdict
+// differed from the human label, with the judge's own stated reason — the
+// point of falling below the gate is finding out whether the JUDGE is wrong
+// or the RUBRIC is ambiguous, and that requires reading these.
+func printJudgeDisagreements(w io.Writer, ranked []eval.JudgeScore) {
+	for _, s := range ranked {
+		if len(s.Disagreements) == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "\n%s: %d disagreement(s)\n", s.Judge, len(s.Disagreements))
+		for _, d := range s.Disagreements {
+			fmt.Fprintf(w, "  [%s] suggestion=%q human=%s judge=%s reason=%q\n",
+				d.CaseID, d.Suggestion, d.HumanVerdict, d.JudgeVerdict, d.JudgeReason)
+		}
 	}
 }
