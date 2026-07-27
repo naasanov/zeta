@@ -333,7 +333,7 @@ func TestDiffRuns_SuiteAggregateArithmetic(t *testing.T) {
 	if rep.Suite.AfterTotal != 3 || rep.Suite.AfterPassed != 3 {
 		t.Fatalf("after suite totals wrong: %+v", rep.Suite)
 	}
-	wantDelta := 100.0 * (3.0/3.0 - 2.0/3.0)
+	wantDelta := 100.0 * (1.0 - 2.0/3.0)
 	if diff := rep.Suite.DeltaPP - wantDelta; diff > 1e-9 || diff < -1e-9 {
 		t.Fatalf("want suite delta %.4f, got %.4f", wantDelta, rep.Suite.DeltaPP)
 	}

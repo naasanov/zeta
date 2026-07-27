@@ -173,7 +173,7 @@ func RenderFIM(p prompt.Prompt) (fimPrompt, suffix string) {
 
 	var b strings.Builder
 	if ctx != "" {
-		for _, line := range strings.Split(ctx, "\n") {
+		for line := range strings.SplitSeq(ctx, "\n") {
 			stripped := strings.TrimPrefix(line, "- ")
 			if strings.HasPrefix(stripped, prompt.RecentCommandsLabel) {
 				continue
