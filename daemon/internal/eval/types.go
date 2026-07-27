@@ -176,6 +176,14 @@ type AssertionResult struct {
 	// green for an assertion that was never actually evaluated.
 	GraderErrors int
 
+	// FirstGraderError carries the first grader error's message (truncated —
+	// see truncateGraderError in runner.go), so a run that reports
+	// "grader errors: 3" is diagnosable without re-running under a debugger.
+	// Same pattern as FirstOffending below: keep the first instance, not all
+	// of them — subsequent grader errors on the same assertion are still
+	// counted in GraderErrors, just not individually retained.
+	FirstGraderError string
+
 	Pass           bool
 	FirstOffending string // TripWire only: the output that tripped it
 }

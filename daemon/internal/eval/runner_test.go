@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -291,6 +292,52 @@ func TestRunCase_GraderErrorsNeverPass(t *testing.T) {
 			if got.Errors != 0 {
 				t.Errorf("Errors = %d, want 0 — a grader error is not a provider error", got.Errors)
 			}
+			if ar.FirstGraderError != "grader exploded" {
+				t.Errorf("FirstGraderError = %q, want %q — a grader error's message must not be swallowed either", ar.FirstGraderError, "grader exploded")
+			}
 		})
+	}
+}
+
+// TestRunCase_FirstGraderErrorKeepsOnlyTheFirst mirrors
+// TestRun_TripWireRecordsOnlyFirstOffending: a grader that errors with a
+// DIFFERENT message on each call must still surface only the first one, not
+// the last or a concatenation — same "keep the first instance" contract.
+func TestRunCase_FirstGraderErrorKeepsOnlyTheFirst(t *testing.T) {
+	calls := 0
+	flaky := GraderFunc{N: "flaky", F: func(protocol.Request, string) (bool, error) {
+		calls++
+		return false, fmt.Errorf("boom #%d", calls)
+	}}
+	r := &Runner{Provider: NewStubProvider(StubResult{Output: " status"}), FixedN: 3}
+	c := Case{ID: "G2", Asserts: []Assertion{{Label: "flaky", Polarity: Measure, Grader: flaky}}}
+
+	got := r.Run(context.Background(), []Case{c})[0]
+	ar := got.Asserts[0]
+	if ar.GraderErrors != 3 {
+		t.Fatalf("GraderErrors = %d, want 3", ar.GraderErrors)
+	}
+	if ar.FirstGraderError != "boom #1" {
+		t.Errorf("FirstGraderError = %q, want %q (the first error, not the last or all of them)", ar.FirstGraderError, "boom #1")
+	}
+}
+
+// TestTruncateGraderError checks that a long grader error message is
+// truncated, but that the truncated form still contains an identifying
+// prefix (in the live bug this fix targets, an HTTP status code and a model
+// id sit right at the start of the message).
+func TestTruncateGraderError(t *testing.T) {
+	short := "404 models/some-judge-model is not found for API version v1main"
+	if got := truncateGraderError(short); got != short {
+		t.Errorf("short message should pass through unchanged, got %q", got)
+	}
+
+	long := short + strings.Repeat("x", 5000)
+	got := truncateGraderError(long)
+	if len(got) >= len(long) {
+		t.Fatalf("want the long message truncated, got len=%d (original len=%d)", len(got), len(long))
+	}
+	if !strings.Contains(got, "404 models/some-judge-model is not found") {
+		t.Errorf("truncated message lost the identifying status code/model id: %q", got)
 	}
 }

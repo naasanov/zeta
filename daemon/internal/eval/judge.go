@@ -51,11 +51,19 @@ const (
 	envJudgeBaseURL = "ZSH_AUTOPILOT_EVAL_JUDGE_BASE_URL"
 	envJudgeCache   = "ZSH_AUTOPILOT_EVAL_JUDGE_CACHE"
 
-	// defaultJudgeModel is gemini-3-5-flash-lite (plan doc default): mini-tier
+	// defaultJudgeModel is gemini-3.5-flash-lite (plan doc default): mini-tier
 	// judges already clear the >=90% agreement gate, and Flash-Lite is
 	// out-of-family against every candidate provider this harness tests
 	// (codestral/anthropic/groq), which is where blinding actually matters.
-	defaultJudgeModel = "gemini-3-5-flash-lite"
+	//
+	// NOTE: Gemini model ids use DOTS, not dashes — "gemini-3.5-flash-lite"
+	// is correct; a version number rendered with dashes instead of a dot
+	// (e.g. "gemini-3" + "-5-flash-lite" run together) looks plausible,
+	// parses fine as a flag/env value, and fails at request time with a 404
+	// that reads like an auth problem, not a typo'd model id. Verified
+	// against the live `/v1beta/openai/models` listing before pinning this
+	// default.
+	defaultJudgeModel = "gemini-3.5-flash-lite"
 
 	// defaultJudgeBaseURL is Gemini's OpenAI-compatible endpoint, so the judge
 	// is reachable through the same openai-go SDK shape as the provider

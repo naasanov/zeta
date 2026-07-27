@@ -64,6 +64,37 @@ func TestText_NoTripWiresReportsNone(t *testing.T) {
 	}
 }
 
+// TestText_NeverEvaluatedIncludesGraderErrorReason guards the diagnosability
+// fix: a "NEVER EVALUATED" line by itself (just a count) is indistinguishable
+// from a dozen other causes — diagnosing the live judge 404 required
+// bypassing the harness entirely. The rendered report must name the reason.
+func TestText_NeverEvaluatedIncludesGraderErrorReason(t *testing.T) {
+	var buf bytes.Buffer
+	results := []CaseResult{{
+		CaseID: "C3", Category: "context",
+		Asserts: []AssertionResult{{
+			Label:            "plausible-next-command",
+			Polarity:         Must,
+			Graded:           0,
+			GraderErrors:     3,
+			FirstGraderError: "eval: judge request: 404 models/some-judge-model is not found for API version v1main",
+		}},
+	}}
+	if err := Text(&buf, results, Meta{}); err != nil {
+		t.Fatalf("Text: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "NEVER EVALUATED") {
+		t.Fatalf("want a NEVER EVALUATED line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "C3/plausible-next-command") {
+		t.Fatalf("want the case/assertion identified, got:\n%s", out)
+	}
+	if !strings.Contains(out, "404 models/some-judge-model is not found") {
+		t.Fatalf("want the grader error reason surfaced in the report, got:\n%s", out)
+	}
+}
+
 func TestJSON_RoundTrips(t *testing.T) {
 	meta := Meta{Provider: "codestral", Model: "codestral-1", Variant: "prompt.Build", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
 	results := sampleResults()

@@ -219,6 +219,8 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 	var samples []Sample
 	present := make([][]bool, len(c.Asserts)) // per-assertion, per-graded-sample
 	graderErrs := make([]int, len(c.Asserts))
+	firstGraderErr := make([]string, len(c.Asserts))
+	graderErrSet := make([]bool, len(c.Asserts))
 	firstOffending := make([]string, len(c.Asserts))
 	offendingSet := make([]bool, len(c.Asserts))
 	escalated := false
@@ -255,6 +257,14 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 				// uncounted grader error is invisible, and an assertion that
 				// silently never ran is worse than one that fails.
 				graderErrs[i]++
+				// Keep the first message, not all of them — same pattern as
+				// firstOffending below. Diagnosing "grader errors: 3" without
+				// this meant bypassing the harness and calling the judge API
+				// by hand; see AssertionResult.FirstGraderError.
+				if !graderErrSet[i] {
+					firstGraderErr[i] = truncateGraderError(gerr.Error())
+					graderErrSet[i] = true
+				}
 				continue
 			}
 			present[i] = append(present[i], ok)
@@ -301,12 +311,13 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 			}
 		}
 		ar := AssertionResult{
-			Label:        a.Label,
-			Polarity:     a.Polarity,
-			Threshold:    a.Threshold,
-			Present:      hits,
-			Graded:       graded,
-			GraderErrors: graderErrs[i],
+			Label:            a.Label,
+			Polarity:         a.Polarity,
+			Threshold:        a.Threshold,
+			Present:          hits,
+			Graded:           graded,
+			GraderErrors:     graderErrs[i],
+			FirstGraderError: firstGraderErr[i],
 		}
 		// graded == 0 means this assertion was never actually evaluated (every
 		// sample errored, or the grader itself did). That is never a pass, for
@@ -350,6 +361,26 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 // samples (every sample errored, or every grader call itself errored)
 // agrees vacuously — it must not by itself force escalation, since more
 // runs won't produce more grade-able data if the provider keeps erroring.
+// maxGraderErrorLen bounds how much of a grader error's message is retained
+// in AssertionResult.FirstGraderError. An API error body (the live judge
+// failure that motivated this) can be arbitrarily large; the identifying
+// bits — an HTTP status code and a model id — sit in the first line or two
+// of any error this package produces (provider errors, judge parse errors,
+// judge.go's %w-wrapped HTTP errors), so a prefix truncation keeps them
+// intact without needing to parse the message.
+const maxGraderErrorLen = 300
+
+// truncateGraderError truncates msg to maxGraderErrorLen runes, appending a
+// marker so a truncated message is visibly not the whole story rather than
+// looking like a short, complete one.
+func truncateGraderError(msg string) string {
+	r := []rune(msg)
+	if len(r) <= maxGraderErrorLen {
+		return msg
+	}
+	return string(r[:maxGraderErrorLen]) + "... (truncated)"
+}
+
 func allAgree(present [][]bool) bool {
 	for _, ps := range present {
 		if len(ps) == 0 {

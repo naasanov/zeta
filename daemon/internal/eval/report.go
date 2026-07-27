@@ -173,9 +173,17 @@ func writeFooter(w io.Writer, results []CaseResult, meta Meta) error {
 			totalGraderErrors += ar.GraderErrors
 			// Graded == 0 means the assertion never actually ran. It is
 			// scored as a failure, but it needs calling out separately —
-			// "failed" and "never evaluated" demand different fixes.
+			// "failed" and "never evaluated" demand different fixes. Append
+			// the first grader error's message, if any, so "NEVER EVALUATED"
+			// is diagnosable from the report alone rather than requiring a
+			// re-run under a debugger — this is what a bad judge model id
+			// (a 404 that reads like an auth failure) previously hid.
 			if ar.Graded == 0 {
-				unevaluated = append(unevaluated, cr.CaseID+"/"+ar.Label)
+				line := cr.CaseID + "/" + ar.Label
+				if ar.FirstGraderError != "" {
+					line += " — " + ar.FirstGraderError
+				}
+				unevaluated = append(unevaluated, line)
 			}
 		}
 	}
