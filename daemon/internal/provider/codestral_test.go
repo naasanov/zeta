@@ -379,30 +379,119 @@ func TestRenderFIM_ExcludesSystemAndInstruction(t *testing.T) {
 	}
 }
 
+// TestFirstShellCommand is table-driven with mode as an explicit column so
+// the two behaviours (typing preserves a single leading space; next-command
+// strips it) sit side by side, alongside all the mode-INDEPENDENT behaviour
+// (separator stripping, chain cutoff, plain pass-through) which each get one
+// row per mode to prove a future change can't accidentally make them
+// mode-dependent.
+//
+// This is also the regression test for the bug the eval harness caught:
+// firstShellCommand used to TrimLeft every completion unconditionally, so a
+// completion beginning with the space the system prompt explicitly asks for
+// ("Begin with a space when the completion starts a new word or argument")
+// could never reach the user — "git add" + " ." shipped as "git add."
+// instead of "git add .". The fix is mode-dependent: typing mode (non-empty
+// buffer) must preserve exactly one leading space; next-command mode (empty
+// buffer) must still strip it, both because the suggestion IS the whole
+// command there and because zsh's HIST_IGNORE_SPACE silently drops
+// space-prefixed commands from history.
 func TestFirstShellCommand(t *testing.T) {
 	tests := []struct {
-		name string
-		in   string
-		want string
+		name   string
+		in     string
+		typing bool
+		want   string
 	}{
-		{"plain command unchanged", "git status", "git status"},
-		{"leading semicolon stripped", "; source .venv/bin/activate", "source .venv/bin/activate"},
-		{"leading &&  stripped", "&& make build", "make build"},
-		{"leading separator with extra space", ";   cd ..", "cd .."},
-		{"repeated leading separators", "; ; source x", "source x"},
-		{"trailing chain cut at semicolon", "mkdir x; cd x; git init", "mkdir x"},
-		{"trailing chain cut at &&", "git add . && git commit", "git add ."},
-		{"cut at earliest separator", "a && b; c", "a"},
-		{"pipe left intact", "ps aux | grep foo", "ps aux | grep foo"},
-		{"leading strip then trailing cut", "; mkdir x; cd x", "mkdir x"},
-		{"trailing whitespace trimmed", "ls -la   ", "ls -la"},
-		{"empty stays empty", "", ""},
-		{"only a separator becomes empty", ";", ""},
+		// --- leading space, no separator: the mode-dependent bug fix ---
+		{"typing: single leading space preserved", " .", true, " ."},
+		{"next-command: leading space stripped", " .", false, "."},
+		{"typing: no leading space unaffected", ".", true, "."},
+		{"next-command: no leading space unaffected", ".", false, "."},
+		{"typing: multiple leading spaces collapsed to one", "   .", true, " ."},
+		{"next-command: multiple leading spaces stripped", "   .", false, "."},
+		{"typing: leading space, longer completion", " git status", true, " git status"},
+		{"next-command: leading space, longer completion", " git status", false, "git status"},
+
+		// --- separator stripping: identical in both modes ---
+		{"typing: leading semicolon stripped", "; source .venv/bin/activate", true, "source .venv/bin/activate"},
+		{"next-command: leading semicolon stripped", "; source .venv/bin/activate", false, "source .venv/bin/activate"},
+		{"typing: leading semicolon with leading space stripped", " ; source x", true, "source x"},
+		{"next-command: leading semicolon with leading space stripped", " ; source x", false, "source x"},
+		{"typing: leading && stripped", "&& cd y", true, "cd y"},
+		{"next-command: leading && stripped", "&& cd y", false, "cd y"},
+		{"typing: leading space then && stripped", " && cd y", true, "cd y"},
+		{"next-command: leading space then && stripped", " && cd y", false, "cd y"},
+		{"typing: leading separator with extra space", ";   cd ..", true, "cd .."},
+		{"next-command: leading separator with extra space", ";   cd ..", false, "cd .."},
+		{"typing: repeated leading separators", "; ; source x", true, "source x"},
+		{"next-command: repeated leading separators", "; ; source x", false, "source x"},
+
+		// --- chaining cutoff: identical in both modes ---
+		{"typing: trailing chain cut at semicolon", "mkdir x; cd x; git init", true, "mkdir x"},
+		{"next-command: trailing chain cut at semicolon", "mkdir x; cd x; git init", false, "mkdir x"},
+		{"typing: trailing chain cut at &&", "git add . && git commit", true, "git add ."},
+		{"next-command: trailing chain cut at &&", "git add . && git commit", false, "git add ."},
+		{"typing: leading separator then chain", "; mkdir x && cd y", true, "mkdir x"},
+		{"next-command: leading separator then chain", "; mkdir x && cd y", false, "mkdir x"},
+		{"typing: cut at earliest separator", "a && b; c", true, "a"},
+		{"next-command: cut at earliest separator", "a && b; c", false, "a"},
+
+		// --- plain pass-through / edge cases: identical in both modes ---
+		{"typing: plain command unchanged", "git status", true, "git status"},
+		{"next-command: plain command unchanged", "git status", false, "git status"},
+		{"typing: pipe left intact", "ps aux | grep foo", true, "ps aux | grep foo"},
+		{"next-command: pipe left intact", "ps aux | grep foo", false, "ps aux | grep foo"},
+		{"typing: trailing whitespace trimmed", "ls -la   ", true, "ls -la"},
+		{"next-command: trailing whitespace trimmed", "ls -la   ", false, "ls -la"},
+		{"typing: empty stays empty", "", true, ""},
+		{"next-command: empty stays empty", "", false, ""},
+		{"typing: whitespace-only becomes empty", "   ", true, ""},
+		{"next-command: whitespace-only becomes empty", "   ", false, ""},
+		{"typing: only a separator becomes empty", ";", true, ""},
+		{"next-command: only a separator becomes empty", ";", false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := firstShellCommand(tt.in); got != tt.want {
-				t.Errorf("firstShellCommand(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := firstShellCommand(tt.in, tt.typing); got != tt.want {
+				t.Errorf("firstShellCommand(%q, typing=%v) = %q, want %q", tt.in, tt.typing, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestComplete_Codestral_LeadingSpaceByMode drives Complete end to end (not
+// just firstShellCommand directly) to prove req.Prompt.Prefix is what
+// actually selects typing vs next-command mode: a non-empty Prefix must
+// preserve the model's leading space, an empty Prefix must strip it.
+func TestComplete_Codestral_LeadingSpaceByMode(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{"non-empty prefix (typing mode) preserves leading space", "git add", " ."},
+		{"empty prefix (next-command mode) strips leading space", "", "."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				flusher := w.(http.Flusher)
+				fmt.Fprint(w, fimSSEChunk(t, " ."))
+				flusher.Flush()
+				fmt.Fprint(w, "data: [DONE]\n\n")
+				flusher.Flush()
+			}))
+			defer srv.Close()
+
+			client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
+			got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: tt.prefix}, MaxTokens: 48})
+			if err != nil {
+				t.Fatalf("Complete() err = %v, want nil", err)
+			}
+			if got.Text != tt.want {
+				t.Errorf("Complete().Text = %q, want %q", got.Text, tt.want)
 			}
 		})
 	}

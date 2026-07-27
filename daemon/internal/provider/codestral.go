@@ -43,8 +43,15 @@ var fimStopSequences = []string{"\n"}
 // command (`ps aux | grep`), not a chain. This runs on the accumulated text
 // rather than as a stop sequence precisely so a leading separator becomes the
 // real command instead of nuking the whole suggestion.
-func firstShellCommand(s string) string {
-	s = stripLeadingSeparators(s)
+//
+// typing selects which whitespace rule applies (see stripLeadingSeparators):
+// pass true when completing a non-empty buffer (the system prompt tells the
+// model to lead with a space to separate words, and that space must survive),
+// false for a next-command prediction against an empty buffer (no word to
+// separate from, and a leading space would silently keep the command out of
+// zsh history under HIST_IGNORE_SPACE).
+func firstShellCommand(s string, typing bool) string {
+	s = stripLeadingSeparators(s, typing)
 	if i := indexSeparator(s); i >= 0 {
 		s = s[:i]
 	}
@@ -60,22 +67,67 @@ func firstShellCommand(s string) string {
 // ";" stop sequence caused). Returns false while only a leading separator has
 // arrived, or while the first command is still streaming.
 func firstCommandComplete(s string) bool {
-	return indexSeparator(stripLeadingSeparators(s)) >= 0
+	// The mode argument only changes whether a single leading space survives
+	// when NO separator is found at all (see stripLeadingSeparators) — it
+	// never changes whether a separator is found, which is all this cares
+	// about. So the mode passed here is arbitrary; false is picked for no
+	// particular reason.
+	return indexSeparator(stripLeadingSeparators(s, false)) >= 0
 }
 
-// stripLeadingSeparators removes leading whitespace and any run of leading
-// ";"/"&&" separators (a code model tends to open a next-command prediction
-// with one). Shared by firstShellCommand and firstCommandComplete so both
-// treat the leading run identically.
-func stripLeadingSeparators(s string) string {
-	s = strings.TrimLeft(s, " \t")
+// stripLeadingSeparators removes any run of leading ";"/"&&" separators (a
+// code model tends to open a next-command prediction with one), along with
+// all whitespace immediately touching a removed separator — that whitespace
+// belongs to the separator's own formatting ("; cmd", " && cmd"), not to the
+// completion text, so it is always fully discarded regardless of mode.
+//
+// What's left, if no separator was ever found, is s's original leading
+// whitespace run (if any). That run is a DIFFERENT thing: the word-separator
+// space the system prompt tells the model to lead with when completing a
+// non-empty buffer ("Begin with a space when the completion starts a new
+// word or argument", see prompt.go). So its handling is mode-dependent:
+//
+//   - typing == true (non-empty buffer): collapse the run to exactly one
+//     leading space — a model that emits "   ." should still produce " .",
+//     not "git add   .", but the single space must survive or the shipped
+//     suggestion collides with the buffer ("git add" + "." -> "git add.",
+//     the exact bug this function exists to prevent).
+//   - typing == false (empty buffer, next-command mode): strip it entirely.
+//     The suggestion IS the whole command; a leading space is pure noise,
+//     and under zsh's HIST_IGNORE_SPACE a command that starts with a space
+//     is silently kept out of history — a real user-visible defect.
+//
+// Shared by firstShellCommand and firstCommandComplete so both treat the
+// leading run identically.
+func stripLeadingSeparators(s string, typing bool) string {
+	foundSeparator := false
+	cur := s
 	for {
-		t := strings.TrimLeft(strings.TrimPrefix(strings.TrimPrefix(s, "&&"), ";"), " \t")
-		if t == s {
-			return s
+		trimmed := strings.TrimLeft(cur, " \t")
+		next := strings.TrimPrefix(strings.TrimPrefix(trimmed, "&&"), ";")
+		if next == trimmed {
+			break
 		}
-		s = t
+		foundSeparator = true
+		cur = next
 	}
+
+	// A separator was stripped (or the caller is in next-command mode):
+	// discard any remaining leading whitespace entirely.
+	if foundSeparator || !typing {
+		return strings.TrimLeft(cur, " \t")
+	}
+
+	// No separator anywhere: cur == s. Preserve at most one leading space,
+	// the word-separator space, in typing mode.
+	trimmed := strings.TrimLeft(cur, " \t")
+	if cur == trimmed {
+		return cur // no leading whitespace to begin with
+	}
+	if trimmed == "" {
+		return cur // whitespace-only input: nothing meaningful to preserve
+	}
+	return " " + trimmed
 }
 
 // indexSeparator returns the byte index of the first ";" or "&&" in s, or -1.
@@ -245,6 +297,12 @@ type fimUsage struct {
 // superseded this request — see server.handle) aborts the call, including
 // mid-stream reads of the response body.
 func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion, error) {
+	// typing mirrors the system prompt's own mode split (prompt.go): a
+	// non-empty buffer is a typing-mode completion, which must preserve the
+	// model's leading word-separator space; an empty buffer is a
+	// next-command prediction, which must not. See stripLeadingSeparators.
+	typing := req.Prompt.Prefix != ""
+
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = c.maxTokens
@@ -366,7 +424,7 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 		}
 		if stop {
 			return Completion{
-				Text:         firstShellCommand(acc.Text()),
+				Text:         firstShellCommand(acc.Text(), typing),
 				TTFT:         acc.TTFT(),
 				InputTokens:  inputTokens,
 				OutputTokens: outputTokens,
@@ -393,7 +451,7 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 	// Stream ended (EOF / [DONE] / max_tokens finish) with no newline seen:
 	// return whatever we accumulated as the whole (single-line) completion.
 	return Completion{
-		Text:         firstShellCommand(acc.Text()),
+		Text:         firstShellCommand(acc.Text(), typing),
 		TTFT:         acc.TTFT(),
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
