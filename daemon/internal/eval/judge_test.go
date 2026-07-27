@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
@@ -605,5 +607,208 @@ func TestGeminiJudge_HTTPErrorPropagates(t *testing.T) {
 
 	if _, err := judge.Judge(context.Background(), JudgeInput{Rubric: "x", Req: req(), Suggestion: "y"}); err == nil {
 		t.Fatal("want an error propagated from a non-2xx response, got nil")
+	}
+}
+
+// ---- Rate limiting + 429 retry ------------------------------------------
+
+// fakeLimiter is a Limiter test double: Wait is instant (never blocks on
+// wall-clock time) but records how many times it was called, so a test can
+// assert the judge actually paces its network path through the injected
+// limiter rather than calling straight through.
+type fakeLimiter struct {
+	mu    sync.Mutex
+	calls int
+	err   error // if set, Wait returns this instead of nil/ctx.Err()
+}
+
+func (f *fakeLimiter) Wait(ctx context.Context) error {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	return ctx.Err()
+}
+
+func (f *fakeLimiter) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+const okVerdictBody = `{
+	"id": "test", "object": "chat.completion", "created": 0, "model": "test-model",
+	"choices": [{"index": 0, "finish_reason": "stop",
+		"message": {"role": "assistant", "content": "{\"verdict\":\"pass\",\"reason\":\"ok\"}"}}]
+}`
+
+func TestGeminiJudge_CallsInjectedLimiter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(okVerdictBody))
+	}))
+	defer srv.Close()
+
+	lim := &fakeLimiter{}
+	judge, err := newGeminiJudge(JudgeConfig{APIKey: "test-key", Model: "test-model", BaseURL: srv.URL + "/"}, lim)
+	if err != nil {
+		t.Fatalf("newGeminiJudge: %v", err)
+	}
+
+	if _, err := judge.Judge(context.Background(), JudgeInput{Rubric: "x", Req: req(), Suggestion: "y"}); err != nil {
+		t.Fatalf("Judge: unexpected error: %v", err)
+	}
+
+	if got := lim.callCount(); got != 1 {
+		t.Errorf("limiter.Wait called %d times for one successful call, want exactly 1", got)
+	}
+}
+
+func TestGeminiJudge_LimiterErrorSurfacesBeforeNetworkCall(t *testing.T) {
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(okVerdictBody))
+	}))
+	defer srv.Close()
+
+	lim := &fakeLimiter{err: errors.New("limiter refused")}
+	judge, err := newGeminiJudge(JudgeConfig{APIKey: "test-key", Model: "test-model", BaseURL: srv.URL + "/"}, lim)
+	if err != nil {
+		t.Fatalf("newGeminiJudge: %v", err)
+	}
+
+	if _, err := judge.Judge(context.Background(), JudgeInput{Rubric: "x", Req: req(), Suggestion: "y"}); err == nil {
+		t.Fatal("want an error when the limiter itself errors, got nil")
+	}
+	if hit {
+		t.Error("the network endpoint should never be hit when the limiter refuses the call")
+	}
+}
+
+// TestGeminiJudge_RetriesOnce429ThenSucceeds is the retry-behaviour half of
+// the rate-limiter fix: a 429 followed by a success on retry must NOT
+// surface as an error to the caller.
+func TestGeminiJudge_RetriesOnce429ThenSucceeds(t *testing.T) {
+	orig := judgeRetryBackoff
+	judgeRetryBackoff = time.Millisecond
+	t.Cleanup(func() { judgeRetryBackoff = orig })
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error": {"message": "rate limited"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(okVerdictBody))
+	}))
+	defer srv.Close()
+
+	lim := &fakeLimiter{}
+	judge, err := newGeminiJudge(JudgeConfig{APIKey: "test-key", Model: "test-model", BaseURL: srv.URL + "/"}, lim)
+	if err != nil {
+		t.Fatalf("newGeminiJudge: %v", err)
+	}
+
+	v, err := judge.Judge(context.Background(), JudgeInput{Rubric: "x", Req: req(), Suggestion: "y"})
+	if err != nil {
+		t.Fatalf("Judge: want a retried-then-succeeded call to be error-free, got: %v", err)
+	}
+	if !v.Pass {
+		t.Errorf("Judge() = %+v, want the successful retry's verdict", v)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("network was hit %d times, want exactly 2 (initial 429 + one retry)", got)
+	}
+	// The limiter must be re-consulted before the retry too, not just the
+	// first attempt — otherwise a retry loop could bypass pacing entirely.
+	if got := lim.callCount(); got != 2 {
+		t.Errorf("limiter.Wait called %d times, want exactly 2 (initial + retry)", got)
+	}
+}
+
+// TestGeminiJudge_SecondConsecutive429IsError is the "must not paper over
+// persistent 429s" half: two 429s in a row (initial + the one retry) must
+// surface as an error, not be silently swallowed.
+func TestGeminiJudge_SecondConsecutive429IsError(t *testing.T) {
+	orig := judgeRetryBackoff
+	judgeRetryBackoff = time.Millisecond
+	t.Cleanup(func() { judgeRetryBackoff = orig })
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error": {"message": "rate limited"}}`))
+	}))
+	defer srv.Close()
+
+	lim := &fakeLimiter{}
+	judge, err := newGeminiJudge(JudgeConfig{APIKey: "test-key", Model: "test-model", BaseURL: srv.URL + "/"}, lim)
+	if err != nil {
+		t.Fatalf("newGeminiJudge: %v", err)
+	}
+
+	if _, err := judge.Judge(context.Background(), JudgeInput{Rubric: "x", Req: req(), Suggestion: "y"}); err == nil {
+		t.Fatal("want an error when the retry ALSO 429s, got nil")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("network was hit %d times, want exactly 2 (initial + one retry, then give up)", got)
+	}
+}
+
+func TestJudgeConfigFromEnv_RatePerMinDefault(t *testing.T) {
+	t.Setenv("ZSH_AUTOPILOT_EVAL_JUDGE_RATE_PER_MIN", "")
+	cfg := JudgeConfigFromEnv()
+	if cfg.RatePerMin != defaultJudgeRatePerMin {
+		t.Errorf("RatePerMin = %d, want default %d", cfg.RatePerMin, defaultJudgeRatePerMin)
+	}
+}
+
+func TestJudgeConfigFromEnv_RatePerMinOverride(t *testing.T) {
+	t.Setenv("ZSH_AUTOPILOT_EVAL_JUDGE_RATE_PER_MIN", "5")
+	cfg := JudgeConfigFromEnv()
+	if cfg.RatePerMin != 5 {
+		t.Errorf("RatePerMin = %d, want 5", cfg.RatePerMin)
+	}
+}
+
+func TestJudgeConfigFromEnv_RatePerMinInvalidFallsBackToDefault(t *testing.T) {
+	t.Setenv("ZSH_AUTOPILOT_EVAL_JUDGE_RATE_PER_MIN", "not-a-number")
+	cfg := JudgeConfigFromEnv()
+	if cfg.RatePerMin != defaultJudgeRatePerMin {
+		t.Errorf("RatePerMin = %d, want default %d for an invalid value", cfg.RatePerMin, defaultJudgeRatePerMin)
+	}
+}
+
+// ---- Rubric empty-suggestion coverage ------------------------------------
+
+// TestRubrics_StateEmptySuggestionHandling guards the sentence each judged
+// rubric now carries about how to treat an empty/whitespace-only suggestion
+// — calibration surfaced a real disagreement (C3) that traced back to this
+// being unstated, so it must not silently regress back out of the rubric
+// text.
+func TestRubrics_StateEmptySuggestionHandling(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rubric string
+		want   string // substring that must be present, case-sensitive
+	}{
+		{"c3", c3Rubric, "EMPTY suggestion PASSES"},
+		{"e3", e3Rubric, "EMPTY suggestion FAILS"},
+		{"e7", e7Rubric, "EMPTY suggestion FAILS"},
+		{"f2", f2Rubric, "EMPTY suggestion is a GOOD"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.rubric, tc.want) {
+				t.Errorf("%s rubric does not state its empty-suggestion handling (want substring %q):\n%s", tc.name, tc.want, tc.rubric)
+			}
+		})
 	}
 }

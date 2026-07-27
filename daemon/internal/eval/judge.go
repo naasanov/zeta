@@ -34,7 +34,9 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -46,10 +48,24 @@ import (
 // ---- Config (env, resolved in one place) ----------------------------------
 
 const (
-	envJudgeKey     = "ZSH_AUTOPILOT_EVAL_JUDGE_KEY"
-	envJudgeModel   = "ZSH_AUTOPILOT_EVAL_JUDGE_MODEL"
-	envJudgeBaseURL = "ZSH_AUTOPILOT_EVAL_JUDGE_BASE_URL"
-	envJudgeCache   = "ZSH_AUTOPILOT_EVAL_JUDGE_CACHE"
+	envJudgeKey        = "ZSH_AUTOPILOT_EVAL_JUDGE_KEY"
+	envJudgeModel      = "ZSH_AUTOPILOT_EVAL_JUDGE_MODEL"
+	envJudgeBaseURL    = "ZSH_AUTOPILOT_EVAL_JUDGE_BASE_URL"
+	envJudgeCache      = "ZSH_AUTOPILOT_EVAL_JUDGE_CACHE"
+	envJudgeRatePerMin = "ZSH_AUTOPILOT_EVAL_JUDGE_RATE_PER_MIN"
+
+	// defaultJudgeRatePerMin paces judge calls against Gemini's free tier,
+	// which is roughly 15 requests/minute for flash-lite-class models
+	// (defaultJudgeModel). -judge-validate bypasses the verdict cache by
+	// design (every label is re-judged live, worst-case load) and produced
+	// 16/32 calls failing with 429 before this limiter existed; the normal
+	// grading path hits the same wall once judged cases produce varied
+	// output instead of the same handful of cached suggestions. 12/min is a
+	// hair under the advertised 15/min — the same "don't run right up to the
+	// advertised limit" margin LimiterForBrand (live.go) uses for groq — to
+	// leave room for the eval harness's own worker-pool concurrency and any
+	// other process sharing the same key.
+	defaultJudgeRatePerMin = 12
 
 	// defaultJudgeModel is gemini-3.5-flash-lite (plan doc default): mini-tier
 	// judges already clear the >=90% agreement gate, and Flash-Lite is
@@ -73,14 +89,24 @@ const (
 	defaultJudgeBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 )
 
+// judgeRetryBackoff is how long a single 429 retry waits before trying
+// again, mirroring the plan doc's provider rate-limiting note ("Retry a 429
+// once after retry-after, then record the cell as error"). A fixed short
+// backoff, not retry-after parsing: Gemini's OpenAI-compatible endpoint
+// response here doesn't reliably carry the header, and a single bounded
+// retry is the contract, not a full backoff policy. A var, not a const, so
+// tests can shrink it rather than spend real wall-clock time on a retry.
+var judgeRetryBackoff = 2 * time.Second
+
 // JudgeConfig is the judge's fully-resolved configuration. Build it once via
 // JudgeConfigFromEnv and pass it down; nothing else in this package reads
 // these env vars directly.
 type JudgeConfig struct {
-	APIKey   string // required to actually run a judged case
-	Model    string
-	BaseURL  string
-	CacheDir string
+	APIKey     string // required to actually run a judged case
+	Model      string
+	BaseURL    string
+	CacheDir   string
+	RatePerMin int // calls/minute; <=0 resolves to defaultJudgeRatePerMin
 }
 
 // JudgeConfigFromEnv resolves JudgeConfig from the environment, applying
@@ -101,6 +127,12 @@ func JudgeConfigFromEnv() JudgeConfig {
 	}
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = defaultJudgeCacheDir()
+	}
+	cfg.RatePerMin = defaultJudgeRatePerMin
+	if raw := os.Getenv(envJudgeRatePerMin); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			cfg.RatePerMin = n
+		}
 	}
 	return cfg
 }
@@ -156,15 +188,39 @@ type JudgeVerdict struct {
 // openai.go, just not sharing its code, since that package is shaped for
 // suggestion completions rather than chat grading with structured output).
 type geminiJudge struct {
-	client openai.Client
-	model  string
+	client  openai.Client
+	model   string
+	limiter Limiter // paces the network call; never nil (see newGeminiJudge)
 }
 
 // NewGeminiJudge builds a Judge from cfg. It returns an error if cfg.APIKey
 // is empty — a judge with no key cannot run, and callers (JudgeGrader via
 // the cases.go wiring) must surface that as a clear grader error rather than
 // silently skipping or defaulting to a verdict.
+//
+// The judge paces its own network calls via a RateLimiter built from
+// cfg.RatePerMin (defaultJudgeRatePerMin if unset) — this is the ONLY place
+// that limiter is constructed, so it covers both the -judge-validate path
+// (ValidateJudges calls Judge directly) and the normal grading path
+// (judgeGrader.Grade, on a cache miss) identically; neither has its own
+// separate pacing.
 func NewGeminiJudge(cfg JudgeConfig) (Judge, error) {
+	ratePerMin := cfg.RatePerMin
+	if ratePerMin <= 0 {
+		ratePerMin = defaultJudgeRatePerMin
+	}
+	j, err := newGeminiJudge(cfg, NewRateLimiter(ratePerMin))
+	if err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
+// newGeminiJudge is NewGeminiJudge's implementation with the limiter
+// injectable, so tests can observe Wait calls (or force a cancellation path)
+// without waiting on a real per-minute rate limiter. NewGeminiJudge is the
+// only exported entry point; production code always goes through it.
+func newGeminiJudge(cfg JudgeConfig, limiter Limiter) (*geminiJudge, error) {
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("eval: judge requires %s (see .docs/eval_harness_plan.md, \"The judge\")", envJudgeKey)
 	}
@@ -176,11 +232,20 @@ func NewGeminiJudge(cfg JudgeConfig) (Judge, error) {
 	if baseURL == "" {
 		baseURL = defaultJudgeBaseURL
 	}
+	if limiter == nil {
+		limiter = NoopLimiter{}
+	}
+	// WithMaxRetries(0): the openai-go SDK retries transient errors
+	// (including 429) internally by default, which would retry silently
+	// underneath Judge's own retry-once-and-surface-errors logic below —
+	// hiding exactly the 429s this fix exists to make visible/counted. The
+	// judge owns retry policy itself; the SDK must not also own it.
 	client := openai.NewClient(
 		option.WithBaseURL(baseURL),
 		option.WithAPIKey(cfg.APIKey),
+		option.WithMaxRetries(0),
 	)
-	return &geminiJudge{client: client, model: model}, nil
+	return &geminiJudge{client: client, model: model, limiter: limiter}, nil
 }
 
 func (j *geminiJudge) Name() string { return j.model }
@@ -265,7 +330,46 @@ func renderJudgeUser(in JudgeInput) string {
 // apparatus — stability is what we want from it, unlike the systems under
 // test where production settings are deliberately used unchanged) and
 // requests the structured verdict schema.
+//
+// The network call is paced by j.limiter (see NewGeminiJudge) and a single
+// 429 is retried once after a short backoff — a call that fails then
+// succeeds on retry is NOT an error; only a second failure (429 or
+// otherwise) surfaces one. This matches the plan doc's provider
+// rate-limiting note ("retry a 429 once ... then record as error") and
+// covers both -judge-validate (the worst-case load: it bypasses the verdict
+// cache by design) and the normal cache-miss grading path, since both go
+// through this one method.
 func (j *geminiJudge) Judge(ctx context.Context, in JudgeInput) (JudgeVerdict, error) {
+	if err := j.limiter.Wait(ctx); err != nil {
+		return JudgeVerdict{}, fmt.Errorf("eval: judge: %w", err)
+	}
+
+	resp, err := j.complete(ctx, in)
+	if err != nil && isRateLimited(err) {
+		if backoffErr := sleepOrDone(ctx, judgeRetryBackoff); backoffErr != nil {
+			return JudgeVerdict{}, fmt.Errorf("eval: judge: %w", backoffErr)
+		}
+		if err := j.limiter.Wait(ctx); err != nil {
+			return JudgeVerdict{}, fmt.Errorf("eval: judge: %w", err)
+		}
+		resp, err = j.complete(ctx, in)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return JudgeVerdict{}, fmt.Errorf("eval: judge: %w", ctx.Err())
+		}
+		return JudgeVerdict{}, fmt.Errorf("eval: judge request: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return JudgeVerdict{}, errors.New("eval: judge: response had no choices")
+	}
+	return parseVerdict(resp.Choices[0].Message.Content)
+}
+
+// complete sends the actual chat-completion request. Split out of Judge so
+// the retry-once-on-429 logic above can call it twice without duplicating
+// the request construction.
+func (j *geminiJudge) complete(ctx context.Context, in JudgeInput) (*openai.ChatCompletion, error) {
 	params := openai.ChatCompletionNewParams{
 		Model: j.model,
 		Messages: []openai.ChatCompletionMessageParamUnion{
@@ -283,18 +387,34 @@ func (j *geminiJudge) Judge(ctx context.Context, in JudgeInput) (JudgeVerdict, e
 			},
 		},
 	}
+	return j.client.Chat.Completions.New(ctx, params)
+}
 
-	resp, err := j.client.Chat.Completions.New(ctx, params)
-	if err != nil {
-		if ctx.Err() != nil {
-			return JudgeVerdict{}, fmt.Errorf("eval: judge: %w", ctx.Err())
-		}
-		return JudgeVerdict{}, fmt.Errorf("eval: judge request: %w", err)
+// isRateLimited reports whether err is a 429 from the openai-go SDK's own
+// error type (*openai.Error wraps the HTTP response; StatusCode is the
+// reliable signal — Gemini's OpenAI-compatible endpoint does not consistently
+// set a parseable Retry-After header, which is why judgeRetryBackoff is a
+// fixed short duration rather than header-driven).
+func isRateLimited(err error) bool {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == 429
 	}
-	if len(resp.Choices) == 0 {
-		return JudgeVerdict{}, errors.New("eval: judge: response had no choices")
+	return false
+}
+
+// sleepOrDone waits d, returning early with ctx.Err() if ctx is cancelled
+// first — the backoff before a 429 retry must stay cancellable like every
+// other blocking wait in this package.
+func sleepOrDone(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return parseVerdict(resp.Choices[0].Message.Content)
 }
 
 // judgeResponse is the wire shape parseVerdict expects. Fields are required:

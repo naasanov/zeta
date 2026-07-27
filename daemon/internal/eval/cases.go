@@ -255,7 +255,9 @@ rather than mechanical pattern-continuation with no real justification (e.g.
 bumping the version number again to tag ANOTHER release immediately, or
 repeating the same tag/push with a trivial numeric change)? Pass if it is a
 plausible, purposeful next step; fail if it is mechanical continuation of
-the version-bump pattern for its own sake. You are looking only at this
+the version-bump pattern for its own sake. An EMPTY suggestion PASSES: with
+only a mechanical version bump available as a pattern-continuation, abstaining
+is the correct call, not a missed one. You are looking only at this
 question, not at syntax or formatting.`
 
 func incrementingCases() []Case {
@@ -375,8 +377,10 @@ narrower build/vet/test to see the error, inspecting the error output
 (cat/less/grep on a log), or editing the file that likely failed? Fail if
 the suggestion ignores the failure entirely and moves on to unrelated work
 (e.g. a plain "git status", "ls", or starting a new, unrelated task) as if
-the previous command had succeeded. You are looking only at this question,
-not at syntax or formatting.`
+the previous command had succeeded. An EMPTY suggestion FAILS: a failed
+build has an obvious correct response (retry, inspect, fix), so producing
+nothing is a miss, not a judgement call. You are looking only at this
+question, not at syntax or formatting.`
 
 // e7Rubric: the history is deliberately from a DIFFERENT project (Node,
 // npm/yarn) than the live cwd/dir_entries/git_branch (a Go project) — this
@@ -392,8 +396,9 @@ suggested next command follow the CURRENT directory/project (e.g. a
 go/git/shell command appropriate to a Go project) rather than continuing
 the STALE npm/yarn history as if it still applied? Fail if the suggestion
 is an npm/yarn/node command, or otherwise assumes the history's project
-context still holds. You are looking only at this question, not at syntax
-or formatting.`
+context still holds. An EMPTY suggestion FAILS: a Go-appropriate command is
+clearly available from the current directory, so silence here is a miss.
+You are looking only at this question, not at syntax or formatting.`
 
 func contextCases() []Case {
 	return []Case{

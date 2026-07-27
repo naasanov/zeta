@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,42 @@ func TestLoadLabels_BlankAndCommentLinesSkipped(t *testing.T) {
 	}
 	if len(labels) != 1 {
 		t.Fatalf("got %d labels, want 1 (comments/blanks should be skipped)", len(labels))
+	}
+}
+
+// TestLoadLabels_PinnedFile_C3EmptyIsPass loads the actual pinned
+// judge_labels.jsonl (not a fixture) and checks the C3 empty-suggestion
+// entry specifically: calibration found the judge (correctly) disagreeing
+// with a human "fail" label there, traced to prompt.systemPrompt's "if
+// nothing useful comes to mind, output nothing" — abstention is intended
+// behaviour, so the label was corrected to "pass" and c3Rubric now says so
+// explicitly. This guards that correction from silently reverting.
+func TestLoadLabels_PinnedFile_C3EmptyIsPass(t *testing.T) {
+	f, err := os.Open("testdata/judge_labels.jsonl")
+	if err != nil {
+		t.Fatalf("opening pinned judge_labels.jsonl: %v", err)
+	}
+	defer f.Close()
+
+	labels, err := LoadLabels(f, Cases())
+	if err != nil {
+		t.Fatalf("LoadLabels: unexpected error loading the pinned file: %v", err)
+	}
+	if len(labels) == 0 {
+		t.Fatal("pinned judge_labels.jsonl produced zero labels")
+	}
+
+	found := false
+	for _, l := range labels {
+		if l.CaseID == "C3" && l.Suggestion == "" {
+			found = true
+			if l.Verdict != "pass" {
+				t.Errorf("C3 empty-suggestion label verdict = %q, want %q (abstention is intended behaviour per prompt.systemPrompt)", l.Verdict, "pass")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pinned judge_labels.jsonl no longer has a C3 empty-suggestion entry")
 	}
 }
 
