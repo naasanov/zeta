@@ -31,6 +31,116 @@
         "panel": "shared"
       },
       "problemMatcher": []
+    },
+
+    // ---- eval harness (cmd/eval) ------------------------------------------
+    // NOTE: tasks.json has no "envFile" key — that is a launch.json-only
+    // feature (see the "daemon (debug)" config, which uses it). So every eval
+    // task below sources sandbox/.env itself with `set -a; . file; set +a`,
+    // which auto-exports each assignment and handles the file's comments and
+    // blank lines because it is plain shell syntax being sourced.
+    {
+      "label": "eval: dry-run",
+      "detail": "Run the eval harness against the scripted stub provider. No network, no API key, no cost.",
+      "type": "shell",
+      "command": "go run ./cmd/eval -dry-run",
+      "options": {
+        "cwd": "${workspaceFolder}/daemon"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "eval: run (prompted)",
+      "detail": "Live eval run. Prompts for providers, case selectors, and run count; loads keys from sandbox/.env.",
+      "type": "shell",
+      "command": "set -a && . \"${workspaceFolder}/sandbox/.env\" && set +a && go run ./cmd/eval -providers '${input:evalProviders}' -cases '${input:evalCases}' -n ${input:evalN}",
+      "options": {
+        "cwd": "${workspaceFolder}/daemon"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "eval: judge-validate (prompted)",
+      "detail": "Score candidate judge models against the hand labels. Exits non-zero below the 90% agreement gate.",
+      "type": "shell",
+      "command": "set -a && . \"${workspaceFolder}/sandbox/.env\" && set +a && go run ./cmd/eval -judge-validate -judges '${input:evalJudges}'",
+      "options": {
+        "cwd": "${workspaceFolder}/daemon"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "eval: custom args (prompted)",
+      "detail": "Escape hatch: prompts for a raw cmd/eval flag string (-matrix, -import, -diff, -out, ...) with sandbox/.env loaded.",
+      "type": "shell",
+      "command": "set -a && . \"${workspaceFolder}/sandbox/.env\" && set +a && go run ./cmd/eval ${input:evalArgs}",
+      "options": {
+        "cwd": "${workspaceFolder}/daemon"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ],
+
+  // VS Code prompts for each of these the first time it is referenced in a
+  // task run, and remembers the answer for the rest of the window session.
+  "inputs": [
+    {
+      "id": "evalProviders",
+      "type": "pickString",
+      "description": "Which provider(s) to evaluate?",
+      "default": "codestral",
+      "options": [
+        "codestral",
+        "anthropic",
+        "groq",
+        "codestral,anthropic",
+        "codestral,anthropic,groq"
+      ]
+    },
+    {
+      "id": "evalCases",
+      "type": "promptString",
+      "description": "Case selectors: IDs (A1,B2), categories (syntax), globs (A*). Empty = all 33 cases.",
+      "default": ""
+    },
+    {
+      "id": "evalN",
+      "type": "pickString",
+      "description": "Runs per case (0 = adaptive: 3, escalating to 10 on disagreement). Hard-capped at 10.",
+      "default": "0",
+      "options": ["0", "1", "3", "5", "10"]
+    },
+    {
+      "id": "evalJudges",
+      "type": "promptString",
+      "description": "Judge model ids, comma-separated. NB: Gemini ids use DOTS (gemini-3.5-flash-lite), not dashes.",
+      "default": "gemini-3.5-flash-lite"
+    },
+    {
+      "id": "evalArgs",
+      "type": "promptString",
+      "description": "Raw cmd/eval flags, e.g. -matrix -out /tmp/sc.json",
+      "default": "-cases syntax"
     }
   ]
 }

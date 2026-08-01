@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
@@ -12,6 +13,7 @@ import (
 type StubResult struct {
 	Output string
 	Err    error
+	TTFT   time.Duration
 }
 
 // StubProvider is a provider.Provider that returns scripted results in
@@ -57,7 +59,7 @@ func (s *StubProvider) Complete(ctx context.Context, _ provider.Request) (provid
 	if r.Err != nil {
 		return provider.Completion{}, r.Err
 	}
-	return provider.Completion{Text: r.Output}, nil
+	return provider.Completion{Text: r.Output, TTFT: r.TTFT}, nil
 }
 
 func (s *StubProvider) Name() string {

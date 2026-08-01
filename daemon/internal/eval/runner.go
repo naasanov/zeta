@@ -106,7 +106,11 @@ const (
 	// defaultConcurrency bounds how many Cases the Runner works on at once.
 	// Runs *within* one case stay sequential (the plan doc: "Keep the
 	// concurrency simple and obvious ... the runs within a case are few"),
-	// so this is the only concurrency knob Part 1 needs.
+	// so this is the only concurrency knob Part 1 needs. It's only a
+	// sensible default when a cell has no shared Limiter (NoopLimiter, or
+	// codestral/anthropic's per-worker HTTP concurrency); a cell with a real
+	// rate limiter should override it via Runner.Concurrency — see that
+	// field's doc comment.
 	defaultConcurrency = 4
 )
 
@@ -118,18 +122,92 @@ type Runner struct {
 	MinRuns  int // default 3
 	MaxRuns  int // default 10
 	FixedN   int // 0 = adaptive; otherwise exactly N, hard-capped at MaxRuns
+
+	// Concurrency overrides defaultConcurrency (0 = use the default). A
+	// Limiter shared across workers (e.g. groq's RateLimiter) makes extra
+	// workers pure queuing latency with no throughput benefit — the calls
+	// are still paced to one per interval, worker count only decides which
+	// case's calls occupy which slots. Since Progress reports strictly in
+	// case order (see below), spreading a cell's limited slots across
+	// several concurrent cases delays the first reported result for no
+	// gain; callers building a rate-limited cell should pass Concurrency: 1.
+	Concurrency int
+
+	// ProviderLabel overrides what CaseResult.Provider records, and must be
+	// the user-facing BRAND (codestral/anthropic/groq/ollama) rather than
+	// Provider.Name(), which returns the internal ADAPTER. Several brands
+	// share the openai adapter (see cmd/autopilotd's newProvider), so
+	// Name() alone reports groq as "openai" — and since the scorecard pivots
+	// on the cell label, groq and ollama in one matrix would collapse into a
+	// single column, each silently overwriting the other's results. Empty
+	// falls back to Provider.Name().
+	ProviderLabel string
+
+	// Progress, when non-nil, is called once per completed case for live
+	// pytest-style output. Two guarantees callers depend on:
+	//
+	//   - It is called in CASE ORDER, not completion order, even though cases
+	//     run concurrently. A progress stream whose Nth symbol isn't the Nth
+	//     case is worse than none: it invites reading "the 5th case failed"
+	//     off a dot that belongs to whichever case happened to finish 5th.
+	//   - It is called from exactly one goroutine at a time and never while
+	//     Run holds a lock, so an implementation is free to write to a shared
+	//     io.Writer without its own synchronization, and cannot deadlock Run.
+	//
+	// A slow Progress func serializes the pool's completions, so keep it to
+	// formatting and a write.
+	Progress func(Case, CaseResult)
+}
+
+// CaseSymbol is the one-character progress glyph for a finished case, in the
+// spirit of pytest's dots: pass is quiet, anything else is loud.
+//
+//	'.' every assertion passed
+//	'x' at least one assertion failed
+//	'!' a trip-wire tripped — a defect in shipped logic, not a quality miss,
+//	    so it reads differently from an ordinary threshold miss at a glance
+//	'E' the case produced no successful runs at all (provider errors), so
+//	    nothing was actually evaluated — distinct from "evaluated and failed"
+func CaseSymbol(r CaseResult) rune {
+	if r.Runs == 0 {
+		return 'E'
+	}
+	symbol := '.'
+	for _, a := range r.Asserts {
+		if a.Pass {
+			continue
+		}
+		if a.Polarity == TripWire {
+			return '!'
+		}
+		symbol = 'x'
+	}
+	return symbol
+}
+
+// providerLabel is the brand name to record on results: ProviderLabel when
+// set, else the adapter's own Name(). See the ProviderLabel field.
+func (r *Runner) providerLabel() string {
+	if r.ProviderLabel != "" {
+		return r.ProviderLabel
+	}
+	return r.Provider.Name()
 }
 
 // resolved returns the effective min/max/variant/limiter, applying defaults
 // for zero values without mutating the Runner (so a Runner is safe to reuse
 // or share read-only across goroutines the caller might spawn).
-func (r *Runner) resolved() (min, max int, variant Variant, limiter Limiter) {
+func (r *Runner) resolved() (min, max, concurrency int, variant Variant, limiter Limiter) {
 	min, max = r.MinRuns, r.MaxRuns
 	if min <= 0 {
 		min = defaultMinRuns
 	}
 	if max <= 0 {
 		max = defaultMaxRuns
+	}
+	concurrency = r.Concurrency
+	if concurrency <= 0 {
+		concurrency = defaultConcurrency
 	}
 	variant = r.Variant
 	if variant.Build == nil {
@@ -139,7 +217,7 @@ func (r *Runner) resolved() (min, max int, variant Variant, limiter Limiter) {
 	if limiter == nil {
 		limiter = NoopLimiter{}
 	}
-	return min, max, variant, limiter
+	return min, max, concurrency, variant, limiter
 }
 
 // Run drives every case in cases through r.Provider and returns one
@@ -186,13 +264,38 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 		return results
 	}
 
-	workers := min(defaultConcurrency, len(cases))
+	_, _, concurrency, _, _ := r.resolved()
+	workers := min(concurrency, len(cases))
 
 	jobs := make(chan int, len(cases))
 	for i := range cases {
 		jobs <- i
 	}
 	close(jobs)
+
+	// Progress reporting turns the pool's out-of-order completions back into
+	// in-order emissions: `done` marks which indices have finished, `cursor`
+	// is the next index not yet reported. A worker that finishes index 7
+	// while 5 is still running reports nothing; whoever finishes 5 then
+	// drains 5, 6, 7 in one go.
+	//
+	// The Progress callback is invoked WHILE HOLDING progressMu, and that is
+	// load-bearing rather than lazy. Handing out disjoint [start,end) spans
+	// under the lock and emitting outside it looks safe and is not: a worker
+	// holding span [8,12) can finish its writes before the worker holding
+	// [5,8) does, so the symbols still land out of order. Serializing the
+	// emission itself is what actually orders the output. progressMu is
+	// unexported and local to this call, so a callback cannot reach it — the
+	// only way to deadlock here is a callback that re-enters this same Run,
+	// which is why the field's doc says to keep it to formatting and a write.
+	var (
+		progressMu sync.Mutex
+		done       []bool
+		cursor     int
+	)
+	if r.Progress != nil {
+		done = make([]bool, len(cases))
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -201,6 +304,17 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 			defer wg.Done()
 			for idx := range jobs {
 				results[idx] = r.runCase(ctx, cases[idx])
+
+				if r.Progress == nil {
+					continue
+				}
+				progressMu.Lock()
+				done[idx] = true
+				for cursor < len(done) && done[cursor] {
+					r.Progress(cases[cursor], results[cursor])
+					cursor++
+				}
+				progressMu.Unlock()
 			}
 		}()
 	}
@@ -214,7 +328,7 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 // into a CaseResult. Runs within a case are strictly sequential — see
 // Run's doc comment for why that's the deliberate simplicity choice.
 func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
-	minRuns, maxRuns, variant, limiter := r.resolved()
+	minRuns, maxRuns, _, variant, limiter := r.resolved()
 
 	var samples []Sample
 	present := make([][]bool, len(c.Asserts)) // per-assertion, per-graded-sample
@@ -245,7 +359,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 		// exact leading/trailing whitespace. Leading whitespace is deliberately
 		// NOT trimmed: it is load-bearing (the model must supply its own
 		// separating space, see prompt.systemPrompt).
-		s := Sample{Output: strings.TrimRight(completion.Text, " \t\r\n")}
+		s := Sample{Output: strings.TrimRight(completion.Text, " \t\r\n"), TTFT: completion.TTFT}
 		samples = append(samples, s)
 		for i, a := range c.Asserts {
 			ok, gerr := a.Grader.Grade(ctx, c.Req, s.Output)
@@ -345,7 +459,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 	return CaseResult{
 		CaseID:    c.ID,
 		Category:  c.Category,
-		Provider:  r.Provider.Name(),
+		Provider:  r.providerLabel(),
 		Model:     r.Provider.Model(),
 		Variant:   variant.Name,
 		Runs:      runs,

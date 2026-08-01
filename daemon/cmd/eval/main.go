@@ -19,6 +19,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -135,7 +136,18 @@ func main() {
 	fmt.Fprintf(os.Stderr, "eval: %d cell(s) (%d provider(s) x %d variant(s)) x %d case(s), up to %d run(s)/case => up to %d total provider calls\n",
 		len(cells), countDistinctProviders(cells), countDistinctVariants(cells), len(cases), perCaseMax, maxCalls)
 
+	fmt.Fprintf(os.Stderr, "eval: legend  . pass   x fail   ! trip-wire tripped   E no successful runs\n")
+
 	start := time.Now()
+
+	// rowLabel width, so multi-cell runs line their dots up in a column
+	// instead of ragged-right.
+	labelWidth := 0
+	for _, c := range cells {
+		if w := len(cellLabel(c)); w > labelWidth {
+			labelWidth = w
+		}
+	}
 
 	var allResults []eval.CaseResult
 	var lastMeta eval.Meta
@@ -150,12 +162,55 @@ func main() {
 			log.Fatalf("eval: provider %q: %v", c.Provider, err)
 		}
 
-		runner := &eval.Runner{Provider: p, Variant: c.Variant, Limiter: limiter, FixedN: *n}
+		// One row per cell, symbols streaming out as cases finish. Progress
+		// goes to stderr so a piped or -out'd stdout stays a clean scorecard.
+		fmt.Fprintf(os.Stderr, "%-*s  ", labelWidth, cellLabel(c))
+		var passed, failed, tripped, errored int
+		runner := &eval.Runner{
+			Provider: p, Variant: c.Variant, Limiter: limiter, FixedN: *n,
+			// A shared rate limiter makes extra workers pure queuing latency
+			// (see Runner.Concurrency's doc comment) — run those cells
+			// single-worker so a cell's paced-out slots all go to whichever
+			// case is next in report order instead of scattering across
+			// several concurrent cases.
+			Concurrency: concurrencyFor(limiter),
+			// The BRAND, not p.Name() (the adapter) — see Runner.ProviderLabel.
+			ProviderLabel: c.Provider,
+			Progress: func(_ eval.Case, r eval.CaseResult) {
+				sym := eval.CaseSymbol(r)
+				switch sym {
+				case '.':
+					passed++
+				case 'x':
+					failed++
+				case '!':
+					tripped++
+				case 'E':
+					errored++
+				}
+				fmt.Fprint(os.Stderr, eval.ColorizeSymbol(sym))
+			},
+		}
 		results := runner.Run(context.Background(), cases)
+		passedLabel := fmt.Sprintf("%d/%d passed", passed, len(cases))
+		if passed == len(cases) {
+			passedLabel = eval.ColorGood(passedLabel)
+		}
+		fmt.Fprintf(os.Stderr, "  %s", passedLabel)
+		if tripped > 0 {
+			fmt.Fprintf(os.Stderr, ", %s", eval.ColorBad(fmt.Sprintf("%d TRIPPED", tripped)))
+		}
+		if failed > 0 {
+			fmt.Fprintf(os.Stderr, ", %s", eval.ColorBad(fmt.Sprintf("%d failed", failed)))
+		}
+		if errored > 0 {
+			fmt.Fprintf(os.Stderr, ", %s", eval.ColorWarn(fmt.Sprintf("%d errored", errored)))
+		}
+		fmt.Fprintln(os.Stderr)
 		allResults = append(allResults, results...)
 
 		lastMeta = eval.Meta{
-			Provider:  p.Name(),
+			Provider:  c.Provider, // brand, matching the scorecard's column labels
 			Model:     p.Model(),
 			Variant:   c.Variant.Name,
 			NPolicy:   nPolicy,
@@ -193,6 +248,10 @@ type cell struct {
 	Provider string // brand name; "stub" under -dry-run
 	Variant  eval.Variant
 }
+
+// cellLabel is the row prefix for a cell's live progress line, e.g.
+// "codestral/default".
+func cellLabel(c cell) string { return c.Provider + "/" + c.Variant.Name }
 
 // resolveCells assembles the matrix. Under -dry-run, -providers/-matrix are
 // ignored entirely — Part 1's -dry-run behavior stays exactly a single
@@ -258,6 +317,18 @@ func buildCellProvider(c cell, dryRun bool, modelOverride string) (provider.Prov
 	return p, eval.LimiterForBrand(c.Provider), nil
 }
 
+// concurrencyFor returns the Runner.Concurrency to use for a cell's limiter:
+// 1 for a real *eval.RateLimiter (see Runner.Concurrency's doc comment on why
+// spreading a shared per-minute budget across several concurrent workers only
+// adds queuing latency, never throughput), 0 (Runner's own default) for
+// anything else, i.e. eval.NoopLimiter.
+func concurrencyFor(limiter eval.Limiter) int {
+	if _, ok := limiter.(*eval.RateLimiter); ok {
+		return 1
+	}
+	return 0
+}
+
 // combinedMeta builds the report Meta for a multi-cell run: Provider/Model/
 // Variant become comma-joined summaries (there is no single value to show)
 // rather than silently picking the last cell's, which would misrepresent a
@@ -295,10 +366,8 @@ func countDistinctVariants(cells []cell) int  { return len(distinctVariants(cell
 // first-seen order — used to build the distinct provider/variant lists for
 // the pre-flight line and combinedMeta without a set type.
 func appendUnique(ss []string, v string) []string {
-	for _, s := range ss {
-		if s == v {
-			return ss
-		}
+	if slices.Contains(ss, v) {
+		return ss
 	}
 	return append(ss, v)
 }

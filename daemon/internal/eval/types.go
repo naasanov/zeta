@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
@@ -125,6 +126,13 @@ type Case struct {
 type Sample struct {
 	Output string
 	Err    error
+
+	// TTFT is completion.TTFT verbatim from the provider call that produced
+	// this sample (zero when Err is set — the call never got a first byte).
+	// It's what the report's per-cell P50 LATENCY column pools across, so a
+	// cell that passes more cases but is slower is visible in the same table
+	// rather than requiring a separate metrics run to notice.
+	TTFT time.Duration
 }
 
 // sampleJSON is Sample's wire shape: error is an interface with no exported
@@ -135,10 +143,11 @@ type Sample struct {
 type sampleJSON struct {
 	Output string `json:"output"`
 	Err    string `json:"err,omitempty"`
+	TTFTMs int64  `json:"ttft_ms,omitempty"`
 }
 
 func (s Sample) MarshalJSON() ([]byte, error) {
-	aux := sampleJSON{Output: s.Output}
+	aux := sampleJSON{Output: s.Output, TTFTMs: s.TTFT.Milliseconds()}
 	if s.Err != nil {
 		aux.Err = s.Err.Error()
 	}
@@ -151,6 +160,7 @@ func (s *Sample) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	s.Output = aux.Output
+	s.TTFT = time.Duration(aux.TTFTMs) * time.Millisecond
 	s.Err = nil
 	if aux.Err != "" {
 		s.Err = errors.New(aux.Err)

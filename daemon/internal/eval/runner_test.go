@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
@@ -22,6 +24,32 @@ func containsGrader(sub string) Grader {
 
 func basicCase(asserts ...Assertion) Case {
 	return Case{ID: "T1", Category: "test", Req: protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"}, Asserts: asserts}
+}
+
+// TestRunCase_CapturesProviderTTFT guards the plumbing the report's P50
+// LATENCY column depends on: provider.Completion.TTFT must survive into
+// Sample.TTFT on the success path, and stay zero on the error path (an
+// errored call never got a first byte, so it must not silently contribute a
+// fake zero-latency data point to a cell's median).
+func TestRunCase_CapturesProviderTTFT(t *testing.T) {
+	p := NewStubProvider(
+		StubResult{Output: "ok", TTFT: 42 * time.Millisecond},
+		StubResult{Err: errBoom},
+	)
+	r := &Runner{Provider: p, FixedN: 2}
+	c := basicCase(Assertion{Label: "x", Polarity: Measure, Grader: containsGrader("o")})
+
+	results := r.Run(context.Background(), []Case{c})
+	res := results[0]
+	if len(res.Samples) != 2 {
+		t.Fatalf("want 2 samples, got %d", len(res.Samples))
+	}
+	if res.Samples[0].TTFT != 42*time.Millisecond {
+		t.Errorf("want successful sample's TTFT = 42ms, got %v", res.Samples[0].TTFT)
+	}
+	if res.Samples[1].Err == nil || res.Samples[1].TTFT != 0 {
+		t.Errorf("want errored sample to carry no TTFT, got Err=%v TTFT=%v", res.Samples[1].Err, res.Samples[1].TTFT)
+	}
 }
 
 func TestRun_IdenticalOutputsSaturateAtMinRuns(t *testing.T) {
@@ -339,5 +367,103 @@ func TestTruncateGraderError(t *testing.T) {
 	}
 	if !strings.Contains(got, "404 models/some-judge-model is not found") {
 		t.Errorf("truncated message lost the identifying status code/model id: %q", got)
+	}
+}
+
+// TestRun_ProgressIsInCaseOrder pins the guarantee live progress output
+// depends on: cases run concurrently (defaultConcurrency workers), but
+// Progress must fire in CASE order. If it fired in completion order, the Nth
+// symbol on the pytest-style row would belong to whichever case happened to
+// finish Nth, and reading "the 5th case failed" off the 5th dot would be
+// wrong. Run with -race: this is where an out-of-order or racy emission shows.
+func TestRun_ProgressIsInCaseOrder(t *testing.T) {
+	const n = 50
+	cases := make([]Case, n)
+	for i := range cases {
+		cases[i] = Case{ID: fmt.Sprintf("C%02d", i), Category: "order"}
+	}
+
+	var mu sync.Mutex
+	var gotIDs []string
+	r := &Runner{
+		Provider: NewStubProvider(StubResult{Output: " x"}),
+		Progress: func(c Case, _ CaseResult) {
+			mu.Lock()
+			defer mu.Unlock()
+			gotIDs = append(gotIDs, c.ID)
+		},
+	}
+	r.Run(context.Background(), cases)
+
+	if len(gotIDs) != n {
+		t.Fatalf("Progress fired %d times, want exactly %d (one per case)", len(gotIDs), n)
+	}
+	for i, id := range gotIDs {
+		if want := cases[i].ID; id != want {
+			t.Fatalf("Progress[%d] = %s, want %s — emissions must be in case order, not completion order", i, id, want)
+		}
+	}
+}
+
+// TestRun_ProgressResultMatchesReturnedResult guards against the emitted
+// CaseResult drifting from the one Run returns — the row would then disagree
+// with the scorecard printed underneath it.
+func TestRun_ProgressResultMatchesReturnedResult(t *testing.T) {
+	cases := []Case{
+		{ID: "P1", Asserts: []Assertion{{Label: "has-x", Polarity: Must, Threshold: 0.8, Grader: containsGrader("x")}}},
+		{ID: "P2", Asserts: []Assertion{{Label: "has-zzz", Polarity: Must, Threshold: 0.8, Grader: containsGrader("zzz")}}},
+	}
+
+	var mu sync.Mutex
+	seen := map[string]rune{}
+	r := &Runner{
+		Provider: NewStubProvider(StubResult{Output: " x"}),
+		Progress: func(c Case, res CaseResult) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen[c.ID] = CaseSymbol(res)
+		},
+	}
+	got := r.Run(context.Background(), cases)
+
+	for _, res := range got {
+		if want := CaseSymbol(res); seen[res.CaseID] != want {
+			t.Errorf("case %s: progress symbol %q != final result symbol %q", res.CaseID, seen[res.CaseID], want)
+		}
+	}
+	if seen["P1"] != '.' {
+		t.Errorf("P1 symbol = %q, want '.' (assertion passes)", seen["P1"])
+	}
+	if seen["P2"] != 'x' {
+		t.Errorf("P2 symbol = %q, want 'x' (assertion fails)", seen["P2"])
+	}
+}
+
+func TestCaseSymbol(t *testing.T) {
+	tests := []struct {
+		name string
+		res  CaseResult
+		want rune
+	}{
+		{"all pass", CaseResult{Runs: 3, Asserts: []AssertionResult{{Pass: true}}}, '.'},
+		{"no assertions is still a pass", CaseResult{Runs: 3}, '.'},
+		{"a failure", CaseResult{Runs: 3, Asserts: []AssertionResult{{Pass: false}}}, 'x'},
+		{
+			"a tripped wire outranks an ordinary failure",
+			CaseResult{Runs: 3, Asserts: []AssertionResult{{Pass: false}, {Pass: false, Polarity: TripWire}}},
+			'!',
+		},
+		{
+			"no successful runs outranks everything",
+			CaseResult{Runs: 0, Errors: 3, Asserts: []AssertionResult{{Pass: false, Polarity: TripWire}}},
+			'E',
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CaseSymbol(tt.res); got != tt.want {
+				t.Errorf("CaseSymbol() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
