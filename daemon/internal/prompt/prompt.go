@@ -110,6 +110,15 @@ type Prompt struct {
 	// renders these as raw command lines contiguous with Prefix (a code model
 	// continues real preceding code better than commented metadata); chat
 	// adapters keep history in the Context block instead (see contextBlock).
+
+	// LastExit is req.LastExit verbatim, including 0. Context already carries
+	// the exit status, but ONLY when it's non-zero (contextBlock omits the
+	// line at 0, since "the last command succeeded" is the uninteresting
+	// default). Renderers that want the value regardless — e.g. a FIM shape
+	// using "# exit: 0" as a structural boundary between history and the
+	// cursor — need it as a field, because it cannot be recovered from
+	// Context once omitted.
+	LastExit int
 }
 
 // Build assembles the provider-neutral Prompt for a request. The system turn
@@ -127,6 +136,7 @@ func Build(req protocol.Request) Prompt {
 		Prefix:      req.Buf,
 		Suffix:      "",
 		History:     req.History,
+		LastExit:    req.LastExit,
 	}
 }
 

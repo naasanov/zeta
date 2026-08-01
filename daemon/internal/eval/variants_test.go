@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
 func TestDefaultVariant_Name(t *testing.T) {
@@ -68,6 +70,74 @@ func TestFimCommentedHistoryVariant_ActuallyDropsHistoryFromFIM(t *testing.T) {
 	}
 }
 
+// TestShapeVariants_SetRendererNotBuild pins what makes a shape variant a
+// different KIND of variant: it leaves prompt content alone (Build ==
+// prompt.Build) and changes only the FIM rendering. A shape variant that
+// accidentally mutated Build too would confound the very comparison it
+// exists to make.
+func TestShapeVariants_SetRendererNotBuild(t *testing.T) {
+	req := protocol.Request{Kind: protocol.KindNextCommand, History: []string{"git status", "git push"}}
+	base := prompt.Build(req)
+
+	for _, v := range []Variant{FimNoPromptMarkerVariant(), FimExitCodeAlwaysVariant()} {
+		if v.FIMRenderer == nil {
+			t.Errorf("variant %q: FIMRenderer is nil, want a renderer", v.Name)
+			continue
+		}
+		got := v.Build(req)
+		if got.Prefix != base.Prefix || len(got.History) != len(base.History) || got.Context != base.Context {
+			t.Errorf("variant %q: Build mutated the Prompt; shape variants must only change rendering", v.Name)
+		}
+	}
+}
+
+// TestShapeVariants_RenderDistinctPrompts is the guard that these variants
+// are actually distinguishable conditions in a run: if two registry entries
+// rendered identically, the scorecard would show two columns of the same
+// experiment and read as a reproducibility check rather than a comparison.
+func TestShapeVariants_RenderDistinctPrompts(t *testing.T) {
+	p := prompt.Build(protocol.Request{Kind: protocol.KindNextCommand, History: []string{"git status", "git push"}})
+
+	def, _ := provider.RenderFIM(p)
+	noMarker, _ := FimNoPromptMarkerVariant().FIMRenderer(p)
+	exit, _ := FimExitCodeAlwaysVariant().FIMRenderer(p)
+
+	if noMarker == def {
+		t.Error("fim-no-prompt-marker renders identically to the default shape")
+	}
+	if exit == def {
+		t.Error("fim-exit-code-always renders identically to the default shape")
+	}
+	if noMarker == exit {
+		t.Error("the two shape variants render identically to each other")
+	}
+
+	// The A9 fix, now shipped: the default must NOT end right after the last
+	// history line. The baseline variant is expected to still do so — that is
+	// what makes it the baseline.
+	if strings.HasSuffix(def, "git push\n") {
+		t.Errorf("default shape regressed to the A9 shape: %q", def)
+	}
+	if !strings.HasSuffix(noMarker, "git push\n") {
+		t.Errorf("fim-no-prompt-marker should reproduce the pre-A9 shape, got %q", noMarker)
+	}
+	if strings.HasSuffix(exit, "git push\n") {
+		t.Errorf("fim-exit-code-always still ends right after the last history line: %q", exit)
+	}
+}
+
+// TestDefaultVariant_HasNoRenderer keeps "default" meaning the SHIPPED
+// rendering path — a renderer here would make every baseline number in every
+// past report incomparable to future ones.
+func TestDefaultVariant_HasNoRenderer(t *testing.T) {
+	if DefaultVariant().FIMRenderer != nil {
+		t.Error("DefaultVariant must not override the FIM renderer")
+	}
+	if FimCommentedHistoryVariant().FIMRenderer != nil {
+		t.Error("FimCommentedHistoryVariant is a Build-only variant; it must not set a renderer")
+	}
+}
+
 func TestVariantByName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -78,6 +148,8 @@ func TestVariantByName(t *testing.T) {
 		{"DEFAULT", false, "default"},
 		{" default ", false, "default"},
 		{"fim-commented-history", false, "fim-commented-history"},
+		{"fim-no-prompt-marker", false, "fim-no-prompt-marker"},
+		{"fim-exit-code-always", false, "fim-exit-code-always"},
 		{"nope", true, ""},
 		{"", true, ""},
 	}

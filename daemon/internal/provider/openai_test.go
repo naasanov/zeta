@@ -242,3 +242,14 @@ func TestComplete_UsageAndFinishReason(t *testing.T) {
 		t.Errorf("Complete().TTFT = %v, want > 0", got.TTFT)
 	}
 }
+
+func TestOpenAI_RenderPrompt(t *testing.T) {
+	client := newOpenAI(t, "http://unused", "test-model", "test-key", 48)
+	req := testReq("sys", "user")
+
+	got := client.RenderPrompt(req)
+	want := RenderChatPrompt(req)
+	if got != want {
+		t.Errorf("RenderPrompt() = %q, want %q (RenderChatPrompt output)", got, want)
+	}
+}

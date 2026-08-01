@@ -356,3 +356,17 @@ func TestAnthropic_NameAndModel(t *testing.T) {
 		t.Errorf("Model() = %q, want %q", p2.Model(), "claude-opus-4-8")
 	}
 }
+
+func TestAnthropic_RenderPrompt(t *testing.T) {
+	p, err := NewAnthropic("", "test-key", 48)
+	if err != nil {
+		t.Fatalf("NewAnthropic() err = %v, want nil", err)
+	}
+	req := Request{Prompt: prompt.Prompt{System: "sys", Instruction: "do it: ", Prefix: "git sta"}}
+
+	got := p.RenderPrompt(req)
+	want := RenderChatPrompt(req)
+	if got != want {
+		t.Errorf("RenderPrompt() = %q, want %q (RenderChatPrompt output)", got, want)
+	}
+}

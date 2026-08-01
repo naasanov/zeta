@@ -75,3 +75,7 @@ func (s *StubProvider) Model() string {
 	}
 	return s.PModel
 }
+
+func (s *StubProvider) RenderPrompt(req provider.Request) string {
+	return provider.RenderChatPrompt(req)
+}

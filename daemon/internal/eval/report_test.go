@@ -132,6 +132,25 @@ func TestJSON_RoundTrips(t *testing.T) {
 	}
 }
 
+func TestPrettyJSON_RendersLiteralNewlines(t *testing.T) {
+	meta := Meta{Provider: "codestral", Model: "codestral-1", Variant: "prompt.Build", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
+	results := sampleResults()
+	results[0].Prompt = "line one\nline two"
+
+	var buf bytes.Buffer
+	if err := PrettyJSON(&buf, results, meta); err != nil {
+		t.Fatalf("PrettyJSON: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "line one\nline two") {
+		t.Fatalf("want the embedded newline rendered literally, got:\n%s", out)
+	}
+	if strings.Contains(out, `line one\nline two`) {
+		t.Fatalf("want no escaped \\n left in the Prompt field, got:\n%s", out)
+	}
+}
+
 func TestSample_JSONRoundTripsError(t *testing.T) {
 	s := Sample{Err: errBoom}
 	b, err := json.Marshal(s)

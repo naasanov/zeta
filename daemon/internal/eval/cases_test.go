@@ -12,7 +12,7 @@ import (
 // deterministic ones from Part 2 and the four Part 3 judged cases
 // (C3, E3, E7, F2).
 var wantIDs = []string{
-	"A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8",
+	"A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9",
 	"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8",
 	"C1", "C2", "C3",
 	"D1", "D2", "D3", "D4",
@@ -171,8 +171,8 @@ func TestCases_SelectableByCategoryAndGlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Select(syntax): %v", err)
 	}
-	if len(byCategory) != 8 {
-		t.Errorf("Select(syntax) matched %d cases, want 8 (A1..A8)", len(byCategory))
+	if len(byCategory) != 9 {
+		t.Errorf("Select(syntax) matched %d cases, want 9 (A1..A9)", len(byCategory))
 	}
 
 	byGlob, err := Select(cases, "B*")

@@ -19,6 +19,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -48,7 +49,8 @@ func main() {
 	var (
 		n             = flag.Int("n", 0, "fixed run count per case (0 = adaptive, hard-capped at 10)")
 		caseSel       = flag.String("cases", "", "comma-separated case selectors: IDs (\"A1,B2\"), categories (\"syntax\"), or ID globs (\"A*\"); empty runs everything")
-		outPath       = flag.String("out", "", "write the JSON report to this path (in addition to the text scorecard on stdout)")
+		outPath       = flag.String("out", "", "write the JSON report to this path (in addition to the text scorecard on stdout); if it's an existing directory, a timestamped provider/variant-named file is created inside it")
+		printJSON     = flag.Bool("print-json", false, "print the JSON report to stdout before the scorecard, with embedded newlines (e.g. in the rendered Prompt field) shown literally rather than escaped — NOT valid JSON, a terminal-reading convenience only")
 		dryRun        = flag.Bool("dry-run", false, "use a scripted stub provider instead of a live one (no network); -providers/-matrix are ignored, -variants still selects the prompt-building path")
 		providersFlag = flag.String("providers", "codestral", "comma-separated provider brands to run against (\"codestral,anthropic,groq\"); the cheap default is a single provider")
 		variantsFlag  = flag.String("variants", "default", "comma-separated prompt variants to run (\"default,fim-commented-history\")")
@@ -225,13 +227,29 @@ func main() {
 
 	elapsed := time.Since(start)
 
+	// Printed before the scorecard, so a terminal reads (top to bottom, in
+	// scroll order) live progress -> this detailed JSON dump -> the
+	// scorecard -> the summary footer: the more detailed a section, the
+	// further back it scrolls, so the "at a glance" verdict is always the
+	// last thing on screen.
+	if *printJSON {
+		if err := eval.PrettyJSON(os.Stdout, allResults, meta); err != nil {
+			log.Fatalf("eval: printing JSON report: %v", err)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+
 	if err := eval.Text(os.Stdout, allResults, meta); err != nil {
 		log.Fatalf("eval: writing text report: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "eval: done in %s\n", elapsed.Round(time.Millisecond))
 
 	if *outPath != "" {
-		f, err := os.Create(*outPath)
+		path := *outPath
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			path = filepath.Join(path, defaultOutFilename(meta))
+		}
+		f, err := os.Create(path)
 		if err != nil {
 			log.Fatalf("eval: creating -out file: %v", err)
 		}
@@ -240,6 +258,26 @@ func main() {
 			log.Fatalf("eval: writing JSON report: %v", err)
 		}
 	}
+}
+
+// defaultOutFilename builds the file name -out writes to when it's pointed
+// at a directory instead of a file: a "20060102-150405" timestamp prefix
+// (alpha-sorting a directory of these also sorts them chronologically, oldest
+// first) followed by the provider x variant combo that produced the report,
+// so `ls` alone tells the two things you'd otherwise open the file to check.
+func defaultOutFilename(meta eval.Meta) string {
+	return fmt.Sprintf("%s_%s_%s.json",
+		meta.Timestamp.Format("20060102-150405"),
+		sanitizeForFilename(meta.Provider),
+		sanitizeForFilename(meta.Variant))
+}
+
+// sanitizeForFilename turns a comma-joined meta field (e.g.
+// "codestral,anthropic") into a filename-safe segment ("codestral+anthropic")
+// — combinedMeta already comma-joins multi-cell runs, so this only needs to
+// swap the one separator that can't appear in a path component.
+func sanitizeForFilename(s string) string {
+	return strings.ReplaceAll(s, ",", "+")
 }
 
 // cell is one (provider brand, prompt variant) combination — one row of the
@@ -310,7 +348,10 @@ func buildCellProvider(c cell, dryRun bool, modelOverride string) (provider.Prov
 		), eval.NoopLimiter{}, nil
 	}
 
-	p, err := eval.NewLiveProvider(c.Provider, modelOverride, config.DefaultMaxTokens)
+	// The variant supplies the FIM renderer (nil for prompt-content-only
+	// variants), so a prompt-SHAPE variant reaches the codestral adapter —
+	// Runner only ever applies Variant.Build, which runs before rendering.
+	p, err := eval.NewLiveProvider(c.Provider, modelOverride, config.DefaultMaxTokens, c.Variant.FIMRenderer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -391,7 +432,7 @@ func splitCSV(s string) []string {
 // alongside one would be silently dropped rather than honored — surfacing
 // that explicitly is better than a report that quietly ran a smaller (or
 // different) thing than what was asked for.
-var runOnlyFlagNames = []string{"n", "cases", "out", "providers", "variants", "matrix", "model"}
+var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "providers", "variants", "matrix", "model"}
 
 // setRunOnlyFlags returns which of runOnlyFlagNames were explicitly passed on
 // the command line, each rendered as "-name", in flag-declaration order.

@@ -11,6 +11,11 @@ import "github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 // Cases() is the single accessor cmd/eval drives; keep it in the plan doc's
 // table order (A -> B -> C -> D -> E -> F) so a diff against the plan is a
 // visual scan, not a search.
+//
+// README.md in this directory is a human-readable index of every case here.
+// Any time a case is added, removed, or modified (Req, Assert, threshold,
+// polarity, grader, rubric — anything), update the matching row(s) in
+// README.md in the same change.
 
 // Cases returns the full corpus, in stable ID order. Calling it repeatedly
 // returns equivalent (fresh) slices/values — see cases_test.go's determinism
@@ -134,6 +139,27 @@ func syntaxCases() []Case {
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "xyzzy "},
 			Asserts: []Assertion{
 				{Label: "prose-markers", Polarity: TripWire, Grader: LooksLikeProse()},
+			},
+		},
+		{
+			// A9: dogfooding bug, now FIXED — this is its regression
+			// guard. History's last entry, "git push", is already
+			// complete on its own, but RenderFIM used to render history
+			// and the predicted next command on adjacent lines with
+			// nothing but a newline between them, so the model treated
+			// it as an unfinished buffer and appended "origin main"
+			// instead of predicting a standalone next command. The fix
+			// was the "$ " transcript marker now in RenderFIM's shipped
+			// shape (provider/codestral.go); `-variants
+			// fim-no-prompt-marker` re-runs this against the old shape.
+			ID:       "A9",
+			Category: "syntax",
+			Req: protocol.Request{
+				Kind:    protocol.KindNextCommand,
+				History: []string{"git status", "git push"},
+			},
+			Asserts: []Assertion{
+				{Label: "continues-last-history-command", Polarity: TripWire, Grader: ContinuesLastHistoryCommand()},
 			},
 		},
 	}

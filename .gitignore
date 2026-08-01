@@ -25,3 +25,7 @@ sandbox/.zsh_history
 sandbox/.env
 sandbox/config.toml
 sandbox/.metrics/
+
+# Eval reports (VS Code task default -out dir)
+daemon/internal/eval/.reports/*
+!daemon/internal/eval/.reports/.gitkeep

@@ -215,6 +215,12 @@ type CaseResult struct {
 	// MinRuns is customised or a run errors out early.
 	Escalated bool
 
+	// Prompt is the exact text the provider adapter would send for this
+	// case's request (Provider.RenderPrompt), captured once per CaseResult
+	// rather than per Sample — it's a pure function of (Req, Variant),
+	// identical across every sample in the case.
+	Prompt string
+
 	Samples []Sample
 	Asserts []AssertionResult
 }

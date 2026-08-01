@@ -43,7 +43,7 @@
       "label": "eval: dry-run",
       "detail": "Run the eval harness against the scripted stub provider. No network, no API key, no cost.",
       "type": "shell",
-      "command": "go run ./cmd/eval -dry-run",
+      "command": "go run ./cmd/eval -out ./internal/eval/.reports -dry-run",
       "options": {
         "cwd": "${workspaceFolder}/daemon"
       },
@@ -58,7 +58,7 @@
       "label": "eval: run (prompted)",
       "detail": "Live eval run. Prompts for providers, case selectors, and run count; loads keys from sandbox/.env.",
       "type": "shell",
-      "command": "set -a && . \"${workspaceFolder}/sandbox/.env\" && set +a && go run ./cmd/eval -providers '${input:evalProviders}' -cases '${input:evalCases}' -n ${input:evalN}",
+      "command": "set -a && . \"${workspaceFolder}/sandbox/.env\" && set +a && go run ./cmd/eval -out ./internal/eval/.reports -providers '${input:evalProviders}' -cases '${input:evalCases}' -n ${input:evalN}",
       "options": {
         "cwd": "${workspaceFolder}/daemon"
       },
@@ -86,9 +86,9 @@
     },
     {
       "label": "eval: custom args (prompted)",
-      "detail": "Escape hatch: prompts for a raw cmd/eval flag string (-matrix, -import, -diff, -out, ...) with sandbox/.env loaded.",
+      "detail": "Escape hatch: prompts for a raw cmd/eval flag string (-matrix, -import, -diff, -out, ...) with sandbox/.env loaded. Defaults -out to ./internal/eval/.reports; add your own -out in the prompt to override (flag package: last wins).",
       "type": "shell",
-      "command": "set -a && . \"${workspaceFolder}/sandbox/.env\" && set +a && go run ./cmd/eval ${input:evalArgs}",
+      "command": "set -a && . \"${workspaceFolder}/sandbox/.env\" && set +a && go run ./cmd/eval -out ./internal/eval/.reports ${input:evalArgs}",
       "options": {
         "cwd": "${workspaceFolder}/daemon"
       },

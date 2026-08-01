@@ -76,8 +76,8 @@ func TestComplete_Codestral_HappyPath(t *testing.T) {
 	}
 	// Request shape must be prompt/suffix, not messages — the whole reason
 	// this is its own adapter rather than another OpenAI-compatible base URL.
-	if gotBody.Prompt != "git" {
-		t.Errorf("request Prompt = %q, want %q", gotBody.Prompt, "git")
+	if gotBody.Prompt != "$ git" {
+		t.Errorf("request Prompt = %q, want %q", gotBody.Prompt, "$ git")
 	}
 	if gotBody.Suffix != "" {
 		t.Errorf("request Suffix = %q, want empty", gotBody.Suffix)
@@ -289,13 +289,136 @@ func TestRenderFIM_ContextPresent(t *testing.T) {
 		Suffix:      "",
 	}
 	gotPrompt, gotSuffix := RenderFIM(p)
-	want := "# cwd: /Users/x/proj\n# git: branch main (dirty)\ngit com"
+	want := "# cwd: /Users/x/proj\n# git: branch main (dirty)\n$ git com"
 	if gotPrompt != want {
 		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
 	}
 	if gotSuffix != "" {
 		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)
 	}
+}
+
+// TestRenderFIM_PromptMarkerIsTheDefault is the A9 regression guard on the
+// shipped shape: "$ " on every history line AND on the cursor line, ambient
+// comments left unmarked (they are not commands), history/cursor still
+// contiguous. The cursor line must NOT be a bare newline — that shape is
+// exactly what let the model continue "git push".
+func TestRenderFIM_PromptMarkerIsTheDefault(t *testing.T) {
+	p := prompt.Prompt{
+		Context: "Context:\n- cwd: /x/proj\n\n",
+		History: []string{"git status", "git push"},
+		Prefix:  "",
+	}
+	gotPrompt, _ := RenderFIM(p)
+	want := "# cwd: /x/proj\n$ git status\n$ git push\n$ "
+	if gotPrompt != want {
+		t.Errorf("RenderFIM() = %q, want %q", gotPrompt, want)
+	}
+	if strings.HasSuffix(gotPrompt, "git push\n") {
+		t.Error("RenderFIM() ends right after the last history line — the A9 shape")
+	}
+}
+
+// TestRenderFIM_TypingKeepsPrefixOnMarkedLine confirms the marker precedes a
+// non-empty buffer too, so typing mode sees the same transcript shape rather
+// than a bare line.
+func TestRenderFIM_TypingKeepsPrefixOnMarkedLine(t *testing.T) {
+	p := prompt.Prompt{History: []string{"git status"}, Prefix: "git com"}
+	gotPrompt, _ := RenderFIM(p)
+	want := "$ git status\n$ git com"
+	if gotPrompt != want {
+		t.Errorf("RenderFIM() = %q, want %q", gotPrompt, want)
+	}
+}
+
+// TestRenderFIMNoPromptMarker pins the pre-A9 baseline shape, kept so the
+// marker decision stays measurable.
+func TestRenderFIMNoPromptMarker(t *testing.T) {
+	p := prompt.Prompt{History: []string{"git status", "git push"}}
+	gotPrompt, _ := RenderFIMNoPromptMarker(p)
+	want := "git status\ngit push\n"
+	if gotPrompt != want {
+		t.Errorf("RenderFIMNoPromptMarker() = %q, want %q", gotPrompt, want)
+	}
+}
+
+// TestRenderFIMExitCodeAlways pins that the exit line lands BETWEEN history
+// and the cursor (not up with the ambient comments) and is emitted at 0,
+// which prompt.contextBlock omits. It builds on the shipped shape, so the
+// prompt marker must still be present — this variant differs from
+// production in exactly one thing.
+func TestRenderFIMExitCodeAlways(t *testing.T) {
+	p := prompt.Prompt{
+		Context:  "Context:\n- cwd: /x/proj\n\n",
+		History:  []string{"git status", "git push"},
+		LastExit: 0,
+	}
+	gotPrompt, _ := RenderFIMExitCodeAlways(p)
+	want := "# cwd: /x/proj\n$ git status\n$ git push\n# exit: 0\n$ "
+	if gotPrompt != want {
+		t.Errorf("RenderFIMExitCodeAlways() = %q, want %q", gotPrompt, want)
+	}
+}
+
+func TestRenderFIMExitCodeAlways_NonZero(t *testing.T) {
+	p := prompt.Prompt{History: []string{"go build ./..."}, LastExit: 1}
+	gotPrompt, _ := RenderFIMExitCodeAlways(p)
+	want := "$ go build ./...\n# exit: 1\n$ "
+	if gotPrompt != want {
+		t.Errorf("RenderFIMExitCodeAlways() = %q, want %q", gotPrompt, want)
+	}
+}
+
+// TestWithFIMRenderer confirms the option actually reaches Complete's
+// rendering path (observed through RenderPrompt, which uses the same
+// c.render), and that a nil renderer leaves the shipped default in place
+// rather than producing an empty prompt.
+func TestWithFIMRenderer(t *testing.T) {
+	req := Request{Prompt: prompt.Prompt{History: []string{"git push"}}}
+
+	custom := newCodestralWith(t, WithFIMRenderer(RenderFIMNoPromptMarker))
+	if got, want := custom.RenderPrompt(req), "git push\n"; got != want {
+		t.Errorf("with custom renderer: RenderPrompt() = %q, want %q", got, want)
+	}
+
+	nilOpt := newCodestralWith(t, WithFIMRenderer(nil))
+	if got, want := nilOpt.RenderPrompt(req), "$ git push\n$ "; got != want {
+		t.Errorf("with nil renderer: RenderPrompt() = %q, want the default %q", got, want)
+	}
+}
+
+func newCodestralWith(t *testing.T, opts ...CodestralOption) Provider {
+	t.Helper()
+	p, err := NewCodestral("http://unused", "test-model", "test-key", 48, opts...)
+	if err != nil {
+		t.Fatalf("NewCodestral() err = %v, want nil", err)
+	}
+	return p
+}
+
+// TestCodestral_RenderPrompt pins the two RenderPrompt shapes: with the
+// Phase-2 empty suffix (today's only real case), the output is just the FIM
+// prompt with no SUFFIX: section; a non-empty suffix (the FIM infill hook,
+// unused today) adds one.
+func TestCodestral_RenderPrompt(t *testing.T) {
+	client := newCodestral(t, "http://unused", "test-model", "test-key", 48)
+
+	t.Run("empty suffix", func(t *testing.T) {
+		req := Request{Prompt: prompt.Prompt{Prefix: "git com"}}
+		got := client.RenderPrompt(req)
+		if got != "$ git com" {
+			t.Errorf("RenderPrompt() = %q, want %q (no SUFFIX: section)", got, "$ git com")
+		}
+	})
+
+	t.Run("non-empty suffix", func(t *testing.T) {
+		req := Request{Prompt: prompt.Prompt{Prefix: "git com", Suffix: "mit"}}
+		got := client.RenderPrompt(req)
+		want := "PROMPT:\n$ git com\n\nSUFFIX:\nmit"
+		if got != want {
+			t.Errorf("RenderPrompt() = %q, want %q", got, want)
+		}
+	})
 }
 
 // TestRenderFIM_HistoryRenderedRaw pins the FIM raw-history contract: History
@@ -311,8 +434,8 @@ func TestRenderFIM_HistoryRenderedRaw(t *testing.T) {
 	}
 	gotPrompt, gotSuffix := RenderFIM(p)
 	want := "# cwd: /Users/x/project\n# git: branch main (dirty)\n# last command failed (exit 1)\n" +
-		"git add .\ngit commit -m \"wip\"\ngit status\n" +
-		"git com"
+		"$ git add .\n$ git commit -m \"wip\"\n$ git status\n" +
+		"$ git com"
 	if gotPrompt != want {
 		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
 	}
@@ -334,7 +457,7 @@ func TestRenderFIM_NoHistoryJustAmbientContext(t *testing.T) {
 		History: nil,
 	}
 	gotPrompt, _ := RenderFIM(p)
-	want := "# cwd: /tmp\ngit com"
+	want := "# cwd: /tmp\n$ git com"
 	if gotPrompt != want {
 		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
 	}
@@ -351,8 +474,8 @@ func TestRenderFIM_ContextAbsent(t *testing.T) {
 		Suffix:      "",
 	}
 	gotPrompt, gotSuffix := RenderFIM(p)
-	if gotPrompt != "git com" {
-		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, "git com")
+	if gotPrompt != "$ git com" {
+		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, "$ git com")
 	}
 	if gotSuffix != "" {
 		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)

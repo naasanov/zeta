@@ -204,6 +204,9 @@ func (s stubProvider) Complete(ctx context.Context, req provider.Request) (provi
 }
 func (s stubProvider) Name() string  { return s.name }
 func (s stubProvider) Model() string { return s.model }
+func (s stubProvider) RenderPrompt(req provider.Request) string {
+	return provider.RenderChatPrompt(req)
+}
 
 // TestLLM_StubProvider demonstrates the new seam: suggest.LLM works against
 // any provider.Provider, not just the httptest-backed openai client, and

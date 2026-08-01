@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -155,6 +156,32 @@ type codestralClient struct {
 	maxTokens int
 	stop      []string
 	http      *http.Client
+	render    FIMRenderer
+}
+
+// FIMRenderer turns a provider-neutral Prompt into the prompt+suffix pair a
+// FIM endpoint takes. RenderFIM is the shipped default; the type exists so
+// the eval harness can measure alternative prompt SHAPES (not just alternate
+// Prompt contents, which the Variant.Build seam already covers) without
+// those experiments living in production code paths. See WithFIMRenderer.
+type FIMRenderer func(prompt.Prompt) (fimPrompt, suffix string)
+
+// CodestralOption customizes a codestral client at construction. Variadic
+// options rather than more positional params: the only current knob is
+// eval-only, and it must not push itself into every production call site.
+type CodestralOption func(*codestralClient)
+
+// WithFIMRenderer replaces the FIM prompt renderer. Production passes
+// nothing and gets RenderFIM; the eval harness passes an experimental shape
+// (see eval.Variant.FIMRenderer) so a prompt-shape hypothesis can be scored
+// against the default across the whole corpus. A nil renderer is ignored, so
+// a zero-value/unset option can't silently produce an empty prompt.
+func WithFIMRenderer(r FIMRenderer) CodestralOption {
+	return func(c *codestralClient) {
+		if r != nil {
+			c.render = r
+		}
+	}
 }
 
 // NewCodestral builds a Provider backed by a shared, keep-alive-tuned
@@ -164,21 +191,26 @@ type codestralClient struct {
 // the general per-token endpoint (which serves the same FIM endpoint under a
 // regular Mistral key) is the default. baseURL stays configurable so
 // codestral.mistral.ai still works for anyone holding that key.
-func NewCodestral(baseURL, model, apiKey string, maxTokens int) (Provider, error) {
+func NewCodestral(baseURL, model, apiKey string, maxTokens int, opts ...CodestralOption) (Provider, error) {
 	if baseURL == "" {
 		baseURL = "https://api.mistral.ai"
 	}
 	if model == "" {
 		model = "codestral-latest"
 	}
-	return &codestralClient{
+	c := &codestralClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
 		stop:      fimStopSequences,
 		http:      keepAliveHTTPClient(),
-	}, nil
+		render:    RenderFIM,
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
 }
 
 // Name identifies this adapter for METRICS(§12) and price-table lookups.
@@ -192,6 +224,18 @@ func (c *codestralClient) Name() string {
 // "request" event's cost_usd field.
 func (c *codestralClient) Model() string {
 	return c.model
+}
+
+// RenderPrompt returns the exact FIM prompt(+suffix) Complete would send.
+// Suffix is "" in Phase 2 (see RenderFIM's doc comment), so this is
+// ordinarily just the FIM prompt; the SUFFIX: section only appears once the
+// FIM infill hook is actually used.
+func (c *codestralClient) RenderPrompt(req Request) string {
+	fimPrompt, suffix := c.render(req.Prompt)
+	if suffix == "" {
+		return fimPrompt
+	}
+	return "PROMPT:\n" + fimPrompt + "\n\nSUFFIX:\n" + suffix
 }
 
 // RenderFIM renders a Prompt for a FIM endpoint. FIM models take no system
@@ -210,9 +254,61 @@ func (c *codestralClient) Model() string {
 // prompt.contextBlock, labeled via prompt.RecentCommandsLabel) is skipped
 // here to avoid rendering the same req.History data twice.
 //
+// Each command line — history and the cursor line alike — is prefixed with a
+// "$ " prompt marker, so the whole thing reads as a shell TRANSCRIPT. That
+// marker is load-bearing, not decoration: without it the model completed the
+// LAST HISTORY LINE instead of predicting a new command ("git push" ->
+// "origin master", eval case A9). A trailing newline alone did NOT fix that —
+// the rendered prompt already ended in one — because either the endpoint
+// trims trailing whitespace off `prompt` or the model simply reads "git push"
+// as a prefix of "git push origin main". A non-whitespace marker is what
+// makes "a new command starts here" structural rather than positional.
+// Measured: the marker shape beat both the unmarked default and the
+// "# exit: N" boundary across the corpus, on codestral.
+//
 // Suffix is "" today, making this pure prefix continuation — exactly what
 // FIM models are trained to nail.
 func RenderFIM(p prompt.Prompt) (fimPrompt, suffix string) {
+	return renderFIMShape(p, defaultFIMShape())
+}
+
+// defaultPromptMarker is the shipped transcript marker. A trailing space is
+// part of it: it separates the marker from the command, and in next-command
+// mode it means the FIM prompt ends "$ ", putting the cursor where a real
+// shell would. Any leading space the model emits in response is stripped by
+// stripLeadingSeparators in next-command mode, so a marker-induced space can
+// never reach the suggestion.
+const defaultPromptMarker = "$ "
+
+// defaultFIMShape is the SHIPPED shape. Experimental shapes are expressed as
+// deltas from this (start here, change one thing) rather than from the zero
+// value — otherwise a variant would silently also revert whatever the
+// default has since adopted, and measure two changes while claiming one.
+func defaultFIMShape() fimShape {
+	return fimShape{promptMarker: defaultPromptMarker}
+}
+
+// fimShape is the set of knobs renderFIMShape varies. The zero value is NOT
+// the shipped default (see defaultFIMShape) — it is the pre-A9 unmarked
+// shape, kept reachable only so the eval harness can still measure against
+// it. Nothing here changes production behavior without a caller opting in
+// via WithFIMRenderer.
+type fimShape struct {
+	// promptMarker, when non-empty, prefixes every raw history line AND is
+	// emitted once more immediately before Prefix, so the cursor sits after
+	// it. See RenderFIM for why this is the shipped default.
+	promptMarker string
+
+	// alwaysExitCode emits a "# exit: N" comment line between the history
+	// block and Prefix even when N is 0 — which contextBlock deliberately
+	// omits. Measured and NOT adopted: it lost to promptMarker, and it can't
+	// separate its two effects anyway (real signal vs. acting as a
+	// non-whitespace boundary), while costing tokens on every request to
+	// restate "the last command succeeded".
+	alwaysExitCode bool
+}
+
+func renderFIMShape(p prompt.Prompt, shape fimShape) (fimPrompt, suffix string) {
 	// p.Context is pre-rendered like "Context:\n- cwd: ...\n- git: ...\n\n"
 	// (prompt.contextBlock). Strip the "Context:" header and the trailing
 	// blank-line separator, then re-render each remaining "- " line as a "#"
@@ -239,13 +335,54 @@ func RenderFIM(p prompt.Prompt) (fimPrompt, suffix string) {
 	// buffer — no "#" prefix, so the model sees a real shell session to
 	// continue rather than commented-out metadata.
 	for _, cmd := range p.History {
+		b.WriteString(shape.promptMarker)
 		b.WriteString(cmd)
 		b.WriteString("\n")
 	}
+	// The exit-status line goes AFTER history and BEFORE the buffer on
+	// purpose: its job in this shape is to sit between the last command and
+	// the cursor. Putting it up with the other ambient comments (where
+	// contextBlock renders it for chat) would leave the history/cursor seam
+	// exactly as bare as it is today.
+	if shape.alwaysExitCode {
+		b.WriteString("# exit: ")
+		b.WriteString(strconv.Itoa(p.LastExit))
+		b.WriteString("\n")
+	}
 	// Buffer goes last, with no trailing newline, so the model's completion
-	// continues directly from it.
+	// continues directly from it. The marker is written even when Prefix is
+	// empty — that is precisely the next-command case A9 covers, where the
+	// marker is the only thing telling the model a fresh command starts here.
+	b.WriteString(shape.promptMarker)
 	b.WriteString(p.Prefix)
 	return b.String(), p.Suffix
+}
+
+// RenderFIMNoPromptMarker renders the PRE-A9 shape: raw history lines and a
+// bare cursor line, with no "$ " transcript marker.
+//
+// This is what RenderFIM used to do, kept reachable so the change that
+// replaced it stays measurable — a default with no way to A/B against its
+// predecessor can only be re-litigated by hand-editing production code. It
+// is the baseline, not a candidate: it is known to lose (it is the shape
+// that produced A9).
+func RenderFIMNoPromptMarker(p prompt.Prompt) (fimPrompt, suffix string) {
+	return renderFIMShape(p, fimShape{})
+}
+
+// RenderFIMExitCodeAlways renders the shipped shape PLUS an "# exit: N"
+// comment line between the history block and the cursor, emitted even when N
+// is 0 (contextBlock omits it there).
+//
+// Deliberately built on defaultFIMShape, so it keeps the prompt marker and
+// differs from production in exactly one thing. Measured and not adopted; it
+// stays registered because "does explicit exit status help now that the
+// boundary problem is solved" is a different question from the one it
+// originally lost, and re-running it is cheaper than rebuilding it.
+func RenderFIMExitCodeAlways(p prompt.Prompt) (fimPrompt, suffix string) {
+	shape := defaultFIMShape()
+	shape.alwaysExitCode = true
+	return renderFIMShape(p, shape)
 }
 
 // fimRequest mirrors just the subset of the Mistral FIM request schema this
@@ -307,7 +444,7 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 	if maxTokens == 0 {
 		maxTokens = c.maxTokens
 	}
-	fimPrompt, suffix := RenderFIM(req.Prompt)
+	fimPrompt, suffix := c.render(req.Prompt)
 	reqBody := fimRequest{
 		Model:     c.model,
 		Prompt:    fimPrompt,

@@ -24,6 +24,20 @@ import (
 type Variant struct {
 	Name  string
 	Build func(protocol.Request) prompt.Prompt
+
+	// FIMRenderer, when non-nil, replaces how the codestral adapter renders
+	// the Prompt into FIM prompt+suffix (provider.WithFIMRenderer). Build
+	// varies the prompt's CONTENT; this varies its SHAPE — a distinction the
+	// Build seam alone cannot express, because rendering happens inside the
+	// adapter, after Build has run.
+	//
+	// Ignored by every non-FIM adapter: the chat providers render System +
+	// ChatUser() and have no FIM step to swap. A variant setting this
+	// therefore only produces a distinct condition in a codestral cell; in
+	// an anthropic/groq cell it is silently identical to "default", which is
+	// correct (the hypothesis is FIM-specific) but means a matrix run's
+	// non-codestral rows for such a variant carry no new information.
+	FIMRenderer provider.FIMRenderer
 }
 
 // DefaultVariant is the unmodified pipeline: prompt.Build with no mutation.
@@ -465,6 +479,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 		Runs:      runs,
 		Errors:    errs,
 		Escalated: escalated,
+		Prompt:    r.Provider.RenderPrompt(provider.Request{Prompt: variant.Build(c.Req)}),
 		Samples:   samples,
 		Asserts:   asserts,
 	}

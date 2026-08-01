@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"text/tabwriter"
 	"time"
 )
@@ -81,6 +82,35 @@ func JSON(w io.Writer, results []CaseResult, meta Meta) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(dump{Meta: meta, Results: results})
+}
+
+// PrettyJSON writes the same document JSON writes, but easier to eyeball in
+// a terminal: embedded newlines in string fields (chiefly CaseResult.Prompt)
+// render as literal newlines instead of JSON's required "\n" escape, and
+// HTML-sensitive characters (<, >, &, common in shell commands like
+// "git push && git status") are left unescaped instead of becoming <
+// etc. (encoding/json's default, meant for embedding JSON in HTML — not a
+// concern in a terminal).
+//
+// The output is NOT valid JSON: -diff/LoadRun must always read what JSON()
+// wrote, never this. The newline rendering works by a blunt find-and-replace
+// of the two-byte "\n" sequence in the encoded bytes, which is safe for the
+// overwhelming majority of this corpus (shell commands and prompt text) but
+// has one known blind spot: a string containing the two literal characters
+// backslash-n (e.g. a prompt that itself quotes a regex like '\n') encodes
+// as the four-byte "\\n" and would have its trailing "\n" portion misread as
+// an escaped newline too. A token-aware unescape would avoid that at the
+// cost of real machinery this is a viewer convenience, not a parser.
+func PrettyJSON(w io.Writer, results []CaseResult, meta Meta) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(dump{Meta: meta, Results: results}); err != nil {
+		return err
+	}
+	_, err := fmt.Fprint(w, strings.ReplaceAll(buf.String(), `\n`, "\n"))
+	return err
 }
 
 // rate formats a k/N fraction as a percentage; "n/a" when n == 0 so a

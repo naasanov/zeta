@@ -39,7 +39,11 @@ const groqPerMinute = 25
 // keeps working without ghost text), an eval that quietly measured a stub
 // would produce numbers that look real and are not; there is no analogous
 // safe degradation here, so this is fatal to the caller.
-func NewLiveProvider(brand string, modelOverride string, maxTokens int) (provider.Provider, error) {
+//
+// fimRenderer comes from the selected Variant (Variant.FIMRenderer) and is
+// applied only to the codestral adapter; nil means the adapter's shipped
+// RenderFIM. See Variant.FIMRenderer on why non-FIM adapters ignore it.
+func NewLiveProvider(brand string, modelOverride string, maxTokens int, fimRenderer provider.FIMRenderer) (provider.Provider, error) {
 	var cfg config.Config
 	resolved, err := cfg.Resolve(brand)
 	if err != nil {
@@ -58,7 +62,7 @@ func NewLiveProvider(brand string, modelOverride string, maxTokens int) (provide
 		return nil, fmt.Errorf("eval: provider %q needs an API key; set %s (or configure api_key_cmd)", brand, resolved.APIKeyEnv)
 	}
 
-	p, err := newLiveAdapter(resolved, apiKey, maxTokens)
+	p, err := newLiveAdapter(resolved, apiKey, maxTokens, fimRenderer)
 	if err != nil {
 		return nil, fmt.Errorf("eval: constructing provider %q: %w", brand, err)
 	}
@@ -71,14 +75,20 @@ func NewLiveProvider(brand string, modelOverride string, maxTokens int) (provide
 // package) and cmd/autopilotd must not import internal/eval (see
 // types.go's "Import invariant"). If this ever drifts from newProvider,
 // re-copy it from there rather than inventing a third mapping.
-func newLiveAdapter(r config.ResolvedProfile, apiKey string, maxTokens int) (provider.Provider, error) {
+// fimRenderer applies to the codestral case only — it is the one adapter
+// with a FIM rendering step to swap. Passing it to the others would have
+// nothing to bind to, which is exactly why Variant.FIMRenderer is documented
+// as a no-op outside a codestral cell rather than an error.
+func newLiveAdapter(r config.ResolvedProfile, apiKey string, maxTokens int, fimRenderer provider.FIMRenderer) (provider.Provider, error) {
 	switch r.Adapter {
 	case "openai":
 		return provider.NewOpenAI(r.BaseURL, r.Model, apiKey, maxTokens)
 	case "anthropic":
 		return provider.NewAnthropic(r.Model, apiKey, maxTokens)
 	case "codestral":
-		return provider.NewCodestral(r.BaseURL, r.Model, apiKey, maxTokens)
+		// WithFIMRenderer ignores a nil renderer, so the no-variant path
+		// still gets RenderFIM without a branch here.
+		return provider.NewCodestral(r.BaseURL, r.Model, apiKey, maxTokens, provider.WithFIMRenderer(fimRenderer))
 	default:
 		return nil, fmt.Errorf("eval: unknown adapter %q", r.Adapter)
 	}

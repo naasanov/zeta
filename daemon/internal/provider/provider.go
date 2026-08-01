@@ -56,4 +56,22 @@ type Provider interface {
 	Complete(ctx context.Context, req Request) (Completion, error)
 	Name() string // "openai" | "anthropic" | "codestral" — metrics + price key
 	Model() string
+	// RenderPrompt returns the exact text this adapter would send to its
+	// endpoint for req, in the adapter's own wire shape — role-labeled chat
+	// messages for openai/anthropic, the raw FIM prompt(+suffix) for
+	// codestral. It does no network I/O; it's the same pure rendering step
+	// Complete runs internally, exposed so a caller (the eval harness's
+	// report) can capture exactly what the model saw without re-running a
+	// live call.
+	RenderPrompt(req Request) string
+}
+
+// RenderChatPrompt formats a chat-style request's rendered turns as a single
+// human-readable string: the openai and anthropic adapters both send
+// System + ChatUser() as two messages, so they share this one rendering
+// instead of each hand-rolling the same "SYSTEM:/USER:" format. Exported so
+// other providers.Provider implementations outside this package (e.g. eval's
+// StubProvider) that want chat-shaped output can reuse it too.
+func RenderChatPrompt(req Request) string {
+	return "SYSTEM:\n" + req.Prompt.System + "\n\nUSER:\n" + req.Prompt.ChatUser()
 }

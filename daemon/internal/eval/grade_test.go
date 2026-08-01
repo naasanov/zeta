@@ -279,6 +279,19 @@ func TestStartsWithSeparator(t *testing.T) {
 	})
 }
 
+func TestContinuesLastHistoryCommand(t *testing.T) {
+	g := ContinuesLastHistoryCommand()
+	pushHistory := protocol.Request{History: []string{"git status", "git push"}}
+	runGrader(t, g, []gcase{
+		{"bare args continuing git push", pushHistory, "origin main", true},
+		{"standalone new command", pushHistory, "git status", false},
+		{"empty suggestion", pushHistory, "", false},
+		{"no history", protocol.Request{}, "origin main", false},
+		{"last entry isn't argumentless git subcommand", protocol.Request{History: []string{"git commit -m x"}}, "origin main", false},
+		{"last entry isn't git", protocol.Request{History: []string{"npm push"}}, "origin main", false},
+	})
+}
+
 func TestAnyOf(t *testing.T) {
 	g := AnyOf("empty-or-short", IsEmpty(), func() Grader {
 		return GraderFunc{N: "not-longer-than-8", F: func(_ protocol.Request, out string) (bool, error) {

@@ -470,6 +470,57 @@ func StartsWithSeparator() Grader {
 	}}
 }
 
+// topLevelCommandAllowlist is tokens that plausibly START a standalone shell
+// command. ContinuesLastHistoryCommand uses it to tell "the model emitted a
+// NEW command" from "the model emitted bare arguments that only make sense
+// concatenated onto the previous history line".
+var topLevelCommandAllowlist = map[string]bool{
+	"git": true, "cd": true, "ls": true, "rm": true, "mv": true, "cp": true,
+	"mkdir": true, "cat": true, "echo": true, "npm": true, "go": true,
+	"docker": true, "curl": true, "ssh": true, "vim": true, "python": true,
+	"python3": true, "make": true, "grep": true, "find": true, "sudo": true,
+	"pip": true, "pip3": true, "yarn": true, "brew": true, "source": true,
+	"export": true, "chmod": true, "chown": true, "kill": true, "ps": true,
+	"tar": true, "touch": true, "less": true, "more": true, "man": true,
+}
+
+// argumentlessGitSubcommands are git subcommands that are already complete,
+// valid commands with no positional arguments — exactly the shape whose
+// history line invites the FIM contiguity bug ContinuesLastHistoryCommand
+// guards against.
+var argumentlessGitSubcommands = map[string]bool{
+	"push": true, "pull": true, "fetch": true, "status": true, "log": true,
+	"diff": true, "add": true,
+}
+
+// ContinuesLastHistoryCommand reports whether out looks like bare arguments
+// continuing the LAST history entry rather than a standalone new command:
+// the entry's first two words are "git" plus an argumentless subcommand
+// (e.g. "git push", already complete on its own), yet out's first token is
+// not a recognized command word. That combination is the FIM contiguity
+// failure mode: history and the predicted next command are rendered on
+// adjacent lines (RenderFIM) with nothing else marking the boundary, so
+// nothing stops the model from treating the last history line as an
+// unfinished buffer and appending to it — "git push" -> "origin main" reads
+// fine concatenated ("git push origin main") but "origin main" alone is not
+// a command a developer would type as the next line.
+func ContinuesLastHistoryCommand() Grader {
+	return GraderFunc{N: "continues-last-history-command", F: func(in protocol.Request, out string) (bool, error) {
+		if len(in.History) == 0 {
+			return false, nil
+		}
+		last := strings.Fields(in.History[len(in.History)-1])
+		if len(last) < 2 || last[0] != "git" || !argumentlessGitSubcommands[last[1]] {
+			return false, nil
+		}
+		suggestion := strings.Fields(out)
+		if len(suggestion) == 0 {
+			return false, nil
+		}
+		return !topLevelCommandAllowlist[suggestion[0]], nil
+	}}
+}
+
 // ---- Composition --------------------------------------------------------
 
 // AnyOf reports whether ANY of gs is present, short-circuiting on the first

@@ -9,6 +9,7 @@ import (
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
 // FimCommentedHistoryVariant answers the plan doc's open question (b): does
@@ -66,6 +67,42 @@ func FimCommentedHistoryVariant() Variant {
 	}
 }
 
+// FimNoPromptMarkerVariant renders the PRE-A9 shape — raw history lines, no
+// "$ " transcript marker (provider.RenderFIMNoPromptMarker).
+//
+// This is the BASELINE, not a candidate: the marker shape it is missing won
+// the corpus run and is now what "default" renders. It exists so that
+// decision stays falsifiable — re-running default vs. this one re-measures
+// the change on demand, instead of requiring someone to hand-edit
+// RenderFIM to ask the question again.
+//
+// Unlike Build-only variants this changes the RENDERER, so it is a real
+// condition only in a codestral cell (see Variant.FIMRenderer).
+func FimNoPromptMarkerVariant() Variant {
+	return Variant{
+		Name:        "fim-no-prompt-marker",
+		Build:       prompt.Build,
+		FIMRenderer: provider.RenderFIMNoPromptMarker,
+	}
+}
+
+// FimExitCodeAlwaysVariant emits an "# exit: N" line between the history
+// block and the cursor even when N is 0, on top of the shipped marker shape
+// (provider.RenderFIMExitCodeAlways).
+//
+// It lost to the marker as an A9 fix. It stays registered because it now
+// asks a DIFFERENT question than it did then: with the boundary problem
+// already solved by the marker, does explicit exit status still buy
+// anything? Its cost side is unchanged — tokens on every request to restate
+// "the last command succeeded".
+func FimExitCodeAlwaysVariant() Variant {
+	return Variant{
+		Name:        "fim-exit-code-always",
+		Build:       prompt.Build,
+		FIMRenderer: provider.RenderFIMExitCodeAlways,
+	}
+}
+
 // variantRegistry is the ordered, named set of variants VariantByName and
 // AllVariants draw from. A slice (not a map) so AllVariants and error
 // messages have a stable, deliberate order rather than Go's randomized map
@@ -73,6 +110,8 @@ func FimCommentedHistoryVariant() Variant {
 var variantRegistry = []Variant{
 	DefaultVariant(),
 	FimCommentedHistoryVariant(),
+	FimNoPromptMarkerVariant(),
+	FimExitCodeAlwaysVariant(),
 }
 
 // AllVariants returns every registered variant, in a stable order — the

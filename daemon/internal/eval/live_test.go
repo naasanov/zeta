@@ -25,7 +25,7 @@ func clearKeyEnv(t *testing.T, names ...string) {
 }
 
 func TestNewLiveProvider_UnknownBrand(t *testing.T) {
-	_, err := NewLiveProvider("not-a-real-brand", "", 48)
+	_, err := NewLiveProvider("not-a-real-brand", "", 48, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unknown brand")
 	}
@@ -34,7 +34,7 @@ func TestNewLiveProvider_UnknownBrand(t *testing.T) {
 func TestNewLiveProvider_MissingKey(t *testing.T) {
 	clearKeyEnv(t, "ZSH_AUTOPILOT_CODESTRAL_KEY")
 
-	_, err := NewLiveProvider("codestral", "", 48)
+	_, err := NewLiveProvider("codestral", "", 48, nil)
 	if err == nil {
 		t.Fatal("expected an error when ZSH_AUTOPILOT_CODESTRAL_KEY is unset")
 	}
@@ -46,7 +46,7 @@ func TestNewLiveProvider_MissingKey(t *testing.T) {
 func TestNewLiveProvider_MissingKey_Anthropic(t *testing.T) {
 	clearKeyEnv(t, "ZSH_AUTOPILOT_ANTHROPIC_KEY")
 
-	_, err := NewLiveProvider("anthropic", "", 48)
+	_, err := NewLiveProvider("anthropic", "", 48, nil)
 	if err == nil {
 		t.Fatal("expected an error when ZSH_AUTOPILOT_ANTHROPIC_KEY is unset")
 	}
@@ -58,7 +58,7 @@ func TestNewLiveProvider_MissingKey_Anthropic(t *testing.T) {
 func TestNewLiveProvider_MissingKey_Groq(t *testing.T) {
 	clearKeyEnv(t, "ZSH_AUTOPILOT_GROQ_KEY")
 
-	_, err := NewLiveProvider("groq", "", 48)
+	_, err := NewLiveProvider("groq", "", 48, nil)
 	if err == nil {
 		t.Fatal("expected an error when ZSH_AUTOPILOT_GROQ_KEY is unset")
 	}
@@ -73,7 +73,7 @@ func TestNewLiveProvider_MissingKey_Groq(t *testing.T) {
 // http.Client and store config; they make no request until Complete is
 // called, which this test never does.
 func TestNewLiveProvider_OllamaNeedsNoKey(t *testing.T) {
-	p, err := NewLiveProvider("ollama", "", 48)
+	p, err := NewLiveProvider("ollama", "", 48, nil)
 	if err != nil {
 		t.Fatalf("ollama should construct without any key: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestNewLiveProvider_OllamaNeedsNoKey(t *testing.T) {
 // constructed provider's resolved Model(), the plan doc's "pin the model per
 // run, record it" rule.
 func TestNewLiveProvider_ModelOverride(t *testing.T) {
-	p, err := NewLiveProvider("ollama", "some-pinned-model:latest", 48)
+	p, err := NewLiveProvider("ollama", "some-pinned-model:latest", 48, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestNewLiveProvider_ModelOverride(t *testing.T) {
 }
 
 func TestNewLiveProvider_NoOverrideKeepsPresetModel(t *testing.T) {
-	p, err := NewLiveProvider("ollama", "", 48)
+	p, err := NewLiveProvider("ollama", "", 48, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

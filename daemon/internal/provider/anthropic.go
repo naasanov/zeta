@@ -70,6 +70,13 @@ func (c *anthropicClient) Model() string {
 	return c.model
 }
 
+// RenderPrompt returns the exact system+user text Complete would send,
+// formatted via the shared chat-prompt helper (this adapter sends
+// System + ChatUser() as two messages, same as openai.go).
+func (c *anthropicClient) RenderPrompt(req Request) string {
+	return RenderChatPrompt(req)
+}
+
 // Complete issues a streaming Messages API request and returns the model's
 // first line of output (design §4 "stream + take first line only"), driving
 // the shared accumulator for TTFT stamping and the cutoff — same contract
