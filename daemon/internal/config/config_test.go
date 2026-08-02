@@ -368,3 +368,22 @@ func TestResolvedProfileResolveKey(t *testing.T) {
 		}
 	})
 }
+
+func TestResolvedProfileNeedsKey(t *testing.T) {
+	cases := []struct {
+		name string
+		r    ResolvedProfile
+		want bool
+	}{
+		{"neither set", ResolvedProfile{}, false},
+		{"api key env set", ResolvedProfile{APIKeyEnv: "TEST_AUTOPILOT_KEY"}, true},
+		{"api key cmd set", ResolvedProfile{APIKeyCmd: "echo sk-from-cmd"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.NeedsKey(); got != tc.want {
+				t.Errorf("NeedsKey() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

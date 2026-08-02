@@ -13,6 +13,8 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
 
 // openAIClient talks to a single OpenAI-compatible /chat/completions
@@ -23,12 +25,13 @@ type openAIClient struct {
 	client    openai.Client
 	model     string
 	maxTokens int
+	prompt    prompt.ChatPrompt
 }
 
 // NewOpenAI builds a Provider backed by the openai-go SDK client, pointed at
 // baseURL with apiKey. Call once at daemon startup, not per-request — a fresh
 // client per request defeats the warm-connection point.
-func NewOpenAI(baseURL, model, apiKey string, maxTokens int) (Provider, error) {
+func NewOpenAI(baseURL, model, apiKey string, maxTokens int, p prompt.ChatPrompt) (Provider, error) {
 	client := openai.NewClient(
 		option.WithBaseURL(baseURL),
 		option.WithAPIKey(apiKey),
@@ -39,6 +42,7 @@ func NewOpenAI(baseURL, model, apiKey string, maxTokens int) (Provider, error) {
 		client:    client,
 		model:     model,
 		maxTokens: maxTokens,
+		prompt:    p,
 	}, nil
 }
 
@@ -57,9 +61,15 @@ func (c *openAIClient) Model() string {
 
 // RenderPrompt returns the exact system+user text Complete would send,
 // formatted via the shared chat-prompt helper (this adapter sends
-// System + ChatUser() as two messages, same as anthropic.go).
+// System + User as two messages, same as anthropic.go).
 func (c *openAIClient) RenderPrompt(req Request) string {
-	return RenderChatPrompt(req)
+	return RenderChatPrompt(c.prompt.RenderChat(req.Req))
+}
+
+// PromptName identifies the prompt this client renders with, for
+// METRICS(§12) and eval reporting.
+func (c *openAIClient) PromptName() string {
+	return c.prompt.Name()
 }
 
 // Complete issues a streaming chat-completions request via the SDK and
@@ -73,11 +83,13 @@ func (c *openAIClient) Complete(ctx context.Context, req Request) (Completion, e
 		maxTokens = c.maxTokens
 	}
 
+	pl := c.prompt.RenderChat(req.Req)
+
 	params := openai.ChatCompletionNewParams{
 		Model: c.model,
 		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage(req.Prompt.System),
-			openai.UserMessage(req.Prompt.ChatUser()),
+			openai.SystemMessage(pl.System),
+			openai.UserMessage(pl.User),
 		},
 		MaxTokens: openai.Int(int64(maxTokens)),
 		// METRICS(§12): ask the OpenAI-compatible endpoint to emit a final

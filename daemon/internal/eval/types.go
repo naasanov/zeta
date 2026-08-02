@@ -85,8 +85,8 @@ type Assertion struct {
 }
 
 // Case is one eval scenario: a protocol.Request to drive through
-// prompt.Build (or a Variant) and provider.Complete, plus the assertions to
-// grade the resulting completions against.
+// provider.Complete, plus the assertions to grade the resulting completions
+// against.
 type Case struct {
 	ID       string // "A1"
 	Category string // "syntax", "fabrication", ...
@@ -172,26 +172,28 @@ type AssertionResult struct {
 // CaseResult is one Case's outcome: every Sample run for it, plus the scored
 // AssertionResult for each of its Asserts.
 type CaseResult struct {
-	CaseID   string
-	Category string
-	Provider string
-	Model    string
-	Variant  string
-	Runs     int // successful runs
-	Errors   int
+	CaseID   string `json:"case_id"`
+	Category string `json:"category"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	// PromptName identifies the prompt the provider rendered with
+	// (provider.Provider.PromptName), for report labeling.
+	PromptName string `json:"prompt"`
+	Runs       int    `json:"runs"` // successful runs
+	Errors     int    `json:"errors"`
 
 	// Escalated records that adaptive sampling went past MinRuns because the
 	// case's assertions disagreed across samples. Reported rather than
 	// inferred from Runs+Errors, which would silently mislead the moment
 	// MinRuns is customised or a run errors out early.
-	Escalated bool
+	Escalated bool `json:"escalated"`
 
-	// Prompt is the exact text the provider adapter would send for this
-	// case's request (Provider.RenderPrompt), captured once per CaseResult
-	// rather than per Sample — it's a pure function of (Req, Variant),
+	// RenderedPrompt is the exact text the provider adapter would send for
+	// this case's request (Provider.RenderPrompt), captured once per
+	// CaseResult rather than per Sample — it's a pure function of Req,
 	// identical across every sample in the case.
-	Prompt string
+	RenderedPrompt string `json:"rendered_prompt"`
 
-	Samples []Sample
-	Asserts []AssertionResult
+	Samples []Sample          `json:"samples"`
+	Asserts []AssertionResult `json:"asserts"`
 }

@@ -9,14 +9,13 @@ import (
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/metrics"
-	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// LLM adapts a provider.Provider into the server's suggest seam. It builds
-// the prompt from req (see prompt.Build), calls the provider, and assembles
-// the reply so Suggestion always starts with req.Buf — the zsh client strips
+// LLM adapts a provider.Provider into the server's suggest seam. The
+// provider renders its own prompt from req; LLM calls it and assembles the
+// reply so Suggestion always starts with req.Buf — the zsh client strips
 // that exact prefix before painting ghost text, so this is load-bearing.
 // Taking the Provider interface makes LLM testable with a stub instead of an
 // httptest.Server.
@@ -28,11 +27,9 @@ import (
 // replay; when false those fields stay zero/omitempty.
 func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent), rawText bool) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
-		built := prompt.Build(req)
-
 		// METRICS(§12): suggest_ms is wall time around the provider call.
 		start := time.Now()
-		completion, err := p.Complete(ctx, provider.Request{Prompt: built})
+		completion, err := p.Complete(ctx, provider.Request{Req: req})
 		suggestMs := float64(time.Since(start)) / float64(time.Millisecond)
 
 		if err != nil {

@@ -6,32 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
-	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
-
-// Variant builds a provider-neutral prompt.Prompt from a request, under a
-// Name field (rather than a derived name) since a variant is usually a
-// closure and closure names are unstable and meaningless in a diffable report.
-type Variant struct {
-	Name  string
-	Build func(protocol.Request) prompt.Prompt
-
-	// FIMRenderer, when non-nil, replaces how the codestral adapter renders
-	// the Prompt (provider.WithFIMRenderer): Build varies prompt content,
-	// this varies rendering shape, which only the adapter can do. Ignored by
-	// chat adapters, so a variant using only this is identical to "default"
-	// outside a codestral cell.
-	FIMRenderer provider.FIMRenderer
-}
-
-// DefaultVariant is the unmodified pipeline. Named "default" rather than
-// "fim-raw-history": the same neutral Prompt renders as raw-history FIM
-// under codestral and as chat-baseline elsewhere.
-func DefaultVariant() Variant {
-	return Variant{Name: "default", Build: prompt.Build}
-}
 
 // Limiter paces provider calls. Wait blocks until the caller is allowed to
 // make its next call, or ctx is done. It's a seam so Part 4 can add
@@ -65,6 +41,25 @@ func NewRateLimiter(perMinute int) *RateLimiter {
 		perMinute = 1
 	}
 	return &RateLimiter{interval: time.Minute / time.Duration(perMinute)}
+}
+
+// groqPerMinute is kept a hair under groq's advertised 30/min free tier —
+// field data showed 19% 429s even before the eval harness's own concurrent
+// worker pool adds load.
+const groqPerMinute = 25
+
+// LimiterForBrand returns the rate limiter an eval run should use for calls
+// to brand: groq is capped at groqPerMinute/min; codestral/anthropic and
+// unknown brands get NoopLimiter (concurrency-bounded by the Runner's worker
+// pool instead — an unrecognized brand will already have failed to resolve
+// into a provider before a limiter matters).
+func LimiterForBrand(brand string) Limiter {
+	switch brand {
+	case "groq":
+		return NewRateLimiter(groqPerMinute)
+	default:
+		return NoopLimiter{}
+	}
 }
 
 func (l *RateLimiter) Wait(ctx context.Context) error {
@@ -109,7 +104,6 @@ const (
 // Runner drives a set of Cases through a Provider with adaptive sampling.
 type Runner struct {
 	Provider provider.Provider
-	Variant  Variant // func(protocol.Request) prompt.Prompt; default prompt.Build
 	Limiter  Limiter
 	MinRuns  int // default 3
 	MaxRuns  int // default 10
@@ -171,10 +165,10 @@ func (r *Runner) providerLabel() string {
 	return r.Provider.Name()
 }
 
-// resolved returns the effective min/max/variant/limiter, applying defaults
-// for zero values without mutating the Runner (so a Runner is safe to reuse
-// or share read-only across goroutines the caller might spawn).
-func (r *Runner) resolved() (min, max, concurrency int, variant Variant, limiter Limiter) {
+// resolved returns the effective min/max/concurrency/limiter, applying
+// defaults for zero values without mutating the Runner (so a Runner is safe
+// to reuse or share read-only across goroutines the caller might spawn).
+func (r *Runner) resolved() (min, max, concurrency int, limiter Limiter) {
 	min, max = r.MinRuns, r.MaxRuns
 	if min <= 0 {
 		min = defaultMinRuns
@@ -186,15 +180,11 @@ func (r *Runner) resolved() (min, max, concurrency int, variant Variant, limiter
 	if concurrency <= 0 {
 		concurrency = defaultConcurrency
 	}
-	variant = r.Variant
-	if variant.Build == nil {
-		variant = DefaultVariant()
-	}
 	limiter = r.Limiter
 	if limiter == nil {
 		limiter = NoopLimiter{}
 	}
-	return min, max, concurrency, variant, limiter
+	return min, max, concurrency, limiter
 }
 
 // Run drives every case through r.Provider and returns one CaseResult per
@@ -208,7 +198,7 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 		return results
 	}
 
-	_, _, concurrency, _, _ := r.resolved()
+	_, _, concurrency, _ := r.resolved()
 	workers := min(concurrency, len(cases))
 
 	jobs := make(chan int, len(cases))
@@ -272,7 +262,7 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 // into a CaseResult. Runs within a case are strictly sequential — see
 // Run's doc comment for why that's the deliberate simplicity choice.
 func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
-	minRuns, maxRuns, _, variant, limiter := r.resolved()
+	minRuns, maxRuns, _, limiter := r.resolved()
 
 	var samples []Sample
 	present := make([][]bool, len(c.Asserts)) // per-assertion, per-graded-sample
@@ -288,8 +278,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 			samples = append(samples, Sample{Err: err})
 			return
 		}
-		p := variant.Build(c.Req)
-		completion, err := r.Provider.Complete(ctx, provider.Request{Prompt: p})
+		completion, err := r.Provider.Complete(ctx, provider.Request{Req: c.Req})
 		if err != nil {
 			samples = append(samples, Sample{Err: err})
 			return
@@ -387,17 +376,17 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 	}
 
 	return CaseResult{
-		CaseID:    c.ID,
-		Category:  c.Category,
-		Provider:  r.providerLabel(),
-		Model:     r.Provider.Model(),
-		Variant:   variant.Name,
-		Runs:      runs,
-		Errors:    errs,
-		Escalated: escalated,
-		Prompt:    r.Provider.RenderPrompt(provider.Request{Prompt: variant.Build(c.Req)}),
-		Samples:   samples,
-		Asserts:   asserts,
+		CaseID:         c.ID,
+		Category:       c.Category,
+		Provider:       r.providerLabel(),
+		Model:          r.Provider.Model(),
+		PromptName:     r.Provider.PromptName(),
+		Runs:           runs,
+		Errors:         errs,
+		Escalated:      escalated,
+		RenderedPrompt: r.Provider.RenderPrompt(provider.Request{Req: c.Req}),
+		Samples:        samples,
+		Asserts:        asserts,
 	}
 }
 

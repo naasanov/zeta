@@ -1,3 +1,5 @@
+// This file holds the scripted, offline provider.Provider that backs this
+// package's unit tests and `cmd/eval -dry-run`.
 package eval
 
 import (
@@ -6,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
@@ -33,12 +36,16 @@ type StubProvider struct {
 	// so a zero-value StubProvider is still usable.
 	PName  string
 	PModel string
+
+	// promptName backs PromptName(), so a dry-run report can label its cell
+	// with the prompt that was actually selected.
+	promptName string
 }
 
 // NewStubProvider returns a StubProvider that replays script in order,
-// cycling once it runs out.
-func NewStubProvider(script ...StubResult) *StubProvider {
-	return &StubProvider{Script: script, PName: "stub", PModel: "stub-1"}
+// cycling once it runs out, labeled with promptName.
+func NewStubProvider(promptName string, script ...StubResult) *StubProvider {
+	return &StubProvider{Script: script, PName: "stub", PModel: "stub-1", promptName: promptName}
 }
 
 func (s *StubProvider) Complete(ctx context.Context, _ provider.Request) (provider.Completion, error) {
@@ -74,6 +81,14 @@ func (s *StubProvider) Model() string {
 	return s.PModel
 }
 
+func (s *StubProvider) PromptName() string {
+	if s.promptName == "" {
+		return "stub"
+	}
+	return s.promptName
+}
+
 func (s *StubProvider) RenderPrompt(req provider.Request) string {
-	return provider.RenderChatPrompt(req)
+	cp := prompt.ShippedFor("openai").(prompt.ChatPrompt)
+	return provider.RenderChatPrompt(cp.RenderChat(req.Req))
 }

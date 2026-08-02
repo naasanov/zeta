@@ -12,6 +12,17 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
+func TestLimiterForBrand(t *testing.T) {
+	if _, ok := LimiterForBrand("groq").(*RateLimiter); !ok {
+		t.Errorf("LimiterForBrand(%q) = %T, want *RateLimiter", "groq", LimiterForBrand("groq"))
+	}
+	for _, brand := range []string{"codestral", "anthropic", "ollama", "unknown-brand"} {
+		if _, ok := LimiterForBrand(brand).(NoopLimiter); !ok {
+			t.Errorf("LimiterForBrand(%q) = %T, want NoopLimiter", brand, LimiterForBrand(brand))
+		}
+	}
+}
+
 // containsGrader reports whether out contains sub.
 func containsGrader(sub string) Grader {
 	return GraderFunc{
@@ -32,7 +43,7 @@ func basicCase(asserts ...Assertion) Case {
 // errored call never got a first byte, so it must not silently contribute a
 // fake zero-latency data point to a cell's median).
 func TestRunCase_CapturesProviderTTFT(t *testing.T) {
-	p := NewStubProvider(
+	p := NewStubProvider("test",
 		StubResult{Output: "ok", TTFT: 42 * time.Millisecond},
 		StubResult{Err: errBoom},
 	)
@@ -53,7 +64,7 @@ func TestRunCase_CapturesProviderTTFT(t *testing.T) {
 }
 
 func TestRun_IdenticalOutputsSaturateAtMinRuns(t *testing.T) {
-	p := NewStubProvider(StubResult{Output: "d"})
+	p := NewStubProvider("test", StubResult{Output: "d"})
 	r := &Runner{Provider: p}
 	c := basicCase(Assertion{Label: "has-d", Polarity: Must, Threshold: 0.8, Grader: containsGrader("d")})
 
@@ -76,7 +87,7 @@ func TestRun_IdenticalOutputsSaturateAtMinRuns(t *testing.T) {
 func TestRun_DisagreementEscalatesToMaxRuns(t *testing.T) {
 	// Alternates present/absent for the "has-d" grader every other sample,
 	// so the first 3 samples cannot possibly all agree.
-	p := NewStubProvider(StubResult{Output: "d"}, StubResult{Output: "x"})
+	p := NewStubProvider("test", StubResult{Output: "d"}, StubResult{Output: "x"})
 	r := &Runner{Provider: p}
 	c := basicCase(Assertion{Label: "has-d", Polarity: Measure, Grader: containsGrader("d")})
 
@@ -89,7 +100,7 @@ func TestRun_DisagreementEscalatesToMaxRuns(t *testing.T) {
 
 func TestRun_FixedNOverridesAdaptivity(t *testing.T) {
 	// Alternating outputs would normally escalate; FixedN must skip that.
-	p := NewStubProvider(StubResult{Output: "d"}, StubResult{Output: "x"})
+	p := NewStubProvider("test", StubResult{Output: "d"}, StubResult{Output: "x"})
 	r := &Runner{Provider: p, FixedN: 5}
 	c := basicCase(Assertion{Label: "has-d", Polarity: Measure, Grader: containsGrader("d")})
 
@@ -101,7 +112,7 @@ func TestRun_FixedNOverridesAdaptivity(t *testing.T) {
 }
 
 func TestRun_FixedNClampedToMaxRuns(t *testing.T) {
-	p := NewStubProvider(StubResult{Output: "d"})
+	p := NewStubProvider("test", StubResult{Output: "d"})
 	r := &Runner{Provider: p, FixedN: 1000, MaxRuns: 10}
 	c := basicCase(Assertion{Label: "has-d", Polarity: Measure, Grader: containsGrader("d")})
 
@@ -113,7 +124,7 @@ func TestRun_FixedNClampedToMaxRuns(t *testing.T) {
 }
 
 func TestRun_ErrorsExcludedFromGradingButCounted(t *testing.T) {
-	p := NewStubProvider(
+	p := NewStubProvider("test",
 		StubResult{Output: "d"},
 		StubResult{Err: errors.New("boom")},
 		StubResult{Output: "d"},
@@ -142,7 +153,7 @@ func TestRun_ErrorsExcludedFromGradingButCounted(t *testing.T) {
 }
 
 func TestRun_AllErroredNeverPasses(t *testing.T) {
-	p := NewStubProvider(StubResult{Err: errors.New("boom")})
+	p := NewStubProvider("test", StubResult{Err: errors.New("boom")})
 	r := &Runner{Provider: p, FixedN: 3}
 	c := basicCase(
 		Assertion{Label: "must", Polarity: Must, Threshold: 0.0, Grader: containsGrader("d")},
@@ -209,7 +220,7 @@ func TestScoring_MustNot(t *testing.T) {
 }
 
 func TestRun_TripWireRecordsOnlyFirstOffending(t *testing.T) {
-	p := NewStubProvider(
+	p := NewStubProvider("test",
 		StubResult{Output: "ok"},
 		StubResult{Output: "&& bad1"},
 		StubResult{Output: "&& bad2"},
@@ -228,7 +239,7 @@ func TestRun_TripWireRecordsOnlyFirstOffending(t *testing.T) {
 }
 
 func TestRun_TripWirePassesWhenNeverPresent(t *testing.T) {
-	p := NewStubProvider(StubResult{Output: "ok"})
+	p := NewStubProvider("test", StubResult{Output: "ok"})
 	r := &Runner{Provider: p, FixedN: 3}
 	c := basicCase(Assertion{Label: "no-leading-op", Polarity: TripWire, Grader: containsGrader("&&")})
 
@@ -243,7 +254,7 @@ func TestRun_TripWirePassesWhenNeverPresent(t *testing.T) {
 }
 
 func TestRun_Measure_AlwaysPasses(t *testing.T) {
-	p := NewStubProvider(StubResult{Output: "x"})
+	p := NewStubProvider("test", StubResult{Output: "x"})
 	r := &Runner{Provider: p, FixedN: 3}
 	c := basicCase(Assertion{Label: "tracked", Polarity: Measure, Grader: containsGrader("d")})
 
@@ -254,7 +265,7 @@ func TestRun_Measure_AlwaysPasses(t *testing.T) {
 }
 
 func TestRun_MultipleCasesPreserveOrderAndIndependence(t *testing.T) {
-	p := NewStubProvider(StubResult{Output: "d"})
+	p := NewStubProvider("test", StubResult{Output: "d"})
 	r := &Runner{Provider: p}
 	c1 := Case{ID: "A", Category: "cat1", Req: protocol.Request{}, Asserts: []Assertion{
 		{Label: "a", Polarity: Must, Threshold: 1.0, Grader: containsGrader("d")},
@@ -269,7 +280,7 @@ func TestRun_MultipleCasesPreserveOrderAndIndependence(t *testing.T) {
 }
 
 func TestRun_EmptyCasesReturnsEmptyResults(t *testing.T) {
-	p := NewStubProvider(StubResult{Output: "d"})
+	p := NewStubProvider("test", StubResult{Output: "d"})
 	r := &Runner{Provider: p}
 	results := r.Run(context.Background(), nil)
 	if len(results) != 0 {
@@ -300,7 +311,7 @@ func TestRunCase_GraderErrorsNeverPass(t *testing.T) {
 
 	for _, pol := range []Polarity{Must, MustNot, TripWire, Measure} {
 		t.Run(string(pol), func(t *testing.T) {
-			r := &Runner{Provider: NewStubProvider(StubResult{Output: " status"})}
+			r := &Runner{Provider: NewStubProvider("test", StubResult{Output: " status"})}
 			c := Case{
 				ID:      "G1",
 				Asserts: []Assertion{{Label: "always errors", Polarity: pol, Threshold: 0.8, Grader: boom}},
@@ -337,7 +348,7 @@ func TestRunCase_FirstGraderErrorKeepsOnlyTheFirst(t *testing.T) {
 		calls++
 		return false, fmt.Errorf("boom #%d", calls)
 	}}
-	r := &Runner{Provider: NewStubProvider(StubResult{Output: " status"}), FixedN: 3}
+	r := &Runner{Provider: NewStubProvider("test", StubResult{Output: " status"}), FixedN: 3}
 	c := Case{ID: "G2", Asserts: []Assertion{{Label: "flaky", Polarity: Measure, Grader: flaky}}}
 
 	got := r.Run(context.Background(), []Case{c})[0]
@@ -386,7 +397,7 @@ func TestRun_ProgressIsInCaseOrder(t *testing.T) {
 	var mu sync.Mutex
 	var gotIDs []string
 	r := &Runner{
-		Provider: NewStubProvider(StubResult{Output: " x"}),
+		Provider: NewStubProvider("test", StubResult{Output: " x"}),
 		Progress: func(c Case, _ CaseResult) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -417,7 +428,7 @@ func TestRun_ProgressResultMatchesReturnedResult(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]rune{}
 	r := &Runner{
-		Provider: NewStubProvider(StubResult{Output: " x"}),
+		Provider: NewStubProvider("test", StubResult{Output: " x"}),
 		Progress: func(c Case, res CaseResult) {
 			mu.Lock()
 			defer mu.Unlock()

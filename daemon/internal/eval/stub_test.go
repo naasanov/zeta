@@ -11,7 +11,7 @@ import (
 var errBoom = errors.New("boom")
 
 func TestStubProvider_ReplaysInOrderThenCycles(t *testing.T) {
-	p := NewStubProvider(StubResult{Output: "a"}, StubResult{Output: "b"})
+	p := NewStubProvider("test", StubResult{Output: "a"}, StubResult{Output: "b"})
 	ctx := context.Background()
 
 	for _, want := range []string{"a", "b", "a", "b"} {
@@ -26,7 +26,7 @@ func TestStubProvider_ReplaysInOrderThenCycles(t *testing.T) {
 }
 
 func TestStubProvider_ReturnsScriptedError(t *testing.T) {
-	p := NewStubProvider(StubResult{Err: errBoom})
+	p := NewStubProvider("test", StubResult{Err: errBoom})
 	_, err := p.Complete(context.Background(), provider.Request{})
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("want scripted error, got %v", err)
@@ -34,7 +34,7 @@ func TestStubProvider_ReturnsScriptedError(t *testing.T) {
 }
 
 func TestStubProvider_EmptyScriptErrors(t *testing.T) {
-	p := NewStubProvider()
+	p := NewStubProvider("test")
 	_, err := p.Complete(context.Background(), provider.Request{})
 	if err == nil {
 		t.Fatalf("want an error from an empty script")
@@ -44,7 +44,7 @@ func TestStubProvider_EmptyScriptErrors(t *testing.T) {
 func TestStubProvider_RespectsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	p := NewStubProvider(StubResult{Output: "a"})
+	p := NewStubProvider("test", StubResult{Output: "a"})
 	_, err := p.Complete(ctx, provider.Request{})
 	if err == nil {
 		t.Fatalf("want an error from a canceled context")
@@ -52,7 +52,7 @@ func TestStubProvider_RespectsCanceledContext(t *testing.T) {
 }
 
 func TestStubProvider_NameModelDefaults(t *testing.T) {
-	p := NewStubProvider()
+	p := NewStubProvider("test")
 	if p.Name() != "stub" || p.Model() != "stub-1" {
 		t.Fatalf("want default name/model, got %s/%s", p.Name(), p.Model())
 	}

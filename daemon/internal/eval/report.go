@@ -62,11 +62,11 @@ func ColorWarn(s string) string { return colorize(ansiYellow, s) }
 // Meta describes one Runner invocation for a report's header/footer and for
 // the Part 4 JSON diff to key off of.
 type Meta struct {
-	Provider  string
-	Model     string
-	Variant   string
-	NPolicy   string // e.g. "adaptive(min=3,max=10)" or "fixed=5"
-	Timestamp time.Time
+	Provider  string    `json:"provider"`
+	Model     string    `json:"model"`
+	Prompt    string    `json:"prompt"`
+	NPolicy   string    `json:"n_policy"` // e.g. "adaptive(min=3,max=10)" or "fixed=5"
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // dump is the JSON wire shape for a full report: Meta plus every CaseResult.
@@ -143,8 +143,8 @@ func Text(w io.Writer, results []CaseResult, meta Meta) error {
 }
 
 func writeHeader(w io.Writer, meta Meta) error {
-	_, err := fmt.Fprintf(w, "eval report: provider=%s model=%s variant=%s n-policy=%s time=%s\n\n",
-		orNA(meta.Provider), orNA(meta.Model), orNA(meta.Variant), orNA(meta.NPolicy),
+	_, err := fmt.Fprintf(w, "eval report: provider=%s model=%s prompt=%s n-policy=%s time=%s\n\n",
+		orNA(meta.Provider), orNA(meta.Model), orNA(meta.Prompt), orNA(meta.NPolicy),
 		meta.Timestamp.Format(time.RFC3339))
 	return err
 }
@@ -191,16 +191,16 @@ func writeTripWires(w io.Writer, results []CaseResult) error {
 	return err
 }
 
-// CellLabel identifies the (provider, variant) cell a CaseResult belongs to
+// CellLabel identifies the (provider, prompt) cell a CaseResult belongs to
 // — the scorecard's column key. A flat list would be unreadable once there's
 // more than one cell: the same case ID would repeat with nothing
 // distinguishing the rows.
 func CellLabel(cr CaseResult) string {
 	provider := orNA(cr.Provider)
-	if cr.Variant == "" {
+	if cr.PromptName == "" {
 		return provider
 	}
-	return provider + "/" + cr.Variant
+	return provider + "/" + cr.PromptName
 }
 
 // assertionKey identifies one scorecard ROW: a (case, assertion) pair, which

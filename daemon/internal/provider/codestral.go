@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -121,26 +120,7 @@ type codestralClient struct {
 	maxTokens int
 	stop      []string
 	http      *http.Client
-	render    FIMRenderer
-}
-
-// FIMRenderer turns a provider-neutral Prompt into the prompt+suffix pair a
-// FIM endpoint takes. RenderFIM is the shipped default; the type exists so
-// the eval harness can measure alternative prompt shapes without those
-// experiments living in the production path.
-type FIMRenderer func(prompt.Prompt) (fimPrompt, suffix string)
-
-// CodestralOption customizes a codestral client at construction.
-type CodestralOption func(*codestralClient)
-
-// WithFIMRenderer replaces the FIM prompt renderer (eval-only; production
-// passes nothing and gets RenderFIM). A nil renderer is ignored.
-func WithFIMRenderer(r FIMRenderer) CodestralOption {
-	return func(c *codestralClient) {
-		if r != nil {
-			c.render = r
-		}
-	}
+	prompt    prompt.FIMPrompt
 }
 
 // NewCodestral builds a Provider backed by a shared, keep-alive-tuned
@@ -148,7 +128,7 @@ func WithFIMRenderer(r FIMRenderer) CodestralOption {
 // "codestral-latest" — a pay-as-you-go account can't mint a
 // codestral.mistral.ai key, so the general per-token endpoint is the
 // default; baseURL stays configurable for anyone holding that key.
-func NewCodestral(baseURL, model, apiKey string, maxTokens int, opts ...CodestralOption) (Provider, error) {
+func NewCodestral(baseURL, model, apiKey string, maxTokens int, p prompt.FIMPrompt) (Provider, error) {
 	if baseURL == "" {
 		baseURL = "https://api.mistral.ai"
 	}
@@ -162,10 +142,7 @@ func NewCodestral(baseURL, model, apiKey string, maxTokens int, opts ...Codestra
 		maxTokens: maxTokens,
 		stop:      fimStopSequences,
 		http:      keepAliveHTTPClient(),
-		render:    RenderFIM,
-	}
-	for _, opt := range opts {
-		opt(c)
+		prompt:    p,
 	}
 	return c, nil
 }
@@ -184,114 +161,21 @@ func (c *codestralClient) Model() string {
 }
 
 // RenderPrompt returns the exact FIM prompt(+suffix) Complete would send.
-// Suffix is "" in Phase 2 (see RenderFIM's doc comment), so this is
-// ordinarily just the FIM prompt; the SUFFIX: section only appears once the
-// FIM infill hook is actually used.
+// Suffix is "" in Phase 2 (protocol.Request carries no cursor position), so
+// this is ordinarily just the FIM prompt; the SUFFIX: section only appears
+// once the FIM infill hook is actually used.
 func (c *codestralClient) RenderPrompt(req Request) string {
-	fimPrompt, suffix := c.render(req.Prompt)
-	if suffix == "" {
-		return fimPrompt
+	pl := c.prompt.RenderFIM(req.Req)
+	if pl.Suffix == "" {
+		return pl.Prefix
 	}
-	return "PROMPT:\n" + fimPrompt + "\n\nSUFFIX:\n" + suffix
+	return "PROMPT:\n" + pl.Prefix + "\n\nSUFFIX:\n" + pl.Suffix
 }
 
-// RenderFIM renders a Prompt for a FIM endpoint: ambient context as "#"
-// comments (FIM takes no system role), then recent history as RAW,
-// uncommented command lines contiguous with the buffer — Codestral continues
-// in-distribution shell code far better than it reasons over commented
-// metadata. The ambient context block's own "recent commands" line is
-// skipped here to avoid rendering it twice.
-//
-// Every command line, history and cursor alike, is prefixed with a "$ "
-// transcript marker. Without it the model completed the LAST HISTORY LINE
-// instead of predicting a new one ("git push" -> "origin master"); a
-// trailing newline alone didn't fix it, since the model just read "git
-// push" as a prefix of "git push origin main". Suffix is "" today, making
-// this pure prefix continuation.
-func RenderFIM(p prompt.Prompt) (fimPrompt, suffix string) {
-	return renderFIMShape(p, defaultFIMShape())
-}
-
-// defaultPromptMarker is the shipped transcript marker; the trailing space
-// puts the cursor at "$ " in next-command mode. Leading spaces the model
-// emits in response are stripped by stripLeadingSeparators, so this can't
-// leak into the suggestion.
-const defaultPromptMarker = "$ "
-
-// defaultFIMShape is the shipped shape. Experimental shapes are expressed as
-// deltas from this, not the zero value, so a variant only measures the one
-// thing it changes.
-func defaultFIMShape() fimShape {
-	return fimShape{promptMarker: defaultPromptMarker}
-}
-
-// fimShape is the set of knobs renderFIMShape varies. The zero value is the
-// pre-marker shape, kept reachable only for the eval harness to measure
-// against; nothing here affects production without WithFIMRenderer.
-type fimShape struct {
-	// promptMarker, when non-empty, prefixes every raw history line and is
-	// emitted once more immediately before Prefix.
-	promptMarker string
-
-	// alwaysExitCode emits "# exit: N" between history and Prefix even when
-	// N is 0 (which contextBlock omits). Lost to promptMarker in eval, kept
-	// registered to re-ask the narrower question in isolation.
-	alwaysExitCode bool
-}
-
-func renderFIMShape(p prompt.Prompt, shape fimShape) (fimPrompt, suffix string) {
-	// Re-render each "- " line of p.Context as a "#" comment, except the
-	// recent-commands line (rendered raw below). p.System/p.Instruction are
-	// chat-only and excluded.
-	ctx := strings.TrimPrefix(p.Context, "Context:\n")
-	ctx = strings.TrimSuffix(ctx, "\n\n")
-
-	var b strings.Builder
-	if ctx != "" {
-		for line := range strings.SplitSeq(ctx, "\n") {
-			stripped := strings.TrimPrefix(line, "- ")
-			if strings.HasPrefix(stripped, prompt.RecentCommandsLabel) {
-				continue
-			}
-			b.WriteString("# ")
-			b.WriteString(stripped)
-			b.WriteString("\n")
-		}
-	}
-	for _, cmd := range p.History {
-		b.WriteString(shape.promptMarker)
-		b.WriteString(cmd)
-		b.WriteString("\n")
-	}
-	// Exit status goes between history and the buffer specifically to sit
-	// at that seam, not up with the other ambient comments.
-	if shape.alwaysExitCode {
-		b.WriteString("# exit: ")
-		b.WriteString(strconv.Itoa(p.LastExit))
-		b.WriteString("\n")
-	}
-	// Marker is written even when Prefix is empty — in next-command mode
-	// it's the only signal that a fresh command starts here.
-	b.WriteString(shape.promptMarker)
-	b.WriteString(p.Prefix)
-	return b.String(), p.Suffix
-}
-
-// RenderFIMNoPromptMarker renders the pre-marker shape (no "$ " transcript
-// marker) — kept reachable as a known-losing baseline so RenderFIM's win
-// over it stays re-measurable.
-func RenderFIMNoPromptMarker(p prompt.Prompt) (fimPrompt, suffix string) {
-	return renderFIMShape(p, fimShape{})
-}
-
-// RenderFIMExitCodeAlways is the shipped shape plus an "# exit: N" line
-// (even when N is 0) between history and the cursor. Lost to the plain
-// marker in eval; stays registered to re-ask whether it helps once the
-// boundary problem is already solved.
-func RenderFIMExitCodeAlways(p prompt.Prompt) (fimPrompt, suffix string) {
-	shape := defaultFIMShape()
-	shape.alwaysExitCode = true
-	return renderFIMShape(p, shape)
+// PromptName identifies the prompt this client renders with, for
+// METRICS(§12) and eval reporting.
+func (c *codestralClient) PromptName() string {
+	return c.prompt.Name()
 }
 
 // fimRequest mirrors just the subset of the Mistral FIM request schema this
@@ -339,17 +223,17 @@ type fimUsage struct {
 // stamping and the cutoff. Honors ctx throughout, including mid-stream
 // reads, via NewRequestWithContext.
 func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion, error) {
-	typing := req.Prompt.Prefix != ""
+	typing := req.Req.Buf != ""
 
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = c.maxTokens
 	}
-	fimPrompt, suffix := c.render(req.Prompt)
+	pl := c.prompt.RenderFIM(req.Req)
 	reqBody := fimRequest{
 		Model:     c.model,
-		Prompt:    fimPrompt,
-		Suffix:    suffix,
+		Prompt:    pl.Prefix,
+		Suffix:    pl.Suffix,
 		MaxTokens: maxTokens,
 		Stream:    true,
 		Stop:      c.stop,

@@ -12,6 +12,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
 
 // defaultAnthropicModel is used when NewAnthropic is called with model == "".
@@ -24,18 +26,19 @@ type anthropicClient struct {
 	client    anthropic.Client
 	model     string
 	maxTokens int
+	prompt    prompt.ChatPrompt
 }
 
 // NewAnthropic builds a Provider backed by anthropic-sdk-go's native client.
 // There is no baseURL parameter — the native endpoint is fixed.
-func NewAnthropic(model, apiKey string, maxTokens int) (Provider, error) {
-	return newAnthropicClient(model, apiKey, maxTokens, "")
+func NewAnthropic(model, apiKey string, maxTokens int, p prompt.ChatPrompt) (Provider, error) {
+	return newAnthropicClient(model, apiKey, maxTokens, "", p)
 }
 
 // newAnthropicClient is the real constructor; the optional baseURL param
 // exists only so anthropic_test.go can aim the client at an httptest.Server.
 // Production always goes through NewAnthropic with baseURL == "".
-func newAnthropicClient(model, apiKey string, maxTokens int, baseURL string) (Provider, error) {
+func newAnthropicClient(model, apiKey string, maxTokens int, baseURL string, p prompt.ChatPrompt) (Provider, error) {
 	if model == "" {
 		model = defaultAnthropicModel
 	}
@@ -47,6 +50,7 @@ func newAnthropicClient(model, apiKey string, maxTokens int, baseURL string) (Pr
 		client:    anthropic.NewClient(opts...),
 		model:     model,
 		maxTokens: maxTokens,
+		prompt:    p,
 	}, nil
 }
 
@@ -65,9 +69,15 @@ func (c *anthropicClient) Model() string {
 
 // RenderPrompt returns the exact system+user text Complete would send,
 // formatted via the shared chat-prompt helper (this adapter sends
-// System + ChatUser() as two messages, same as openai.go).
+// System + User as two messages, same as openai.go).
 func (c *anthropicClient) RenderPrompt(req Request) string {
-	return RenderChatPrompt(req)
+	return RenderChatPrompt(c.prompt.RenderChat(req.Req))
+}
+
+// PromptName identifies the prompt this client renders with, for
+// METRICS(§12) and eval reporting.
+func (c *anthropicClient) PromptName() string {
+	return c.prompt.Name()
 }
 
 // Complete issues a streaming Messages API request and returns the model's
@@ -80,6 +90,8 @@ func (c *anthropicClient) Complete(ctx context.Context, req Request) (Completion
 		maxTokens = c.maxTokens
 	}
 
+	pl := c.prompt.RenderChat(req.Req)
+
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.model),
 		MaxTokens: int64(maxTokens),
@@ -87,9 +99,9 @@ func (c *anthropicClient) Complete(ctx context.Context, req Request) (Completion
 		// is under Haiku 4.5's 4096-token minimum cacheable prefix, so
 		// cache_control here would cache nothing — a silent no-op.
 		// CachedTokens is still read below to catch it if that changes.
-		System: []anthropic.TextBlockParam{{Text: req.Prompt.System}},
+		System: []anthropic.TextBlockParam{{Text: pl.System}},
 		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt.ChatUser())),
+			anthropic.NewUserMessage(anthropic.NewTextBlock(pl.User)),
 		},
 		// Deliberately NOT set: Thinking (wrong for a sub-second completion),
 		// OutputConfig.Effort (errors outright on Haiku 4.5), Temperature/TopP

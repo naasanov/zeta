@@ -135,7 +135,7 @@ type CategoryAggregate struct {
 type DiffReport struct {
 	Before, After Meta
 	// MetaWarnings lists every Meta field that differs between the two runs
-	// (provider/model/variant/n-policy). Non-empty means the two runs may
+	// (provider/model/prompt/n-policy). Non-empty means the two runs may
 	// not be an apples-to-apples comparison (e.g. codestral vs anthropic) —
 	// still a legitimate diff to run, but one that must not print silently.
 	MetaWarnings []string
@@ -271,8 +271,8 @@ func metaWarnings(before, after Meta) []string {
 	if before.Model != after.Model {
 		warns = append(warns, fmt.Sprintf("model differs: %s vs %s", orNA(before.Model), orNA(after.Model)))
 	}
-	if before.Variant != after.Variant {
-		warns = append(warns, fmt.Sprintf("variant differs: %s vs %s", orNA(before.Variant), orNA(after.Variant)))
+	if before.Prompt != after.Prompt {
+		warns = append(warns, fmt.Sprintf("prompt differs: %s vs %s", orNA(before.Prompt), orNA(after.Prompt)))
 	}
 	if before.NPolicy != after.NPolicy {
 		warns = append(warns, fmt.Sprintf("n-policy differs: %s vs %s", orNA(before.NPolicy), orNA(after.NPolicy)))
@@ -460,8 +460,8 @@ func (d DiffReport) Text(w io.Writer) error {
 
 func (d DiffReport) writeHeader(w io.Writer) error {
 	if _, err := fmt.Fprintf(w, "eval diff: [%s/%s/%s] -> [%s/%s/%s]\n",
-		orNA(d.Before.Provider), orNA(d.Before.Model), orNA(d.Before.Variant),
-		orNA(d.After.Provider), orNA(d.After.Model), orNA(d.After.Variant)); err != nil {
+		orNA(d.Before.Provider), orNA(d.Before.Model), orNA(d.Before.Prompt),
+		orNA(d.After.Provider), orNA(d.After.Model), orNA(d.After.Prompt)); err != nil {
 		return err
 	}
 	if len(d.MetaWarnings) > 0 {

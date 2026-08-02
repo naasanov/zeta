@@ -23,6 +23,7 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/config"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/logging"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/metrics"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/server"
@@ -120,7 +121,7 @@ func main() {
 		log.Error("config: failed to resolve api key, falling back to echo mode", "provider", selected, "err", err)
 		apiKey = ""
 	}
-	needsKey := resolved.APIKeyEnv != "" || resolved.APIKeyCmd != ""
+	needsKey := resolved.NeedsKey()
 
 	switch {
 	case needsKey && apiKey == "":
@@ -133,7 +134,7 @@ func main() {
 		// Either a key was resolved, or this provider needs none (e.g.
 		// ollama running locally) — construct it with whatever key we have
 		// (possibly "").
-		p, err := newProvider(resolved, apiKey, maxTokens)
+		p, err := provider.NewFromProfile(resolved, apiKey, maxTokens, prompt.ShippedFor(resolved.Adapter))
 		if err != nil {
 			log.Error("provider: failed to construct, falling back to echo mode", "provider", selected, "err", err)
 			srv.SetSuggest(echoMissingKey(resolved.APIKeyEnv))
@@ -147,28 +148,6 @@ func main() {
 	if err := srv.Run(ctx); err != nil {
 		log.Error("daemon exited", "err", err)
 		os.Exit(1)
-	}
-}
-
-// newProvider constructs a provider.Provider from a resolved profile,
-// switching on the internal Adapter, not the user-facing brand — several
-// brands share an adapter (groq/ollama both speak "openai"). Lives here, not
-// in internal/provider, so provider adapters never import internal/config.
-func newProvider(r config.ResolvedProfile, apiKey string, maxTokens int) (provider.Provider, error) {
-	switch r.Adapter {
-	case "openai":
-		return provider.NewOpenAI(r.BaseURL, r.Model, apiKey, maxTokens)
-	case "anthropic":
-		// Anthropic's constructor takes no baseURL; r.BaseURL (if set) is
-		// ignored for this provider.
-		return provider.NewAnthropic(r.Model, apiKey, maxTokens)
-	case "codestral":
-		return provider.NewCodestral(r.BaseURL, r.Model, apiKey, maxTokens)
-	default:
-		// config.Resolve only ever fills Adapter from presets or the openai
-		// escape hatch, so reaching here means a programmer error, not user
-		// input.
-		return nil, fmt.Errorf("main: unknown adapter %q", r.Adapter)
 	}
 }
 

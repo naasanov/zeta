@@ -7,10 +7,8 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// TestContextBlockOmitsAbsentFields is the negative case: with no context
-// fields set (the common case pre-step-5 and for a bare KindTyping request),
-// contextBlock must produce nothing at all, so it's safe to prepend
-// unconditionally in llmSuggest.
+// TestContextBlockOmitsAbsentFields: with no context fields set,
+// contextBlock must produce nothing at all.
 func TestContextBlockOmitsAbsentFields(t *testing.T) {
 	got := contextBlock(protocol.Request{V: protocol.Version, ID: "x", Kind: protocol.KindTyping, Buf: "git ad"})
 	if got != "" {
@@ -122,10 +120,9 @@ func TestContextBlockCleanBranchNoDirtySuffix(t *testing.T) {
 	}
 }
 
-// TestBufferStaysLastInAssembledUserMessage asserts the load-bearing
-// invariant from the task contract: however much context is prepended, the
-// KindTyping user message must end with req.Buf so the model's completion
-// continues directly from it (the zsh client strips this exact prefix).
+// TestBufferStaysLastInAssembledUserMessage: however much context is
+// prepended, the user message must end with req.Buf so the completion
+// continues directly from it.
 func TestBufferStaysLastInAssembledUserMessage(t *testing.T) {
 	req := protocol.Request{
 		Kind: protocol.KindTyping,
@@ -133,56 +130,49 @@ func TestBufferStaysLastInAssembledUserMessage(t *testing.T) {
 		Cwd:  "/Users/x/project", GitBranch: "main", GitDirty: true, LastExit: 1,
 		History: []string{"cd project", "npm install", "npm test"},
 	}
-	user := Build(req).ChatUser()
+	user := chatAppend.RenderChat(req).User
 	if !strings.HasSuffix(user, req.Buf) {
 		t.Errorf("expected assembled user message to end with req.Buf %q, got:\n%s", req.Buf, user)
 	}
 }
 
-// TestPromptUsesOneSystemPromptForBothModes pins the cleanup that makes
-// next-command prediction the same append contract as typing completion, just
-// with an empty buffer and a different user-turn directive.
+// TestPromptUsesOneSystemPromptForBothModes checks that typing and
+// next-command share one system prompt, differing only in the user-turn
+// directive.
 func TestPromptUsesOneSystemPromptForBothModes(t *testing.T) {
-	typingPrompt := Build(protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"})
-	nextPrompt := Build(protocol.Request{Kind: protocol.KindNextCommand, Buf: ""})
-	typingSystem, typingUser := typingPrompt.System, typingPrompt.ChatUser()
-	nextSystem, nextUser := nextPrompt.System, nextPrompt.ChatUser()
+	typingPayload := chatAppend.RenderChat(protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"})
+	nextPayload := chatAppend.RenderChat(protocol.Request{Kind: protocol.KindNextCommand, Buf: ""})
 
-	if typingSystem != systemPrompt {
+	if typingPayload.System != chatSystemPrompt {
 		t.Errorf("typing request used unexpected system prompt")
 	}
-	if nextSystem != systemPrompt {
+	if nextPayload.System != chatSystemPrompt {
 		t.Errorf("next-command request used unexpected system prompt")
 	}
-	if typingSystem != nextSystem {
+	if typingPayload.System != nextPayload.System {
 		t.Errorf("expected typing and next-command to share one system prompt")
 	}
-	if !strings.Contains(typingUser, "Complete this command") {
-		t.Errorf("typing user prompt missing typing directive, got:\n%s", typingUser)
+	if !strings.Contains(typingPayload.User, "Complete this command") {
+		t.Errorf("typing user prompt missing typing directive, got:\n%s", typingPayload.User)
 	}
-	if !strings.Contains(nextUser, "next command") {
-		t.Errorf("next-command user prompt missing next-command directive, got:\n%s", nextUser)
+	if !strings.Contains(nextPayload.User, "next command") {
+		t.Errorf("next-command user prompt missing next-command directive, got:\n%s", nextPayload.User)
 	}
 }
 
-// TestBuildPopulatesHistory asserts Build copies req.History onto the
-// resulting Prompt.History field verbatim (oldest-first), which is what
-// RenderFIM (codestral.go) uses to render raw command lines for the FIM
-// adapter.
-func TestBuildPopulatesHistory(t *testing.T) {
+// TestFIMPopulatesHistory asserts the FIM prompts render req.History
+// verbatim (oldest-first) as raw command lines, which is what makes the
+// transcript contiguous with the buffer.
+func TestFIMPopulatesHistory(t *testing.T) {
 	req := protocol.Request{
 		Kind:    protocol.KindTyping,
 		Buf:     "git com",
 		History: []string{"git add .", "git commit -m \"wip\"", "git status"},
 	}
-	got := Build(req).History
-	want := []string{"git add .", "git commit -m \"wip\"", "git status"}
-	if len(got) != len(want) {
-		t.Fatalf("Build().History = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Build().History[%d] = %q, want %q", i, got[i], want[i])
+	got := fimTranscriptMarker.RenderFIM(req).Prefix
+	for _, want := range []string{"$ git add .", "$ git commit -m \"wip\"", "$ git status"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected FIM prefix to contain %q, got:\n%s", want, got)
 		}
 	}
 }
@@ -198,7 +188,7 @@ func TestNextCommandPromptCarriesContextAndNoFakeBufferMarker(t *testing.T) {
 		GitBranch: "main",
 		History:   []string{"npm test"},
 	}
-	user := Build(req).ChatUser()
+	user := chatAppend.RenderChat(req).User
 
 	for _, want := range []string{
 		"Context:",

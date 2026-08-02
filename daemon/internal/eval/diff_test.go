@@ -25,7 +25,7 @@ func run(meta Meta, results ...CaseResult) Run {
 	return Run{Meta: meta, Results: results}
 }
 
-var baseMeta = Meta{Provider: "codestral", Model: "codestral-1", Variant: "default", NPolicy: "adaptive(min=3,max=10)"}
+var baseMeta = Meta{Provider: "codestral", Model: "codestral-1", Prompt: "default", NPolicy: "adaptive(min=3,max=10)"}
 
 func TestDiffRuns_Identical(t *testing.T) {
 	results := []CaseResult{
@@ -431,7 +431,7 @@ func TestDiffRuns_SuiteLevelMovementBeyondNoiseFloorRegresses(t *testing.T) {
 }
 
 func TestLoadRun_RoundTripsWithJSON(t *testing.T) {
-	meta := Meta{Provider: "codestral", Model: "codestral-1", Variant: "default", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
+	meta := Meta{Provider: "codestral", Model: "codestral-1", Prompt: "default", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
 	results := []CaseResult{
 		cr("A1", "syntax", arTrip("no-leading-op", 1, 3, false, "&& bad")),
 		cr("E1", "context", ar("has-commit", Must, 8, 10, true)),

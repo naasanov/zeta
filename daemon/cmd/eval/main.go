@@ -20,6 +20,7 @@ import (
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/config"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/eval"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
@@ -40,11 +41,11 @@ func main() {
 		caseSel       = flag.String("cases", "", "comma-separated case selectors: IDs (\"A1,B2\"), categories (\"syntax\"), or ID globs (\"A*\"); empty runs everything")
 		outPath       = flag.String("out", "", "write the JSON report to this path (in addition to the text scorecard on stdout); if it's an existing directory, a timestamped provider/variant-named file is created inside it")
 		printJSON     = flag.Bool("print-json", false, "print the JSON report to stdout before the scorecard, with embedded newlines (e.g. in the rendered Prompt field) shown literally rather than escaped — NOT valid JSON, a terminal-reading convenience only")
-		dryRun        = flag.Bool("dry-run", false, "use a scripted stub provider instead of a live one (no network); -providers/-matrix are ignored, -variants still selects the prompt-building path")
+		dryRun        = flag.Bool("dry-run", false, "use a scripted stub provider instead of a live one (no network); -providers/-matrix are ignored, -prompts still selects the prompt-building path")
 		providersFlag = flag.String("providers", "codestral", "comma-separated provider brands to run against (\"codestral,anthropic,groq\"); the cheap default is a single provider")
-		variantsFlag  = flag.String("variants", "default", "comma-separated prompt variants to run (\"default,fim-commented-history\")")
-		matrix        = flag.Bool("matrix", false, "shorthand for every provider (matrixProviders) x every registered variant; the occasional full run, not the default")
-		modelOverride = flag.String("model", "", "override the resolved model for every selected provider (see eval.NewLiveProvider); empty keeps each provider's preset default")
+		promptsFlag   = flag.String("prompts", "default", "comma-separated registered prompt names to run (\"fim-transcript-marker,chat-append\"); \"default\" is an input alias that resolves per-provider to prompt.ShippedFor(adapter) — never persisted as-is")
+		matrix        = flag.Bool("matrix", false, "shorthand for every provider (matrixProviders) x every registered prompt; the occasional full run, not the default")
+		modelOverride = flag.String("model", "", "override the resolved model for every selected provider (see newLiveProvider); empty keeps each provider's preset default")
 		importPath    = flag.String("import", "", "read a §12 metrics events.jsonl, print case stubs + import stats to stdout/stderr, and exit without running anything")
 		diffMode      = flag.Bool("diff", false, "compare two scorecard JSON dumps (positional args: old.json new.json), print the diff, and exit non-zero if anything regressed; a terminal mode like -import — never runs cases")
 		judgeValidate = flag.Bool("judge-validate", false, "score candidate judge models (-judges) against hand labels (-labels) and exit non-zero unless the best clears the plan doc's >=90% agreement gate; a terminal mode like -diff/-import — never runs cases")
@@ -115,7 +116,10 @@ func main() {
 		log.Fatalf("eval: -cases=%q: %v", *caseSel, err)
 	}
 
-	cells := resolveCells(*dryRun, *matrix, *providersFlag, *variantsFlag)
+	cells, skipped := resolveCells(*dryRun, *matrix, *providersFlag, *promptsFlag)
+	for _, s := range skipped {
+		fmt.Fprintf(os.Stderr, "eval: skipping incompatible pairing %s\n", s)
+	}
 
 	perCaseMax := maxN
 	nPolicy := "adaptive(min=3,max=10)"
@@ -124,8 +128,8 @@ func main() {
 		nPolicy = fmt.Sprintf("fixed=%d", *n)
 	}
 	maxCalls := len(cells) * len(cases) * perCaseMax
-	fmt.Fprintf(os.Stderr, "eval: %d cell(s) (%d provider(s) x %d variant(s)) x %d case(s), up to %d run(s)/case => up to %d total provider calls\n",
-		len(cells), countDistinctProviders(cells), countDistinctVariants(cells), len(cases), perCaseMax, maxCalls)
+	fmt.Fprintf(os.Stderr, "eval: %d cell(s) (%d provider(s) x %d prompt(s)) x %d case(s), up to %d run(s)/case => up to %d total provider calls\n",
+		len(cells), countDistinctProviders(cells), countDistinctPrompts(cells), len(cases), perCaseMax, maxCalls)
 
 	fmt.Fprintf(os.Stderr, "eval: legend  . pass   x fail   ! trip-wire tripped   E no successful runs\n")
 
@@ -148,7 +152,7 @@ func main() {
 			// Fatal, not "skip this cell and keep going": a provider that
 			// silently dropped out of a matrix run would produce a report
 			// that looks like a smaller-but-clean matrix rather than a
-			// broken one. See eval.NewLiveProvider's doc comment on why a
+			// broken one. See newLiveProvider's doc comment on why a
 			// missing key must never fall back to a stub.
 			log.Fatalf("eval: provider %q: %v", c.Provider, err)
 		}
@@ -158,7 +162,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%-*s  ", labelWidth, cellLabel(c))
 		var passed, failed, tripped, errored int
 		runner := &eval.Runner{
-			Provider: p, Variant: c.Variant, Limiter: limiter, FixedN: *n,
+			Provider: p, Limiter: limiter, FixedN: *n,
 			// A shared rate limiter makes extra workers pure queuing latency
 			// (see Runner.Concurrency's doc comment) — run those cells
 			// single-worker so a cell's paced-out slots all go to whichever
@@ -203,7 +207,7 @@ func main() {
 		lastMeta = eval.Meta{
 			Provider:  c.Provider, // brand, matching the scorecard's column labels
 			Model:     p.Model(),
-			Variant:   c.Variant.Name,
+			Prompt:    c.PromptName,
 			NPolicy:   nPolicy,
 			Timestamp: start,
 		}
@@ -256,7 +260,7 @@ func defaultOutFilename(meta eval.Meta) string {
 	return fmt.Sprintf("%s_%s_%s.json",
 		meta.Timestamp.Format("20060102-150405"),
 		sanitizeForFilename(meta.Provider),
-		sanitizeForFilename(meta.Variant))
+		sanitizeForFilename(meta.Prompt))
 }
 
 // sanitizeForFilename turns a comma-joined meta field (e.g.
@@ -265,42 +269,117 @@ func sanitizeForFilename(s string) string {
 	return strings.ReplaceAll(s, ",", "+")
 }
 
-// cell is one (provider brand, prompt variant) combination — one row of the
-// matrix this command assembles from -providers/-variants/-matrix.
+// cell is one (provider brand, resolved prompt name) combination — one row
+// of the matrix this command assembles from -providers/-prompts/-matrix.
+// PromptName is always a concrete registered name; "default" never survives
+// resolveCells.
 type cell struct {
-	Provider string // brand name; "stub" under -dry-run
-	Variant  eval.Variant
+	Provider   string // brand name; "stub" under -dry-run
+	PromptName string
 }
 
 // cellLabel is the row prefix for a cell's live progress line, e.g.
-// "codestral/default".
-func cellLabel(c cell) string { return c.Provider + "/" + c.Variant.Name }
+// "codestral/fim-transcript-marker".
+func cellLabel(c cell) string { return c.Provider + "/" + c.PromptName }
 
-// resolveCells assembles the matrix. Under -dry-run, -providers/-matrix are
-// ignored entirely (a single scripted stub, no network, no provider axis),
-// but -variants still selects which prompt-building path the stub exercises.
-func resolveCells(dryRun, matrix bool, providersFlag, variantsFlag string) []cell {
-	variantNames := splitCSV(variantsFlag)
-	if matrix {
-		for _, v := range eval.AllVariants() {
-			variantNames = appendUnique(variantNames, v.Name)
+// dryRunAdapter is the adapter "default" resolves against under -dry-run,
+// where there is no real provider axis to key it to. Chosen to match the
+// shipped default provider (codestral/FIM), so a plain `-dry-run` smoke-tests
+// the same prompt shape a real default run would use.
+const dryRunAdapter = "codestral"
+
+// resolvePromptName resolves one -prompts entry to a concrete registered
+// prompt.Prompt. "default" is an INPUT ALIAS ONLY: it resolves per-adapter to
+// prompt.ShippedFor(adapter), and the returned prompt's own Name() — never
+// the literal string "default" — is what a caller may persist. Any other
+// name is validated via prompt.ByName, fatal on a typo (its error lists every
+// valid name).
+func resolvePromptName(name, adapter string) prompt.Prompt {
+	if name == "default" {
+		return prompt.ShippedFor(adapter)
+	}
+	p, err := prompt.ByName(name)
+	if err != nil {
+		log.Fatalf("eval: -prompts: %v", err)
+	}
+	return p
+}
+
+// promptShape reports which rendering shape p implements, for compatibility
+// checks and error messages.
+func promptShape(p prompt.Prompt) string {
+	_, chat := p.(prompt.ChatPrompt)
+	_, fim := p.(prompt.FIMPrompt)
+	switch {
+	case chat && fim:
+		return "chat+FIM"
+	case fim:
+		return "FIM"
+	default:
+		return "chat"
+	}
+}
+
+// shapeNeededBy returns the prompt shape adapter requires: "chat" for
+// openai/anthropic, "FIM" for codestral.
+func shapeNeededBy(adapter string) string {
+	if adapter == "codestral" {
+		return "FIM"
+	}
+	return "chat"
+}
+
+// promptCompatible reports whether p can render for a provider needing
+// shape.
+func promptCompatible(p prompt.Prompt, shape string) bool {
+	switch shape {
+	case "FIM":
+		_, ok := p.(prompt.FIMPrompt)
+		return ok
+	default:
+		_, ok := p.(prompt.ChatPrompt)
+		return ok
+	}
+}
+
+// promptNamesWithShape lists every registered prompt.All() name matching
+// shape, for "here's what would work" error text.
+func promptNamesWithShape(shape string) []string {
+	var out []string
+	for _, p := range prompt.All() {
+		if promptCompatible(p, shape) {
+			out = append(out, p.Name())
 		}
 	}
-	variants := make([]eval.Variant, 0, len(variantNames))
-	for _, vn := range variantNames {
-		v, err := eval.VariantByName(vn)
-		if err != nil {
-			log.Fatalf("eval: -variants=%q: %v", variantsFlag, err)
+	return out
+}
+
+// resolveCells assembles the -providers x -prompts matrix and applies the
+// shape-compatibility rule: an incompatible (provider, prompt) pairing is
+// SKIPPED (returned separately for the caller to report), but a requested
+// provider or prompt left with zero resulting cells is FATAL — same
+// principle as a -cases selector matching nothing: a silently narrowed
+// matrix must never be presentable as a clean one. Runs entirely before any
+// provider is constructed. Under -dry-run, -providers/-matrix are ignored
+// entirely (a single scripted stub, no provider axis, no incompatibility to
+// check), but -prompts still selects which prompt-building path the stub
+// exercises.
+func resolveCells(dryRun, matrix bool, providersFlag, promptsFlag string) ([]cell, []string) {
+	promptNames := splitCSV(promptsFlag)
+	if matrix {
+		promptNames = nil
+		for _, p := range prompt.All() {
+			promptNames = appendUnique(promptNames, p.Name())
 		}
-		variants = append(variants, v)
 	}
 
 	if dryRun {
-		cells := make([]cell, 0, len(variants))
-		for _, v := range variants {
-			cells = append(cells, cell{Provider: "stub", Variant: v})
+		cells := make([]cell, 0, len(promptNames))
+		for _, name := range promptNames {
+			p := resolvePromptName(name, dryRunAdapter)
+			cells = append(cells, cell{Provider: "stub", PromptName: p.Name()})
 		}
-		return cells
+		return cells, nil
 	}
 
 	providerNames := splitCSV(providersFlag)
@@ -308,35 +387,118 @@ func resolveCells(dryRun, matrix bool, providersFlag, variantsFlag string) []cel
 		providerNames = matrixProviders
 	}
 
-	cells := make([]cell, 0, len(providerNames)*len(variants))
+	var cfg config.Config
+	adapterFor := make(map[string]string, len(providerNames))
 	for _, pn := range providerNames {
-		for _, v := range variants {
-			cells = append(cells, cell{Provider: pn, Variant: v})
+		resolved, err := cfg.Resolve(pn)
+		if err != nil {
+			log.Fatalf("eval: -providers=%q: %v", providersFlag, err)
+		}
+		adapterFor[pn] = resolved.Adapter
+	}
+
+	var cells []cell
+	var skipped []string
+	providerSeen := make(map[string]bool, len(providerNames))
+	promptSeen := make(map[string]bool, len(promptNames))
+	for _, pn := range providerNames {
+		shape := shapeNeededBy(adapterFor[pn])
+		for _, name := range promptNames {
+			p := resolvePromptName(name, adapterFor[pn])
+			if !promptCompatible(p, shape) {
+				skipped = append(skipped, fmt.Sprintf("%s/%s (provider needs %s, prompt is %s-shaped)",
+					pn, p.Name(), shape, promptShape(p)))
+				continue
+			}
+			cells = append(cells, cell{Provider: pn, PromptName: p.Name()})
+			providerSeen[pn] = true
+			promptSeen[name] = true
 		}
 	}
-	return cells
+
+	var errs []string
+	for _, pn := range providerNames {
+		if providerSeen[pn] {
+			continue
+		}
+		shape := shapeNeededBy(adapterFor[pn])
+		errs = append(errs, fmt.Sprintf("provider %q needs a %s prompt, but none of -prompts=%q is %s-shaped (registered %s prompts: %s)",
+			pn, shape, promptsFlag, shape, shape, strings.Join(promptNamesWithShape(shape), ", ")))
+	}
+	for _, name := range promptNames {
+		if promptSeen[name] {
+			continue
+		}
+		// "default" resolves per-adapter to a prompt already shaped for that
+		// adapter, so it can only land here as a literal, incompatible name.
+		p, _ := prompt.ByName(name)
+		shape := promptShape(p)
+		errs = append(errs, fmt.Sprintf("prompt %q is %s-shaped, but none of -providers=%q needs that shape (registered providers in this run: %s)",
+			name, shape, providersFlag, strings.Join(providerNames, ", ")))
+	}
+	if len(errs) > 0 {
+		log.Fatalf("eval: -providers/-prompts produced zero cells for:\n  %s", strings.Join(errs, "\n  "))
+	}
+
+	return cells, skipped
 }
 
 // buildCellProvider constructs the provider.Provider and eval.Limiter for one
 // matrix cell. Under -dry-run it always returns a freshly scripted
-// StubProvider with a NoopLimiter, regardless of c.Provider.
+// StubProvider with a NoopLimiter, regardless of c.Provider. c.PromptName is
+// always a concrete registered name by the time it reaches here.
 func buildCellProvider(c cell, dryRun bool, modelOverride string) (provider.Provider, eval.Limiter, error) {
 	if dryRun {
-		return eval.NewStubProvider(
+		return eval.NewStubProvider(c.PromptName,
 			eval.StubResult{Output: " status"},
 			eval.StubResult{Output: " status"},
 			eval.StubResult{Output: " status"},
 		), eval.NoopLimiter{}, nil
 	}
 
-	// The variant supplies the FIM renderer (nil for prompt-content-only
-	// variants), so a prompt-SHAPE variant reaches the codestral adapter —
-	// Runner only ever applies Variant.Build, which runs before rendering.
-	p, err := eval.NewLiveProvider(c.Provider, modelOverride, config.DefaultMaxTokens, c.Variant.FIMRenderer)
+	p, err := prompt.ByName(c.PromptName)
 	if err != nil {
 		return nil, nil, err
 	}
-	return p, eval.LimiterForBrand(c.Provider), nil
+	prov, err := newLiveProvider(c.Provider, modelOverride, config.DefaultMaxTokens, p)
+	if err != nil {
+		return nil, nil, err
+	}
+	return prov, eval.LimiterForBrand(c.Provider), nil
+}
+
+// newLiveProvider resolves brand ("codestral"/"anthropic"/"groq"/"ollama", or
+// the "openai" escape hatch) into a real provider.Provider, using an empty
+// config.Config so only the preset table applies. modelOverride, if
+// non-empty, replaces the preset's default model.
+//
+// A missing required API key is a clear, named, fatal error — never a
+// silent fallback to echo/stub output, unlike cmd/autopilotd's degrade path:
+// an eval that quietly measured a stub would produce numbers that look real
+// and aren't.
+func newLiveProvider(brand string, modelOverride string, maxTokens int, p prompt.Prompt) (provider.Provider, error) {
+	var cfg config.Config
+	resolved, err := cfg.Resolve(brand)
+	if err != nil {
+		return nil, fmt.Errorf("eval: resolving provider %q: %w", brand, err)
+	}
+	if modelOverride != "" {
+		resolved.Model = modelOverride
+	}
+
+	apiKey, err := resolved.ResolveKey()
+	if err != nil {
+		return nil, fmt.Errorf("eval: resolving API key for provider %q: %w", brand, err)
+	}
+	if resolved.NeedsKey() && apiKey == "" {
+		return nil, fmt.Errorf("eval: provider %q needs an API key; set %s (or configure api_key_cmd)", brand, resolved.APIKeyEnv)
+	}
+
+	prov, err := provider.NewFromProfile(resolved, apiKey, maxTokens, p)
+	if err != nil {
+		return nil, fmt.Errorf("eval: constructing provider %q: %w", brand, err)
+	}
+	return prov, nil
 }
 
 // concurrencyFor returns the Runner.Concurrency to use for a cell's limiter:
@@ -351,13 +513,13 @@ func concurrencyFor(limiter eval.Limiter) int {
 }
 
 // combinedMeta builds the report Meta for a multi-cell run: Provider/Model/
-// Variant become comma-joined summaries rather than silently picking the
+// Prompt become comma-joined summaries rather than silently picking the
 // last cell's, which would misrepresent a matrix run as single-provider.
 func combinedMeta(cells []cell, nPolicy string, ts time.Time) eval.Meta {
 	return eval.Meta{
 		Provider:  strings.Join(distinctProviders(cells), ","),
 		Model:     "(varies by provider — see per-row Model in -out JSON)",
-		Variant:   strings.Join(distinctVariants(cells), ","),
+		Prompt:    strings.Join(distinctPrompts(cells), ","),
 		NPolicy:   nPolicy,
 		Timestamp: ts,
 	}
@@ -371,16 +533,16 @@ func distinctProviders(cells []cell) []string {
 	return out
 }
 
-func distinctVariants(cells []cell) []string {
+func distinctPrompts(cells []cell) []string {
 	var out []string
 	for _, c := range cells {
-		out = appendUnique(out, c.Variant.Name)
+		out = appendUnique(out, c.PromptName)
 	}
 	return out
 }
 
 func countDistinctProviders(cells []cell) int { return len(distinctProviders(cells)) }
-func countDistinctVariants(cells []cell) int  { return len(distinctVariants(cells)) }
+func countDistinctPrompts(cells []cell) int   { return len(distinctPrompts(cells)) }
 
 // appendUnique appends v to ss unless it's already present, preserving
 // first-seen order — used to build the distinct provider/variant lists for
@@ -409,7 +571,7 @@ func splitCSV(s string) []string {
 // The terminal modes (-diff, -import, -judge-validate) exit before reaching
 // that code, so any of these being set alongside one is surfaced as an error
 // rather than silently dropped.
-var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "providers", "variants", "matrix", "model"}
+var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "providers", "prompts", "matrix", "model"}
 
 // setRunOnlyFlags returns which of runOnlyFlagNames were explicitly passed on
 // the command line, each rendered as "-name", in flag-declaration order.

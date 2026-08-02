@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/metrics"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
@@ -17,7 +18,7 @@ import (
 // returns an error (the Provider constructor signature added in T1).
 func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) provider.Provider {
 	t.Helper()
-	p, err := provider.NewOpenAI(baseURL, model, apiKey, maxTokens)
+	p, err := provider.NewOpenAI(baseURL, model, apiKey, maxTokens, prompt.ShippedFor("openai").(prompt.ChatPrompt))
 	if err != nil {
 		t.Fatalf("provider.NewOpenAI() err = %v, want nil", err)
 	}
@@ -202,10 +203,11 @@ type stubProvider struct {
 func (s stubProvider) Complete(ctx context.Context, req provider.Request) (provider.Completion, error) {
 	return s.completion, s.err
 }
-func (s stubProvider) Name() string  { return s.name }
-func (s stubProvider) Model() string { return s.model }
+func (s stubProvider) Name() string       { return s.name }
+func (s stubProvider) Model() string      { return s.model }
+func (s stubProvider) PromptName() string { return "chat-append" }
 func (s stubProvider) RenderPrompt(req provider.Request) string {
-	return provider.RenderChatPrompt(req)
+	return provider.RenderChatPrompt(prompt.ShippedFor("openai").(prompt.ChatPrompt).RenderChat(req.Req))
 }
 
 // TestLLM_StubProvider demonstrates the new seam: suggest.LLM works against

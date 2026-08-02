@@ -260,3 +260,6 @@ func (r ResolvedProfile) ResolveKey() (string, error) {
 	}
 	return "", nil
 }
+
+// NeedsKey reports whether this profile requires an API key.
+func (r ResolvedProfile) NeedsKey() bool { return r.APIKeyEnv != "" || r.APIKeyCmd != "" }

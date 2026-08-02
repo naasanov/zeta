@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
 // newAnthropicTestClient builds a Provider whose requests are aimed at srv
@@ -18,15 +19,18 @@ import (
 // constructor since NewAnthropic never sets a baseURL.
 func newAnthropicTestClient(t *testing.T, baseURL string) Provider {
 	t.Helper()
-	p, err := newAnthropicClient("test-model", "test-key", 48, baseURL)
+	p, err := newAnthropicClient("test-model", "test-key", 48, baseURL, prompt.ShippedFor("anthropic").(prompt.ChatPrompt))
 	if err != nil {
 		t.Fatalf("newAnthropicClient() err = %v, want nil", err)
 	}
 	return p
 }
 
-func testReqAnthropic(system, user string) Request {
-	return Request{Prompt: prompt.Prompt{System: system, Prefix: user}, MaxTokens: 48}
+// testReqAnthropic builds a provider.Request whose buffer renders into the
+// chat-append user turn; the mock servers in this file don't inspect the
+// request body, so only the buffer content is worth varying per test.
+func testReqAnthropic(buf string) Request {
+	return Request{Req: protocol.Request{Buf: buf}, MaxTokens: 48}
 }
 
 // sseEvent builds one SSE event with an explicit "event:" line: the SDK's
@@ -128,7 +132,7 @@ func TestAnthropicComplete_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	client := newAnthropicTestClient(t, srv.URL)
-	got, err := client.Complete(context.Background(), testReqAnthropic("sys", "git"))
+	got, err := client.Complete(context.Background(), testReqAnthropic("git"))
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -179,7 +183,7 @@ func TestAnthropicComplete_FirstLineCutoff(t *testing.T) {
 	client := newAnthropicTestClient(t, srv.URL)
 
 	start := time.Now()
-	got, err := client.Complete(context.Background(), testReqAnthropic("sys", "user"))
+	got, err := client.Complete(context.Background(), testReqAnthropic("user"))
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -222,7 +226,7 @@ func TestAnthropicComplete_Cancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Complete(ctx, testReqAnthropic("sys", "user"))
+		_, err := client.Complete(ctx, testReqAnthropic("user"))
 		errCh <- err
 	}()
 
@@ -250,7 +254,7 @@ func TestAnthropicComplete_HTTPError(t *testing.T) {
 			defer srv.Close()
 
 			client := newAnthropicTestClient(t, srv.URL)
-			got, err := client.Complete(context.Background(), testReqAnthropic("sys", "user"))
+			got, err := client.Complete(context.Background(), testReqAnthropic("user"))
 			if err == nil {
 				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got.Text)
 			}
@@ -301,7 +305,7 @@ func TestAnthropicComplete_UsageAndFinishReason(t *testing.T) {
 	defer srv.Close()
 
 	client := newAnthropicTestClient(t, srv.URL)
-	got, err := client.Complete(context.Background(), testReqAnthropic("sys", "user"))
+	got, err := client.Complete(context.Background(), testReqAnthropic("user"))
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -327,7 +331,8 @@ func TestAnthropicComplete_UsageAndFinishReason(t *testing.T) {
 }
 
 func TestAnthropic_NameAndModel(t *testing.T) {
-	p, err := NewAnthropic("", "test-key", 48)
+	anthropicPrompt := prompt.ShippedFor("anthropic").(prompt.ChatPrompt)
+	p, err := NewAnthropic("", "test-key", 48, anthropicPrompt)
 	if err != nil {
 		t.Fatalf("NewAnthropic() err = %v, want nil", err)
 	}
@@ -337,8 +342,11 @@ func TestAnthropic_NameAndModel(t *testing.T) {
 	if p.Model() != defaultAnthropicModel {
 		t.Errorf("Model() = %q, want default %q", p.Model(), defaultAnthropicModel)
 	}
+	if p.PromptName() != anthropicPrompt.Name() {
+		t.Errorf("PromptName() = %q, want %q", p.PromptName(), anthropicPrompt.Name())
+	}
 
-	p2, err := NewAnthropic("claude-opus-4-8", "test-key", 48)
+	p2, err := NewAnthropic("claude-opus-4-8", "test-key", 48, anthropicPrompt)
 	if err != nil {
 		t.Fatalf("NewAnthropic() err = %v, want nil", err)
 	}
@@ -348,14 +356,15 @@ func TestAnthropic_NameAndModel(t *testing.T) {
 }
 
 func TestAnthropic_RenderPrompt(t *testing.T) {
-	p, err := NewAnthropic("", "test-key", 48)
+	anthropicPrompt := prompt.ShippedFor("anthropic").(prompt.ChatPrompt)
+	p, err := NewAnthropic("", "test-key", 48, anthropicPrompt)
 	if err != nil {
 		t.Fatalf("NewAnthropic() err = %v, want nil", err)
 	}
-	req := Request{Prompt: prompt.Prompt{System: "sys", Instruction: "do it: ", Prefix: "git sta"}}
+	req := Request{Req: protocol.Request{Buf: "git sta"}}
 
 	got := p.RenderPrompt(req)
-	want := RenderChatPrompt(req)
+	want := RenderChatPrompt(anthropicPrompt.RenderChat(req.Req))
 	if got != want {
 		t.Errorf("RenderPrompt() = %q, want %q (RenderChatPrompt output)", got, want)
 	}

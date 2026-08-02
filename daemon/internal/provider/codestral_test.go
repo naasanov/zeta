@@ -8,16 +8,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
+
+// shippedFIMPrompt is the prompt every test constructs a codestralClient
+// with — RenderFIM's own shape (comments/history/marker) is prompt
+// package's responsibility and tested there, not here.
+func shippedFIMPrompt(t *testing.T) prompt.FIMPrompt {
+	t.Helper()
+	p, err := prompt.ByName("fim-transcript-marker")
+	if err != nil {
+		t.Fatalf("prompt.ByName(fim-transcript-marker): %v", err)
+	}
+	fp, ok := p.(prompt.FIMPrompt)
+	if !ok {
+		t.Fatalf("prompt %q is not FIM-shaped", p.Name())
+	}
+	return fp
+}
 
 func newCodestral(t *testing.T, baseURL, model, apiKey string, maxTokens int) Provider {
 	t.Helper()
-	p, err := NewCodestral(baseURL, model, apiKey, maxTokens)
+	p, err := NewCodestral(baseURL, model, apiKey, maxTokens, shippedFIMPrompt(t))
 	if err != nil {
 		t.Fatalf("NewCodestral() err = %v, want nil", err)
 	}
@@ -61,7 +77,7 @@ func TestComplete_Codestral_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
-	req := Request{Prompt: prompt.Prompt{Prefix: "git"}, MaxTokens: 48}
+	req := Request{Req: protocol.Request{Buf: "git"}, MaxTokens: 48}
 	got, err := client.Complete(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
@@ -119,7 +135,7 @@ func TestComplete_Codestral_FirstLineCutoff(t *testing.T) {
 	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
 
 	start := time.Now()
-	got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
+	got, err := client.Complete(context.Background(), Request{Req: protocol.Request{Buf: "user"}, MaxTokens: 48})
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -158,7 +174,7 @@ func TestComplete_Codestral_Cancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Complete(ctx, Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
+		_, err := client.Complete(ctx, Request{Req: protocol.Request{Buf: "user"}, MaxTokens: 48})
 		errCh <- err
 	}()
 
@@ -185,7 +201,7 @@ func TestComplete_Codestral_HTTPError(t *testing.T) {
 			defer srv.Close()
 
 			client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
-			got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
+			got, err := client.Complete(context.Background(), Request{Req: protocol.Request{Buf: "user"}, MaxTokens: 48})
 			if err == nil {
 				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got.Text)
 			}
@@ -223,7 +239,7 @@ func TestComplete_Codestral_UsageAndFinishReason(t *testing.T) {
 	defer srv.Close()
 
 	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
-	got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "user"}, MaxTokens: 48})
+	got, err := client.Complete(context.Background(), Request{Req: protocol.Request{Buf: "user"}, MaxTokens: 48})
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -251,7 +267,7 @@ func TestComplete_Codestral_UsageAndFinishReason(t *testing.T) {
 // TestNewCodestral_Defaults asserts the empty-value defaults: baseURL
 // "https://api.mistral.ai", model "codestral-latest".
 func TestNewCodestral_Defaults(t *testing.T) {
-	p, err := NewCodestral("", "", "test-key", 48)
+	p, err := NewCodestral("", "", "test-key", 48, shippedFIMPrompt(t))
 	if err != nil {
 		t.Fatalf("NewCodestral() err = %v, want nil", err)
 	}
@@ -261,229 +277,27 @@ func TestNewCodestral_Defaults(t *testing.T) {
 	if p.Model() != "codestral-latest" {
 		t.Errorf("Model() = %q, want %q", p.Model(), "codestral-latest")
 	}
+	if p.PromptName() != "fim-transcript-marker" {
+		t.Errorf("PromptName() = %q, want %q", p.PromptName(), "fim-transcript-marker")
+	}
 	c := p.(*codestralClient)
 	if c.baseURL != "https://api.mistral.ai" {
 		t.Errorf("baseURL = %q, want %q", c.baseURL, "https://api.mistral.ai")
 	}
 }
 
-// TestRenderFIM_ContextPresent pins the target shape: context lines
-// re-rendered as "#"-prefixed shell comments, in order, buffer last, no
-// trailing newline.
-func TestRenderFIM_ContextPresent(t *testing.T) {
-	p := prompt.Prompt{
-		System:      "system prompt text",
-		Instruction: "instruction text",
-		Context:     "Context:\n- cwd: /Users/x/proj\n- git: branch main (dirty)\n\n",
-		Prefix:      "git com",
-		Suffix:      "",
-	}
-	gotPrompt, gotSuffix := RenderFIM(p)
-	want := "# cwd: /Users/x/proj\n# git: branch main (dirty)\n$ git com"
-	if gotPrompt != want {
-		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
-	}
-	if gotSuffix != "" {
-		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)
-	}
-}
-
-// TestRenderFIM_PromptMarkerIsTheDefault guards the shipped shape: "$ " on
-// every history line AND the cursor line, ambient comments left unmarked,
-// history/cursor contiguous. The cursor line must NOT be a bare newline —
-// that shape let the model continue "git push" instead of predicting new.
-func TestRenderFIM_PromptMarkerIsTheDefault(t *testing.T) {
-	p := prompt.Prompt{
-		Context: "Context:\n- cwd: /x/proj\n\n",
-		History: []string{"git status", "git push"},
-		Prefix:  "",
-	}
-	gotPrompt, _ := RenderFIM(p)
-	want := "# cwd: /x/proj\n$ git status\n$ git push\n$ "
-	if gotPrompt != want {
-		t.Errorf("RenderFIM() = %q, want %q", gotPrompt, want)
-	}
-	if strings.HasSuffix(gotPrompt, "git push\n") {
-		t.Error("RenderFIM() ends right after the last history line — the A9 shape")
-	}
-}
-
-// TestRenderFIM_TypingKeepsPrefixOnMarkedLine confirms the marker precedes a
-// non-empty buffer too, so typing mode sees the same transcript shape rather
-// than a bare line.
-func TestRenderFIM_TypingKeepsPrefixOnMarkedLine(t *testing.T) {
-	p := prompt.Prompt{History: []string{"git status"}, Prefix: "git com"}
-	gotPrompt, _ := RenderFIM(p)
-	want := "$ git status\n$ git com"
-	if gotPrompt != want {
-		t.Errorf("RenderFIM() = %q, want %q", gotPrompt, want)
-	}
-}
-
-// TestRenderFIMNoPromptMarker pins the pre-A9 baseline shape, kept so the
-// marker decision stays measurable.
-func TestRenderFIMNoPromptMarker(t *testing.T) {
-	p := prompt.Prompt{History: []string{"git status", "git push"}}
-	gotPrompt, _ := RenderFIMNoPromptMarker(p)
-	want := "git status\ngit push\n"
-	if gotPrompt != want {
-		t.Errorf("RenderFIMNoPromptMarker() = %q, want %q", gotPrompt, want)
-	}
-}
-
-// TestRenderFIMExitCodeAlways pins that the exit line lands BETWEEN history
-// and the cursor (not with the ambient comments) and is emitted at 0, which
-// prompt.contextBlock omits.
-func TestRenderFIMExitCodeAlways(t *testing.T) {
-	p := prompt.Prompt{
-		Context:  "Context:\n- cwd: /x/proj\n\n",
-		History:  []string{"git status", "git push"},
-		LastExit: 0,
-	}
-	gotPrompt, _ := RenderFIMExitCodeAlways(p)
-	want := "# cwd: /x/proj\n$ git status\n$ git push\n# exit: 0\n$ "
-	if gotPrompt != want {
-		t.Errorf("RenderFIMExitCodeAlways() = %q, want %q", gotPrompt, want)
-	}
-}
-
-func TestRenderFIMExitCodeAlways_NonZero(t *testing.T) {
-	p := prompt.Prompt{History: []string{"go build ./..."}, LastExit: 1}
-	gotPrompt, _ := RenderFIMExitCodeAlways(p)
-	want := "$ go build ./...\n# exit: 1\n$ "
-	if gotPrompt != want {
-		t.Errorf("RenderFIMExitCodeAlways() = %q, want %q", gotPrompt, want)
-	}
-}
-
-// TestWithFIMRenderer confirms the option reaches Complete's rendering path
-// (via RenderPrompt, which uses the same c.render), and a nil renderer leaves
-// the shipped default in place.
-func TestWithFIMRenderer(t *testing.T) {
-	req := Request{Prompt: prompt.Prompt{History: []string{"git push"}}}
-
-	custom := newCodestralWith(t, WithFIMRenderer(RenderFIMNoPromptMarker))
-	if got, want := custom.RenderPrompt(req), "git push\n"; got != want {
-		t.Errorf("with custom renderer: RenderPrompt() = %q, want %q", got, want)
-	}
-
-	nilOpt := newCodestralWith(t, WithFIMRenderer(nil))
-	if got, want := nilOpt.RenderPrompt(req), "$ git push\n$ "; got != want {
-		t.Errorf("with nil renderer: RenderPrompt() = %q, want the default %q", got, want)
-	}
-}
-
-func newCodestralWith(t *testing.T, opts ...CodestralOption) Provider {
-	t.Helper()
-	p, err := NewCodestral("http://unused", "test-model", "test-key", 48, opts...)
-	if err != nil {
-		t.Fatalf("NewCodestral() err = %v, want nil", err)
-	}
-	return p
-}
-
 // TestCodestral_RenderPrompt pins the two RenderPrompt shapes: an empty
 // suffix (today's only real case) omits the SUFFIX: section; a non-empty one
-// (the unused FIM infill hook) adds it.
+// (the unused FIM infill hook) adds it — protocol.Request carries no cursor
+// position, so a non-empty suffix only ever comes from a prompt built for it.
 func TestCodestral_RenderPrompt(t *testing.T) {
 	client := newCodestral(t, "http://unused", "test-model", "test-key", 48)
 
-	t.Run("empty suffix", func(t *testing.T) {
-		req := Request{Prompt: prompt.Prompt{Prefix: "git com"}}
-		got := client.RenderPrompt(req)
-		if got != "$ git com" {
-			t.Errorf("RenderPrompt() = %q, want %q (no SUFFIX: section)", got, "$ git com")
-		}
-	})
-
-	t.Run("non-empty suffix", func(t *testing.T) {
-		req := Request{Prompt: prompt.Prompt{Prefix: "git com", Suffix: "mit"}}
-		got := client.RenderPrompt(req)
-		want := "PROMPT:\n$ git com\n\nSUFFIX:\nmit"
-		if got != want {
-			t.Errorf("RenderPrompt() = %q, want %q", got, want)
-		}
-	})
-}
-
-// TestRenderFIM_HistoryRenderedRaw pins the FIM raw-history contract: History
-// entries are rendered as raw, uncommented command lines (not "#"-prefixed),
-// contiguous with the buffer, and the ambient context block's own
-// recent-commands line is skipped (not double-rendered as a comment).
-// Ordering must be ambient-comments -> raw-history -> prefix.
-func TestRenderFIM_HistoryRenderedRaw(t *testing.T) {
-	p := prompt.Prompt{
-		Context: "Context:\n- cwd: /Users/x/project\n- git: branch main (dirty)\n- last command failed (exit 1)\n- recent commands: git add .; git commit -m \"wip\"; git status\n\n",
-		Prefix:  "git com",
-		History: []string{"git add .", "git commit -m \"wip\"", "git status"},
-	}
-	gotPrompt, gotSuffix := RenderFIM(p)
-	want := "# cwd: /Users/x/project\n# git: branch main (dirty)\n# last command failed (exit 1)\n" +
-		"$ git add .\n$ git commit -m \"wip\"\n$ git status\n" +
-		"$ git com"
-	if gotPrompt != want {
-		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
-	}
-	if gotSuffix != "" {
-		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)
-	}
-	if strings.Contains(gotPrompt, "# recent commands") {
-		t.Errorf("RenderFIM() prompt unexpectedly comments the recent-commands line: %q", gotPrompt)
-	}
-}
-
-// TestRenderFIM_NoHistoryJustAmbientContext checks that with no history but
-// present ambient context, output is just the comment lines plus the prefix
-// (no stray blank raw-history section).
-func TestRenderFIM_NoHistoryJustAmbientContext(t *testing.T) {
-	p := prompt.Prompt{
-		Context: "Context:\n- cwd: /tmp\n\n",
-		Prefix:  "git com",
-		History: nil,
-	}
-	gotPrompt, _ := RenderFIM(p)
-	want := "# cwd: /tmp\n$ git com"
-	if gotPrompt != want {
-		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, want)
-	}
-}
-
-// TestRenderFIM_ContextAbsent checks the empty-context case is just the
-// buffer, with no stray comment lines or leading newline.
-func TestRenderFIM_ContextAbsent(t *testing.T) {
-	p := prompt.Prompt{
-		System:      "system prompt text",
-		Instruction: "instruction text",
-		Context:     "",
-		Prefix:      "git com",
-		Suffix:      "",
-	}
-	gotPrompt, gotSuffix := RenderFIM(p)
-	if gotPrompt != "$ git com" {
-		t.Errorf("RenderFIM() prompt = %q, want %q", gotPrompt, "$ git com")
-	}
-	if gotSuffix != "" {
-		t.Errorf("RenderFIM() suffix = %q, want empty", gotSuffix)
-	}
-}
-
-// TestRenderFIM_ExcludesSystemAndInstruction asserts System/Instruction never
-// leak into the FIM prompt — a FIM model takes no system role and doesn't
-// need the chat append-contract text.
-func TestRenderFIM_ExcludesSystemAndInstruction(t *testing.T) {
-	p := prompt.Prompt{
-		System:      "UNIQUE_SYSTEM_MARKER",
-		Instruction: "UNIQUE_INSTRUCTION_MARKER",
-		Context:     "Context:\n- cwd: /tmp\n\n",
-		Prefix:      "git",
-		Suffix:      "",
-	}
-	gotPrompt, _ := RenderFIM(p)
-	if strings.Contains(gotPrompt, "UNIQUE_SYSTEM_MARKER") {
-		t.Errorf("RenderFIM() prompt unexpectedly contains System text: %q", gotPrompt)
-	}
-	if strings.Contains(gotPrompt, "UNIQUE_INSTRUCTION_MARKER") {
-		t.Errorf("RenderFIM() prompt unexpectedly contains Instruction text: %q", gotPrompt)
+	req := Request{Req: protocol.Request{Buf: "git com"}}
+	got := client.RenderPrompt(req)
+	want := "$ git com"
+	if got != want {
+		t.Errorf("RenderPrompt() = %q, want %q", got, want)
 	}
 }
 
@@ -560,16 +374,16 @@ func TestFirstShellCommand(t *testing.T) {
 }
 
 // TestComplete_Codestral_LeadingSpaceByMode drives Complete end-to-end to
-// prove req.Prompt.Prefix selects typing vs next-command mode: non-empty
-// preserves the model's leading space, empty strips it.
+// prove req.Req.Buf selects typing vs next-command mode: non-empty preserves
+// the model's leading space, empty strips it.
 func TestComplete_Codestral_LeadingSpaceByMode(t *testing.T) {
 	tests := []struct {
-		name   string
-		prefix string
-		want   string
+		name string
+		buf  string
+		want string
 	}{
-		{"non-empty prefix (typing mode) preserves leading space", "git add", " ."},
-		{"empty prefix (next-command mode) strips leading space", "", "."},
+		{"non-empty buffer (typing mode) preserves leading space", "git add", " ."},
+		{"empty buffer (next-command mode) strips leading space", "", "."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -584,7 +398,7 @@ func TestComplete_Codestral_LeadingSpaceByMode(t *testing.T) {
 			defer srv.Close()
 
 			client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
-			got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: tt.prefix}, MaxTokens: 48})
+			got, err := client.Complete(context.Background(), Request{Req: protocol.Request{Buf: tt.buf}, MaxTokens: 48})
 			if err != nil {
 				t.Fatalf("Complete() err = %v, want nil", err)
 			}
@@ -646,7 +460,7 @@ func TestComplete_Codestral_SeparatorCutoff(t *testing.T) {
 
 	client := newCodestral(t, srv.URL, "test-model", "test-key", 48)
 	start := time.Now()
-	got, err := client.Complete(context.Background(), Request{Prompt: prompt.Prompt{Prefix: "mkdir"}, MaxTokens: 48})
+	got, err := client.Complete(context.Background(), Request{Req: protocol.Request{Buf: "mkdir"}, MaxTokens: 48})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)

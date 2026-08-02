@@ -21,7 +21,7 @@ func TestMain(m *testing.M) {
 func sampleResults() []CaseResult {
 	return []CaseResult{
 		{
-			CaseID: "A1", Category: "syntax", Provider: "codestral", Model: "codestral-1", Variant: "prompt.Build",
+			CaseID: "A1", Category: "syntax", Provider: "codestral", Model: "codestral-1", PromptName: "fim-transcript-marker",
 			Runs: 3, Errors: 0,
 			Samples: []Sample{{Output: "ok"}, {Output: "&& bad"}, {Output: "ok"}},
 			Asserts: []AssertionResult{
@@ -29,7 +29,7 @@ func sampleResults() []CaseResult {
 			},
 		},
 		{
-			CaseID: "E1", Category: "context", Provider: "codestral", Model: "codestral-1", Variant: "prompt.Build",
+			CaseID: "E1", Category: "context", Provider: "codestral", Model: "codestral-1", PromptName: "fim-transcript-marker",
 			Runs: 10, Errors: 0,
 			Samples: []Sample{{Output: "commit"}},
 			Asserts: []AssertionResult{
@@ -41,7 +41,7 @@ func sampleResults() []CaseResult {
 
 func TestText_TripWireAppearsWithOffendingOutput(t *testing.T) {
 	var buf bytes.Buffer
-	meta := Meta{Provider: "codestral", Model: "codestral-1", Variant: "prompt.Build", NPolicy: "adaptive(min=3,max=10)", Timestamp: time.Now()}
+	meta := Meta{Provider: "codestral", Model: "codestral-1", Prompt: "fim-transcript-marker", NPolicy: "adaptive(min=3,max=10)", Timestamp: time.Now()}
 	if err := Text(&buf, sampleResults(), meta); err != nil {
 		t.Fatalf("Text: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestText_NeverEvaluatedIncludesGraderErrorReason(t *testing.T) {
 }
 
 func TestJSON_RoundTrips(t *testing.T) {
-	meta := Meta{Provider: "codestral", Model: "codestral-1", Variant: "prompt.Build", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
+	meta := Meta{Provider: "codestral", Model: "codestral-1", Prompt: "fim-transcript-marker", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
 	results := sampleResults()
 
 	var buf bytes.Buffer
@@ -118,7 +118,7 @@ func TestJSON_RoundTrips(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if got.Meta.Provider != meta.Provider || got.Meta.Model != meta.Model || got.Meta.Variant != meta.Variant || got.Meta.NPolicy != meta.NPolicy {
+	if got.Meta.Provider != meta.Provider || got.Meta.Model != meta.Model || got.Meta.Prompt != meta.Prompt || got.Meta.NPolicy != meta.NPolicy {
 		t.Fatalf("meta mismatch: got %+v, want %+v", got.Meta, meta)
 	}
 	if !got.Meta.Timestamp.Equal(meta.Timestamp) {
@@ -133,9 +133,9 @@ func TestJSON_RoundTrips(t *testing.T) {
 }
 
 func TestPrettyJSON_RendersLiteralNewlines(t *testing.T) {
-	meta := Meta{Provider: "codestral", Model: "codestral-1", Variant: "prompt.Build", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
+	meta := Meta{Provider: "codestral", Model: "codestral-1", Prompt: "fim-transcript-marker", NPolicy: "fixed=5", Timestamp: time.Now().Truncate(time.Second)}
 	results := sampleResults()
-	results[0].Prompt = "line one\nline two"
+	results[0].RenderedPrompt = "line one\nline two"
 
 	var buf bytes.Buffer
 	if err := PrettyJSON(&buf, results, meta); err != nil {
@@ -187,10 +187,10 @@ func TestSample_JSONRoundTripsOutput(t *testing.T) {
 // run printed every case ID twice with nothing distinguishing the rows — the
 // comparison the harness exists to produce was the one thing unreadable.
 func TestText_PivotsCellsIntoColumns(t *testing.T) {
-	mk := func(provider, variant string, present, graded int, pass bool) CaseResult {
+	mk := func(provider, prompt string, present, graded int, pass bool) CaseResult {
 		return CaseResult{
 			CaseID: "A3", Category: "syntax",
-			Provider: provider, Variant: variant, Runs: graded,
+			Provider: provider, PromptName: prompt, Runs: graded,
 			Asserts: []AssertionResult{{
 				Label: "supplies-leading-space", Polarity: Must, Threshold: 0.8,
 				Present: present, Graded: graded, Pass: pass,
@@ -234,7 +234,7 @@ func TestText_PivotsCellsIntoColumns(t *testing.T) {
 func TestText_FooterReportsP50LatencyPerCell(t *testing.T) {
 	results := []CaseResult{
 		{
-			CaseID: "A1", Category: "syntax", Provider: "codestral", Variant: "default", Runs: 3,
+			CaseID: "A1", Category: "syntax", Provider: "codestral", PromptName: "default", Runs: 3,
 			Samples: []Sample{
 				{Output: "ok", TTFT: 100 * time.Millisecond},
 				{Output: "ok", TTFT: 200 * time.Millisecond},
@@ -243,7 +243,7 @@ func TestText_FooterReportsP50LatencyPerCell(t *testing.T) {
 			Asserts: []AssertionResult{{Label: "a", Polarity: Measure, Present: 3, Graded: 3, Pass: true}},
 		},
 		{
-			CaseID: "A2", Category: "syntax", Provider: "groq", Variant: "default", Runs: 0, Errors: 1,
+			CaseID: "A2", Category: "syntax", Provider: "groq", PromptName: "default", Runs: 0, Errors: 1,
 			Samples: []Sample{{Err: errBoom}},
 			Asserts: []AssertionResult{{Label: "a", Polarity: Measure, Graded: 0}},
 		},
@@ -271,7 +271,7 @@ func TestText_FooterReportsP50LatencyPerCell(t *testing.T) {
 // that trips on all of them.
 func TestText_TripWireNamesTheCell(t *testing.T) {
 	results := []CaseResult{{
-		CaseID: "A2", Category: "syntax", Provider: "groq", Variant: "default", Runs: 3,
+		CaseID: "A2", Category: "syntax", Provider: "groq", PromptName: "default", Runs: 3,
 		Asserts: []AssertionResult{{
 			Label: "double-space", Polarity: TripWire,
 			Present: 1, Graded: 3, Pass: false, FirstOffending: "  status",

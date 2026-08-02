@@ -11,18 +11,19 @@ import (
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// testReq builds a provider.Request whose ChatUser() renders to exactly
-// user, for tests that only care about the flat system/user strings that
-// today's Complete(ctx, system, user) used to take.
-func testReq(system, user string) Request {
-	return Request{Prompt: prompt.Prompt{System: system, Prefix: user}, MaxTokens: 48}
+// testReq builds a provider.Request whose buffer renders into the chat-append
+// user turn; the mock servers in this file don't inspect the request body,
+// so only the buffer content is worth varying per test.
+func testReq(buf string) Request {
+	return Request{Req: protocol.Request{Buf: buf}, MaxTokens: 48}
 }
 
 func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) Provider {
 	t.Helper()
-	p, err := NewOpenAI(baseURL, model, apiKey, maxTokens)
+	p, err := NewOpenAI(baseURL, model, apiKey, maxTokens, prompt.ShippedFor("openai").(prompt.ChatPrompt))
 	if err != nil {
 		t.Fatalf("NewOpenAI() err = %v, want nil", err)
 	}
@@ -60,7 +61,7 @@ func TestComplete_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
-	got, err := client.Complete(context.Background(), testReq("sys", "git"))
+	got, err := client.Complete(context.Background(), testReq("git"))
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -103,7 +104,7 @@ func TestComplete_FirstLineCutoff(t *testing.T) {
 	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
 
 	start := time.Now()
-	got, err := client.Complete(context.Background(), testReq("sys", "user"))
+	got, err := client.Complete(context.Background(), testReq("user"))
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -142,7 +143,7 @@ func TestComplete_Cancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Complete(ctx, testReq("sys", "user"))
+		_, err := client.Complete(ctx, testReq("user"))
 		errCh <- err
 	}()
 
@@ -173,7 +174,7 @@ func TestComplete_HTTPError(t *testing.T) {
 			defer srv.Close()
 
 			client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
-			got, err := client.Complete(context.Background(), testReq("sys", "user"))
+			got, err := client.Complete(context.Background(), testReq("user"))
 			if err == nil {
 				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got.Text)
 			}
@@ -204,7 +205,7 @@ func TestComplete_UsageAndFinishReason(t *testing.T) {
 	defer srv.Close()
 
 	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
-	got, err := client.Complete(context.Background(), testReq("sys", "user"))
+	got, err := client.Complete(context.Background(), testReq("user"))
 	if err != nil {
 		t.Fatalf("Complete() err = %v, want nil", err)
 	}
@@ -231,11 +232,18 @@ func TestComplete_UsageAndFinishReason(t *testing.T) {
 
 func TestOpenAI_RenderPrompt(t *testing.T) {
 	client := newOpenAI(t, "http://unused", "test-model", "test-key", 48)
-	req := testReq("sys", "user")
+	req := testReq("user")
 
 	got := client.RenderPrompt(req)
-	want := RenderChatPrompt(req)
+	want := RenderChatPrompt(prompt.ShippedFor("openai").(prompt.ChatPrompt).RenderChat(req.Req))
 	if got != want {
 		t.Errorf("RenderPrompt() = %q, want %q (RenderChatPrompt output)", got, want)
+	}
+}
+
+func TestOpenAI_PromptName(t *testing.T) {
+	client := newOpenAI(t, "http://unused", "test-model", "test-key", 48)
+	if got, want := client.PromptName(), "chat-append"; got != want {
+		t.Errorf("PromptName() = %q, want %q", got, want)
 	}
 }
