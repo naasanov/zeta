@@ -4,6 +4,12 @@
 *.test
 *.out
 
+# Stray binaries from `go build ./cmd/X` run inside daemon/ (the Makefile
+# targets bin/ instead). Untracked deliberately — one was committed and grew
+# to 50MB before anyone noticed.
+/daemon/autopilotd
+/daemon/eval
+
 # Go
 daemon/vendor/
 
