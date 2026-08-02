@@ -65,6 +65,12 @@ typeset -gi ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL=14400
 (( ! ${+ZSH_AUTOPILOT_INSTALL_URL} )) &&
 typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/zeta/main/scripts/install.sh
 
+# Key sequence bound to autopilot-flag (METRICS §12). Empty disables the
+# default binding. ^Xf is unbound in the stock zsh emacs keymap (unlike
+# Alt-f/^[f, which is forward-word).
+(( ! ${+ZSH_AUTOPILOT_FLAG_KEY} )) &&
+typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
+
 # Number of recent commands kept for the "history" context field sent with
 # each request (oldest first). Bounded — this rides along on every keystroke
 # burst, not just next-command requests, so keep it reasonable.
@@ -470,6 +476,14 @@ _zsh_autopilot_partial_accept() {
   return $retval
 }
 
+# METRICS(§12): flag the on-screen suggestion as a bad-output eval candidate.
+# Must not touch BUFFER/POSTDISPLAY or emit an `outcome` — flagging isn't a
+# thing the user did with the suggestion, so it must stay on screen.
+_zsh_autopilot_flag() {
+  whence -w _zsh_autopilot_metric_flag &>/dev/null && _zsh_autopilot_metric_flag
+  return 0
+}
+
 () {
   typeset -ga _ZSH_AUTOPILOT_BUILTIN_ACTIONS
 
@@ -478,11 +492,16 @@ _zsh_autopilot_partial_accept() {
   # rest are here so users can bind keys directly to them. `modify` and
   # `partial_accept` deliberately get widget *functions* (below) but no ZLE
   # widget — they are invoked through the bind trampoline, not by name.
+  #
+  # Also doubles as the ignore list in _zsh_autopilot_bind_widgets
+  # (20_bind.zsh) — omitting an autopilot widget here gets it rebound as
+  # `modify`, clearing the suggestion whenever it's invoked.
   _ZSH_AUTOPILOT_BUILTIN_ACTIONS=(
     clear
     suggest
     accept
     execute
+    flag # METRICS(§12)
   )
 
   local action
@@ -506,6 +525,9 @@ _zsh_autopilot_partial_accept() {
   for action in $_ZSH_AUTOPILOT_BUILTIN_ACTIONS; do
     zle -N autopilot-$action _zsh_autopilot_widget_$action
   done
+
+  # METRICS(§12): default keybinding, opt out via ZSH_AUTOPILOT_FLAG_KEY=''.
+  [[ -n $ZSH_AUTOPILOT_FLAG_KEY ]] && bindkey $ZSH_AUTOPILOT_FLAG_KEY autopilot-flag
 }
 
 #--------------------------------------------------------------------#
@@ -1072,6 +1094,34 @@ _zsh_autopilot_metric_executed() {
   _zsh_autopilot_json_escape "$request_id"
 
   _zsh_autopilot_metrics_send '{"v":1,"event":"executed","request_id":"'${REPLY}'","ts":'${ts_fmt}'}'
+}
+
+# Marks the current request as a bad-output eval candidate. A pointer row
+# only (no buf/suggestion text — join on request_id against "request" rows,
+# see CLAUDE.md "Metrics"). Falls back to REQ_ID when nothing is painted,
+# since an empty reply is itself worth flagging. Does NOT clear
+# _ZSH_AUTOPILOT_SHOWN_ID — flagging isn't an outcome and must not consume it.
+_zsh_autopilot_metric_flag() {
+  if ! _zsh_autopilot_metrics_enabled; then
+    zle -M "autopilot: metrics disabled, nothing flagged (unset ZSH_AUTOPILOT_METRICS)"
+    return 0
+  fi
+
+  local request_id=${_ZSH_AUTOPILOT_SHOWN_ID:-$_ZSH_AUTOPILOT_REQ_ID}
+  if [[ -z $request_id ]]; then
+    zle -M "autopilot: nothing to flag"
+    return 0
+  fi
+
+  local ts_fmt REPLY
+  ts_fmt=$(printf '%.3f' $EPOCHREALTIME)
+  _zsh_autopilot_json_escape "$request_id"
+
+  if _zsh_autopilot_metrics_send '{"v":1,"event":"flag","request_id":"'${REPLY}'","ts":'${ts_fmt}'}'; then
+    zle -M "autopilot: flagged $request_id"
+  else
+    zle -M "autopilot: flag failed (metrics collector down?)"
+  fi
 }
 
 #--------------------------------------------------------------------#

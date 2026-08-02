@@ -187,3 +187,31 @@ _zsh_autopilot_metric_executed() {
 
   _zsh_autopilot_metrics_send '{"v":1,"event":"executed","request_id":"'${REPLY}'","ts":'${ts_fmt}'}'
 }
+
+# Marks the current request as a bad-output eval candidate. A pointer row
+# only (no buf/suggestion text — join on request_id against "request" rows,
+# see CLAUDE.md "Metrics"). Falls back to REQ_ID when nothing is painted,
+# since an empty reply is itself worth flagging. Does NOT clear
+# _ZSH_AUTOPILOT_SHOWN_ID — flagging isn't an outcome and must not consume it.
+_zsh_autopilot_metric_flag() {
+  if ! _zsh_autopilot_metrics_enabled; then
+    zle -M "autopilot: metrics disabled, nothing flagged (unset ZSH_AUTOPILOT_METRICS)"
+    return 0
+  fi
+
+  local request_id=${_ZSH_AUTOPILOT_SHOWN_ID:-$_ZSH_AUTOPILOT_REQ_ID}
+  if [[ -z $request_id ]]; then
+    zle -M "autopilot: nothing to flag"
+    return 0
+  fi
+
+  local ts_fmt REPLY
+  ts_fmt=$(printf '%.3f' $EPOCHREALTIME)
+  _zsh_autopilot_json_escape "$request_id"
+
+  if _zsh_autopilot_metrics_send '{"v":1,"event":"flag","request_id":"'${REPLY}'","ts":'${ts_fmt}'}'; then
+    zle -M "autopilot: flagged $request_id"
+  else
+    zle -M "autopilot: flag failed (metrics collector down?)"
+  fi
+}

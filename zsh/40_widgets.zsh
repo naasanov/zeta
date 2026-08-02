@@ -196,6 +196,14 @@ _zsh_autopilot_partial_accept() {
   return $retval
 }
 
+# METRICS(§12): flag the on-screen suggestion as a bad-output eval candidate.
+# Must not touch BUFFER/POSTDISPLAY or emit an `outcome` — flagging isn't a
+# thing the user did with the suggestion, so it must stay on screen.
+_zsh_autopilot_flag() {
+  whence -w _zsh_autopilot_metric_flag &>/dev/null && _zsh_autopilot_metric_flag
+  return 0
+}
+
 () {
   typeset -ga _ZSH_AUTOPILOT_BUILTIN_ACTIONS
 
@@ -204,11 +212,16 @@ _zsh_autopilot_partial_accept() {
   # rest are here so users can bind keys directly to them. `modify` and
   # `partial_accept` deliberately get widget *functions* (below) but no ZLE
   # widget — they are invoked through the bind trampoline, not by name.
+  #
+  # Also doubles as the ignore list in _zsh_autopilot_bind_widgets
+  # (20_bind.zsh) — omitting an autopilot widget here gets it rebound as
+  # `modify`, clearing the suggestion whenever it's invoked.
   _ZSH_AUTOPILOT_BUILTIN_ACTIONS=(
     clear
     suggest
     accept
     execute
+    flag # METRICS(§12)
   )
 
   local action
@@ -232,4 +245,7 @@ _zsh_autopilot_partial_accept() {
   for action in $_ZSH_AUTOPILOT_BUILTIN_ACTIONS; do
     zle -N autopilot-$action _zsh_autopilot_widget_$action
   done
+
+  # METRICS(§12): default keybinding, opt out via ZSH_AUTOPILOT_FLAG_KEY=''.
+  [[ -n $ZSH_AUTOPILOT_FLAG_KEY ]] && bindkey $ZSH_AUTOPILOT_FLAG_KEY autopilot-flag
 }

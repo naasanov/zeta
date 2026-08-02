@@ -38,6 +38,12 @@ typeset -gi ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL=14400
 (( ! ${+ZSH_AUTOPILOT_INSTALL_URL} )) &&
 typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/zeta/main/scripts/install.sh
 
+# Key sequence bound to autopilot-flag (METRICS §12). Empty disables the
+# default binding. ^Xf is unbound in the stock zsh emacs keymap (unlike
+# Alt-f/^[f, which is forward-word).
+(( ! ${+ZSH_AUTOPILOT_FLAG_KEY} )) &&
+typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
+
 # Number of recent commands kept for the "history" context field sent with
 # each request (oldest first). Bounded — this rides along on every keystroke
 # burst, not just next-command requests, so keep it reasonable.
