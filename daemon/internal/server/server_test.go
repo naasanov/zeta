@@ -46,12 +46,9 @@ func startServer(t *testing.T, path string) (cancel context.CancelFunc, done <-c
 }
 
 // startServerWithSuggest is like startServer but lets the caller install a
-// controlled suggest stub (overriding the default instant-echo one) before
-// the server starts accepting connections. Passing nil keeps the default.
-// This is the seam the coordinator tests use to create deterministic
-// cancellation windows: a stub that blocks on ctx (or a per-request channel)
-// instead of an LLM call. The server's debounce is set to testDebounce (much
-// shorter than the production default) so these tests stay fast.
+// controlled suggest stub before the server starts accepting connections
+// (nil keeps the default) — the seam the coordinator tests use to create
+// deterministic cancellation windows. Debounce is set to testDebounce.
 func startServerWithSuggest(t *testing.T, path string, suggest func(ctx context.Context, req protocol.Request) (protocol.Reply, error)) (cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -188,15 +185,9 @@ func TestShutdownRemovesSocket(t *testing.T) {
 	}
 }
 
-// TestSupersedeCancelsInFlightRequest forces the coordinator's core race: it
-// dispatches request "A" whose stub suggester blocks on <-ctx.Done() (so A
-// only completes once cancelled), waits for A to actually start, then
-// dispatches "B" on the same connection. If the coordinator's supersede logic
-// (currentRequest.cancel invoked before installing the new slot) is missing
-// or wrong, A's ctx is never cancelled and this test times out waiting on the
-// cancelled channel. Then it asserts the reply that comes back is B's, not
-// A's (A observes ctx.Err() and skips its write, per the "cancelled requests
-// don't write" invariant).
+// TestSupersedeCancelsInFlightRequest dispatches A (blocks until cancelled),
+// then B on the same connection, and asserts A's ctx is cancelled and only
+// B's reply is written (A must observe ctx.Err() and skip its write).
 func TestSupersedeCancelsInFlightRequest(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -266,11 +257,8 @@ func TestSupersedeCancelsInFlightRequest(t *testing.T) {
 	}
 }
 
-// TestCancelOnConnectionClose forces the other half of the coordinator: with
-// no superseding request, closing the client connection must still cancel
-// whatever is in flight. The stub blocks on ctx and signals a channel once
-// unblocked; if handle's teardown didn't call connCancel() before returning,
-// this request's context would never be cancelled and the test times out.
+// TestCancelOnConnectionClose: with no superseding request, closing the
+// client connection must still cancel whatever is in flight.
 func TestCancelOnConnectionClose(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -313,13 +301,10 @@ func TestCancelOnConnectionClose(t *testing.T) {
 	}
 }
 
-// TestDebounceCoalescesBurst is the core debounce correctness invariant: a
-// burst of requests arriving on one connection faster than the debounce
-// window, with no reads in between, must produce exactly ONE call into
-// suggest — for the LAST buffered request, not the first or any
-// intermediate one. This is what keeps a fast typist under a provider's
-// per-minute rate limit: every superseded buffer in the burst must never
-// even be sent, not merely be cancelled after being sent.
+// TestDebounceCoalescesBurst: a burst faster than the debounce window must
+// produce exactly ONE call into suggest, for the LAST buffered request —
+// every superseded buffer must never even be sent, not merely cancelled
+// after being sent.
 func TestDebounceCoalescesBurst(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -372,9 +357,8 @@ func TestDebounceCoalescesBurst(t *testing.T) {
 	}
 }
 
-// TestDebounceFiresAfterQuiet checks the other half of the invariant: a
-// single request, with nothing superseding it, must still get answered —
-// dispatch after a quiet period, not just suppression during a burst.
+// TestDebounceFiresAfterQuiet: a single request with nothing superseding it
+// must still get answered after the quiet period.
 func TestDebounceFiresAfterQuiet(t *testing.T) {
 	path := testSocketPath(t)
 	cancel, _ := startServer(t, path)
@@ -392,11 +376,9 @@ func TestDebounceFiresAfterQuiet(t *testing.T) {
 	}
 }
 
-// TestSupersedeAfterDebounceStillWorks confirms debounce and supersede
-// compose correctly: once a request has survived debounce and is actually
-// in flight with the provider, a NEW request arriving later (after its own
-// debounce window) must still cancel that in-flight call, exactly as before
-// debounce was introduced.
+// TestSupersedeAfterDebounceStillWorks: once a request has cleared debounce
+// and is in flight, a new request (after its own debounce window) must still
+// cancel it.
 func TestSupersedeAfterDebounceStillWorks(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -461,15 +443,10 @@ func TestSupersedeAfterDebounceStillWorks(t *testing.T) {
 	}
 }
 
-// TestNoGoroutineLeak drives many rapidly-superseding requests (no reply
-// read, no delay between sends, so almost every request is superseded before
-// its stub's artificial 30ms "work" completes) across several concurrent
-// connections, closes them, shuts the server down, and asserts
-// runtime.NumGoroutine() settles back near its pre-test baseline. Every
-// superseded/torn-down request's stub returns promptly via its ctx.Done()
-// case, so if the coordinator ever failed to cancel (or a goroutine got
-// stuck waiting on something that isn't ctx), the count would stay elevated
-// and the poll loop below would time out and fail.
+// TestNoGoroutineLeak drives many rapidly-superseding requests across several
+// connections, tears everything down, and asserts runtime.NumGoroutine()
+// settles back near baseline — a coordinator that fails to cancel (or a
+// goroutine stuck on something other than ctx) leaves the count elevated.
 func TestNoGoroutineLeak(t *testing.T) {
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)

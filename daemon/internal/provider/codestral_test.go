@@ -25,8 +25,7 @@ func newCodestral(t *testing.T, baseURL, model, apiKey string, maxTokens int) Pr
 }
 
 // fimSSEChunk builds one SSE "data:" line carrying content as a FIM
-// completions delta, matching fimChunk's shape. Codestral's streaming
-// response is OpenAI-shaped, so this mirrors openai_test.go's sseChunk.
+// completions delta, matching fimChunk's (OpenAI-shaped) response.
 func fimSSEChunk(t *testing.T, content string) string {
 	t.Helper()
 	payload := map[string]any{
@@ -90,12 +89,9 @@ func TestComplete_Codestral_HappyPath(t *testing.T) {
 	}
 }
 
-// TestComplete_FirstLineCutoff drives a stream whose content spans a newline
-// partway through, with a deliberately slow final chunk. It asserts both that
-// (a) only the text before the newline comes back, and (b) Complete returns
-// long before the final chunk would have been sent, proving the client
-// stopped reading early rather than happening to produce the right prefix
-// after consuming everything.
+// TestComplete_Codestral_FirstLineCutoff: content spans a newline partway
+// through, with a deliberately slow final chunk. Asserts only the text before
+// the newline comes back, and Complete returns before the final chunk arrives.
 func TestComplete_Codestral_FirstLineCutoff(t *testing.T) {
 	const lateDelay = 300 * time.Millisecond
 
@@ -138,11 +134,8 @@ func TestComplete_Codestral_FirstLineCutoff(t *testing.T) {
 	}
 }
 
-// TestComplete_Cancellation forces a stream that blocks indefinitely after
-// its first chunk, then cancels the ctx passed to Complete. It asserts
-// Complete returns promptly (not after the block would otherwise clear) with
-// a context error, proving the in-flight HTTP call is actually aborted by ctx
-// cancellation and the call does not hang.
+// TestComplete_Codestral_Cancellation: a stream blocks indefinitely after its
+// first chunk; cancelling ctx must abort it promptly with a context error.
 func TestComplete_Codestral_Cancellation(t *testing.T) {
 	blockCh := make(chan struct{})
 
@@ -212,10 +205,9 @@ func TestComplete_Codestral_HTTPError(t *testing.T) {
 	}
 }
 
-// METRICS(§12): TestComplete_UsageAndFinishReason drives a stream that ends
-// (no newline in the content, so the first-line cutoff doesn't fire) with a
-// trailing usage chunk and a finish_reason, asserting both decode onto the
-// returned Completion.
+// METRICS(§12): TestComplete_UsageAndFinishReason: a stream ends (no newline,
+// so the cutoff doesn't fire) with a trailing usage chunk and finish_reason,
+// asserting both decode onto the returned Completion.
 func TestComplete_Codestral_UsageAndFinishReason(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -256,10 +248,8 @@ func TestComplete_Codestral_UsageAndFinishReason(t *testing.T) {
 	}
 }
 
-// TestNewCodestral_Defaults asserts the documented empty-value defaults:
-// baseURL "https://api.mistral.ai", model "codestral-latest". Constructed
-// indirectly via Model()/the request URL prefix rather than reaching into
-// unexported fields, since the constructor returns the Provider interface.
+// TestNewCodestral_Defaults asserts the empty-value defaults: baseURL
+// "https://api.mistral.ai", model "codestral-latest".
 func TestNewCodestral_Defaults(t *testing.T) {
 	p, err := NewCodestral("", "", "test-key", 48)
 	if err != nil {
@@ -277,9 +267,9 @@ func TestNewCodestral_Defaults(t *testing.T) {
 	}
 }
 
-// TestRenderFIM_ContextPresent pins the exact target shape from the T2c
-// contract: context lines re-rendered as "#"-prefixed shell comments, in
-// order, with the buffer last and no trailing newline.
+// TestRenderFIM_ContextPresent pins the target shape: context lines
+// re-rendered as "#"-prefixed shell comments, in order, buffer last, no
+// trailing newline.
 func TestRenderFIM_ContextPresent(t *testing.T) {
 	p := prompt.Prompt{
 		System:      "system prompt text",
@@ -298,11 +288,10 @@ func TestRenderFIM_ContextPresent(t *testing.T) {
 	}
 }
 
-// TestRenderFIM_PromptMarkerIsTheDefault is the A9 regression guard on the
-// shipped shape: "$ " on every history line AND on the cursor line, ambient
-// comments left unmarked (they are not commands), history/cursor still
-// contiguous. The cursor line must NOT be a bare newline — that shape is
-// exactly what let the model continue "git push".
+// TestRenderFIM_PromptMarkerIsTheDefault guards the shipped shape: "$ " on
+// every history line AND the cursor line, ambient comments left unmarked,
+// history/cursor contiguous. The cursor line must NOT be a bare newline —
+// that shape let the model continue "git push" instead of predicting new.
 func TestRenderFIM_PromptMarkerIsTheDefault(t *testing.T) {
 	p := prompt.Prompt{
 		Context: "Context:\n- cwd: /x/proj\n\n",
@@ -343,10 +332,8 @@ func TestRenderFIMNoPromptMarker(t *testing.T) {
 }
 
 // TestRenderFIMExitCodeAlways pins that the exit line lands BETWEEN history
-// and the cursor (not up with the ambient comments) and is emitted at 0,
-// which prompt.contextBlock omits. It builds on the shipped shape, so the
-// prompt marker must still be present — this variant differs from
-// production in exactly one thing.
+// and the cursor (not with the ambient comments) and is emitted at 0, which
+// prompt.contextBlock omits.
 func TestRenderFIMExitCodeAlways(t *testing.T) {
 	p := prompt.Prompt{
 		Context:  "Context:\n- cwd: /x/proj\n\n",
@@ -369,10 +356,9 @@ func TestRenderFIMExitCodeAlways_NonZero(t *testing.T) {
 	}
 }
 
-// TestWithFIMRenderer confirms the option actually reaches Complete's
-// rendering path (observed through RenderPrompt, which uses the same
-// c.render), and that a nil renderer leaves the shipped default in place
-// rather than producing an empty prompt.
+// TestWithFIMRenderer confirms the option reaches Complete's rendering path
+// (via RenderPrompt, which uses the same c.render), and a nil renderer leaves
+// the shipped default in place.
 func TestWithFIMRenderer(t *testing.T) {
 	req := Request{Prompt: prompt.Prompt{History: []string{"git push"}}}
 
@@ -396,10 +382,9 @@ func newCodestralWith(t *testing.T, opts ...CodestralOption) Provider {
 	return p
 }
 
-// TestCodestral_RenderPrompt pins the two RenderPrompt shapes: with the
-// Phase-2 empty suffix (today's only real case), the output is just the FIM
-// prompt with no SUFFIX: section; a non-empty suffix (the FIM infill hook,
-// unused today) adds one.
+// TestCodestral_RenderPrompt pins the two RenderPrompt shapes: an empty
+// suffix (today's only real case) omits the SUFFIX: section; a non-empty one
+// (the unused FIM infill hook) adds it.
 func TestCodestral_RenderPrompt(t *testing.T) {
 	client := newCodestral(t, "http://unused", "test-model", "test-key", 48)
 
@@ -502,23 +487,14 @@ func TestRenderFIM_ExcludesSystemAndInstruction(t *testing.T) {
 	}
 }
 
-// TestFirstShellCommand is table-driven with mode as an explicit column so
-// the two behaviours (typing preserves a single leading space; next-command
-// strips it) sit side by side, alongside all the mode-INDEPENDENT behaviour
-// (separator stripping, chain cutoff, plain pass-through) which each get one
-// row per mode to prove a future change can't accidentally make them
-// mode-dependent.
-//
-// This is also the regression test for the bug the eval harness caught:
-// firstShellCommand used to TrimLeft every completion unconditionally, so a
-// completion beginning with the space the system prompt explicitly asks for
-// ("Begin with a space when the completion starts a new word or argument")
-// could never reach the user — "git add" + " ." shipped as "git add."
-// instead of "git add .". The fix is mode-dependent: typing mode (non-empty
-// buffer) must preserve exactly one leading space; next-command mode (empty
-// buffer) must still strip it, both because the suggestion IS the whole
-// command there and because zsh's HIST_IGNORE_SPACE silently drops
-// space-prefixed commands from history.
+// TestFirstShellCommand is table-driven with mode as an explicit column:
+// typing mode must preserve exactly one leading space (the completion's
+// word-separator space — stripping it unconditionally used to collapse
+// "git add" + " ." into "git add."), while next-command mode must strip it
+// (the suggestion IS the whole command, and zsh's HIST_IGNORE_SPACE silently
+// drops space-prefixed commands from history). Separator stripping and chain
+// cutoff are mode-independent and get one row per mode to prove it stays
+// that way.
 func TestFirstShellCommand(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -583,10 +559,9 @@ func TestFirstShellCommand(t *testing.T) {
 	}
 }
 
-// TestComplete_Codestral_LeadingSpaceByMode drives Complete end to end (not
-// just firstShellCommand directly) to prove req.Prompt.Prefix is what
-// actually selects typing vs next-command mode: a non-empty Prefix must
-// preserve the model's leading space, an empty Prefix must strip it.
+// TestComplete_Codestral_LeadingSpaceByMode drives Complete end-to-end to
+// prove req.Prompt.Prefix selects typing vs next-command mode: non-empty
+// preserves the model's leading space, empty strips it.
 func TestComplete_Codestral_LeadingSpaceByMode(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -644,10 +619,9 @@ func TestFirstCommandComplete(t *testing.T) {
 	}
 }
 
-// TestComplete_Codestral_SeparatorCutoff proves the streaming separator cutoff:
-// once "mkdir x;" has arrived, Complete returns "mkdir x" without waiting for a
-// deliberately slow trailing chain chunk — the early-stop that keeps chaining
-// from costing stream time, distinct from the newline cutoff.
+// TestComplete_Codestral_SeparatorCutoff: once "mkdir x;" has arrived,
+// Complete returns "mkdir x" without waiting for a deliberately slow trailing
+// chain chunk — the separator early-stop, distinct from the newline cutoff.
 func TestComplete_Codestral_SeparatorCutoff(t *testing.T) {
 	const lateDelay = 300 * time.Millisecond
 

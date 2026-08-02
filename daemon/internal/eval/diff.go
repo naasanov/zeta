@@ -1,18 +1,9 @@
-// Part 4 slice: comparing two scorecard runs.
+// Comparing two scorecard runs: `go run ./cmd/eval -diff old.json new.json`
+// answers "did that change help or hurt?" without eyeballing two tables.
 //
-// This is the entire reason the harness exists (plan doc, "Regression use"):
-// change a prompt, re-run, `go run ./cmd/eval -diff old.json new.json`, and
-// get an answer to "did that help or hurt?" that isn't "eyeball two
-// tabwriter tables and hope you spot the one row that moved."
-//
-// Two things this file deliberately does NOT do:
-//   - It does not require the two runs to share a case set. The corpus grows
-//     constantly (Part 3b harvests failures into new cases), so cases
-//     appearing/disappearing between runs is normal, not an error.
-//   - It does not report every per-case rate wobble as a "change". Per the
-//     plan doc's sampling section, N<=10 per-case rates are triage, not
-//     results — see noiseFloorPP below for the reasoning distilled into one
-//     number.
+// Deliberately does NOT require the two runs to share a case set (the corpus
+// grows over time) or report every per-case rate wobble as a "change" — at
+// N<=10, per-case rates are triage, not results (see noiseFloorPP).
 package eval
 
 import (
@@ -122,23 +113,16 @@ type RowDiff struct {
 	TripWireOffending string
 }
 
-// CategoryAggregate is a suite-level (or per-category) pass-rate summary.
+// CategoryAggregate is a suite-level (or per-category) pass-rate summary: the
+// fraction of assertions PASSING, not a Present/Graded ratio — Must and
+// MustNot can't be summed on a common "presence rate", but each assertion's
+// own polarity-normalized Pass bool can. Measure assertions are excluded
+// (always Pass=true, so including them would inflate the rate with vacuous
+// passes).
 //
-// It is a fraction of assertions PASSING, not a Present/Graded ratio: Must
-// (higher-is-better) and MustNot (lower-is-better) can't be summed on a
-// common "presence rate" without the mix being meaningless, but each
-// assertion's own Pass bool is already polarity-normalized (grade.go /
-// runner.go resolve that per-assertion), so summing Pass is the one
-// operation that's valid across a mixed-polarity suite. Measure assertions
-// are excluded entirely (Polarity Measure always reports Pass=true when
-// graded — it has no verdict — so including it would silently inflate the
-// rate with vacuous passes).
-//
-// Before/After are computed independently from each Run's own full result
-// set, NOT from matched (case,label) pairs — which is what makes this
-// robust to the two runs having different case sets: a category's rate is
-// "what fraction of assertions in category X pass right now", a question
-// that never needed cases to align in the first place.
+// Before/After are computed independently from each Run's own results, not
+// matched (case,label) pairs, so a category's rate stays meaningful even
+// when the two runs' case sets differ.
 type CategoryAggregate struct {
 	Category                  string // "" / "ALL" for the suite-wide aggregate
 	BeforeTotal, BeforePassed int
@@ -165,25 +149,12 @@ type DiffReport struct {
 	Rows []RowDiff
 }
 
-// noiseFloorPP is the minimum |delta| (in percentage points) treated as a
-// real change for one (case, assertion) rate comparison, rather than
-// sampling noise.
-//
-// It is not a flat guessed constant: it's 2×SE at p=0.5 — the maximally
-// noisy true rate, per the plan doc's SE table — evaluated at the SMALLER of
-// the two runs' Graded counts (the run with less data is the binding
-// constraint). That mirrors the "~2·SE ≈ 95% CI" approximation the plan doc
-// already uses. At N=10 (this harness's hard sampling cap, plan doc
-// "Sampling") that's √(0.25/10) × 2 × 100 ≈ 31.6pp — exactly the "±31pp is
-// the worst case" figure the plan doc calls out for the noisiest case at max
-// N. A 7/10 → 8/10 move (10pp, the plan doc's own example of noise) sits
-// comfortably under that floor and is reported unchanged, as required.
-//
-// This is deliberately the conservative end of defensible: a smaller floor
-// would flag exactly the wobble the plan doc calls out as non-news. A floor
-// derived from the actual observed N (rather than one arbitrary flat number
-// for all rows) also means well-saturated cases with less true noise still
-// get compared at whatever precision their own N supports.
+// noiseFloorPP is the minimum |delta| (percentage points) treated as a real
+// change for one (case, assertion) rate comparison, rather than sampling
+// noise. It's 2×SE at p=0.5 (the maximally noisy true rate), evaluated at
+// the SMALLER of the two runs' Graded counts. At N=10 (this harness's
+// sampling cap) that's ~31.6pp — deliberately conservative, so a smaller
+// per-N floor still compares well-saturated cases at their own precision.
 func noiseFloorPP(n int) float64 {
 	if n <= 0 {
 		return 100 // nothing clears this; callers route Graded==0 to "not comparable" before reaching here anyway
@@ -438,15 +409,10 @@ func buildRow(caseID, category, label string, before, after *AssertionResult) Ro
 	return row
 }
 
-// Regressed reports whether anything got worse. It is deliberately
-// conservative — the caller uses this as a process exit code (plan doc,
-// "Regression use"), so it keys off categorical signals (a status flip to
-// FAIL, a trip-wire newly tripped) and suite-level movement past the noise
-// floor, NEVER off an individual noisy per-case rate delta. A handful of
-// small unchanged wobbles, or even an individual RowRegressed classification
-// on a case that's still within its own noise floor at the suite level,
-// must not flip this to true on their own — see DiffRuns' comment on why
-// per-case classification and Regressed()'s verdict are allowed to disagree.
+// Regressed reports whether anything got worse, for use as a process exit
+// code. Deliberately conservative: keys off categorical signals (a status
+// flip to FAIL, a trip-wire newly tripped) and suite-level movement past the
+// noise floor, never an individual noisy per-case rate delta.
 func (d DiffReport) Regressed() bool {
 	for _, row := range d.Rows {
 		if row.Flip == FlipPassToFail {

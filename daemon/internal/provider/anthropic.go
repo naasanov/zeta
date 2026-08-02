@@ -1,8 +1,7 @@
 // anthropic.go is a native adapter for Anthropic's Messages API (design §6),
-// built on anthropic-sdk-go. It is the "quality" provider profile: unlike
-// openai.go's hand-rolled OpenAI-compatible client, this adapter drives the
-// SDK's own streaming client and error types, but still renders prompt.Prompt
-// and drives the shared accumulator exactly like every other Provider.
+// built on anthropic-sdk-go. It is the "quality" provider profile, driving
+// the SDK's own streaming client and error types, but still renders
+// prompt.Prompt and drives the shared accumulator like every other Provider.
 package provider
 
 import (
@@ -20,9 +19,7 @@ const defaultAnthropicModel = "claude-haiku-4-5"
 
 // anthropicClient talks to Anthropic's native Messages API. Construct one via
 // NewAnthropic at daemon startup and reuse it for every request — the
-// underlying anthropic.Client holds its own warm http.Client internally, so a
-// fresh anthropicClient per request would defeat the same warm-connection
-// point openai.go cares about (design §4).
+// underlying anthropic.Client holds its own warm http.Client internally.
 type anthropicClient struct {
 	client    anthropic.Client
 	model     string
@@ -30,18 +27,14 @@ type anthropicClient struct {
 }
 
 // NewAnthropic builds a Provider backed by anthropic-sdk-go's native client.
-// There is no baseURL parameter — the native endpoint is fixed — but see
-// newAnthropicClient (test-only) for how the test suite points this at an
-// httptest server.
+// There is no baseURL parameter — the native endpoint is fixed.
 func NewAnthropic(model, apiKey string, maxTokens int) (Provider, error) {
 	return newAnthropicClient(model, apiKey, maxTokens, "")
 }
 
-// newAnthropicClient is the real constructor; NewAnthropic is a thin public
-// wrapper that never sets baseURL (the fixed native endpoint). The optional
-// baseURL parameter exists ONLY so anthropic_test.go can aim the client at an
-// httptest.Server via option.WithBaseURL — production code always goes
-// through NewAnthropic with baseURL == "".
+// newAnthropicClient is the real constructor; the optional baseURL param
+// exists only so anthropic_test.go can aim the client at an httptest.Server.
+// Production always goes through NewAnthropic with baseURL == "".
 func newAnthropicClient(model, apiKey string, maxTokens int, baseURL string) (Provider, error) {
 	if model == "" {
 		model = defaultAnthropicModel
@@ -78,14 +71,9 @@ func (c *anthropicClient) RenderPrompt(req Request) string {
 }
 
 // Complete issues a streaming Messages API request and returns the model's
-// first line of output (design §4 "stream + take first line only"), driving
-// the shared accumulator for TTFT stamping and the cutoff — same contract
-// every other Provider adapter honors.
-//
-// It honors ctx throughout: the SDK builds its HTTP request with the ctx
-// passed to NewStreaming, so cancelling ctx (e.g. because a newer keystroke
-// superseded this request — see server.handle) aborts the call, including
-// mid-stream reads.
+// first line of output (design §4), driving the shared accumulator for TTFT
+// stamping and the cutoff. ctx is passed to NewStreaming, so cancelling it
+// (e.g. a superseding keystroke) aborts the call, including mid-stream reads.
 func (c *anthropicClient) Complete(ctx context.Context, req Request) (Completion, error) {
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -95,21 +83,17 @@ func (c *anthropicClient) Complete(ctx context.Context, req Request) (Completion
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.model),
 		MaxTokens: int64(maxTokens),
-		// No CacheControl breakpoint on the system block: T4 measured the
-		// system prompt at ~1171 tokens, well under Haiku 4.5's 4096-token
-		// minimum cacheable prefix, so a cache_control here caches nothing
-		// (cache_creation_input_tokens stays 0) — a silent no-op, not a win.
-		// CachedTokens is still read below so the day a larger prefix or a
-		// caching-capable model lands, the metric proves whether it hit.
+		// No CacheControl breakpoint on the system block: the system prompt
+		// is under Haiku 4.5's 4096-token minimum cacheable prefix, so
+		// cache_control here would cache nothing — a silent no-op.
+		// CachedTokens is still read below to catch it if that changes.
 		System: []anthropic.TextBlockParam{{Text: req.Prompt.System}},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt.ChatUser())),
 		},
-		// Deliberately NOT set: Thinking, OutputConfig.Effort, Temperature,
-		// TopP. Haiku 4.5 doesn't think unless Thinking is explicitly enabled
-		// (wrong for a sub-second completion), and `effort` errors outright on
-		// Haiku 4.5 — see the ticket contract. Sampling params aren't needed
-		// either; the system prompt already constrains output shape.
+		// Deliberately NOT set: Thinking (wrong for a sub-second completion),
+		// OutputConfig.Effort (errors outright on Haiku 4.5), Temperature/TopP
+		// (the system prompt already constrains output shape).
 	}
 
 	// METRICS(§12): TTFT is measured from just before the round trip starts to
@@ -130,15 +114,10 @@ func (c *anthropicClient) Complete(ctx context.Context, req Request) (Completion
 			if !ok {
 				continue
 			}
-			// First-line cutoff (design §4) — the single most important
-			// invariant in this file. The instant acc.Push reports the
-			// accumulated text now contains a complete line, we stop
-			// reading and return immediately. We must NOT keep draining the
-			// stream to collect the trailing message_delta usage event: the
-			// whole point of streaming is to avoid paying for the rest of
-			// the completion once we already have a usable single-line
-			// suggestion. defer stream.Close() above tears down the
-			// in-flight SSE read on this early-return path.
+			// First-line cutoff (design §4): stop and return the instant a
+			// complete line is accumulated, without draining the stream for
+			// the trailing message_delta usage event. defer stream.Close()
+			// tears down the in-flight SSE read on this early-return path.
 			if stop := acc.Push(deltaVariant.Text); stop {
 				return Completion{
 					Text:         acc.Text(),
@@ -151,11 +130,9 @@ func (c *anthropicClient) Complete(ctx context.Context, req Request) (Completion
 				}, nil
 			}
 		case anthropic.MessageDeltaEvent:
-			// METRICS(§12): usage on message_delta is cumulative for the
-			// whole response so far, and stop_reason lands here too. Only
-			// reached when the stream ends without a newline ever appearing
-			// (the cutoff above returns first otherwise) — same trade-off
-			// openai.go documents for its trailing usage chunk.
+			// METRICS(§12): usage on message_delta is cumulative so far;
+			// stop_reason lands here too. Only reached if the stream ends
+			// without a newline (the cutoff above returns first otherwise).
 			if eventVariant.Delta.StopReason != "" {
 				stopReason = string(eventVariant.Delta.StopReason)
 			}

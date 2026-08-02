@@ -8,19 +8,15 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// This file holds the deterministic grader primitives (plan doc Part 2). A
-// Grader NEVER encodes polarity — every func here reports whether a SHAPE is
-// present, and the caller's Assertion.Polarity decides whether presence is
-// good, bad, or merely tracked (see types.go's Grader doc comment). That
-// split is what lets e.g. ContainsBacktickOrFence back both a TripWire (A6)
-// and, in principle, a Must elsewhere.
+// This file holds the deterministic grader primitives. A Grader NEVER
+// encodes polarity — every func here reports whether a SHAPE is present, and
+// the caller's Assertion.Polarity decides whether presence is good, bad, or
+// merely tracked (see types.go's Grader doc comment).
 //
 // out is always the completion SUFFIX (Sample.Output), never req.Buf+out.
-// Graders that need the full command line (RestatesBuffer,
-// ClosesQuoteWithContent, EqualsRecentHistory, InHistory,
-// EqualsHistoryModuloNumber) build it explicitly via fullCommand — see that
-// helper's doc comment for why this distinction is the single most likely
-// source of a silently-wrong grader.
+// Graders that need the full command line build it explicitly via
+// fullCommand — this distinction is the most likely source of a
+// silently-wrong grader.
 
 // fullCommand reconstructs the full command line a user would see:
 // req.Buf + out, with no separator inserted (mirrors the production
@@ -164,9 +160,8 @@ func RestatesBuffer() Grader {
 			return false, nil
 		}
 		// Prefix, not equality: the defect is the suffix BEGINNING with the
-		// buffer's own text, which yields "git statusgit status --short" once
-		// concatenated. Equality would catch the bare restatement and miss the
-		// restate-then-continue form, which is both more likely and worse.
+		// buffer's own text ("git statusgit status --short" concatenated).
+		// Equality would miss the restate-then-continue form.
 		return strings.HasPrefix(normalizeSpace(out), buf), nil
 	}}
 }
@@ -231,12 +226,9 @@ func NamesPathNotInDirEntries() Grader {
 	}}
 }
 
-// contextTokenAllowlist is shell keywords, common flags, and common command
-// names ContainsTokenNotInContext must never flag as "invented" — otherwise
-// every suggestion trivially "invents" a token just by using ordinary shell
-// vocabulary. Deliberately conservative and short: this grader should fire
-// on invented IDENTIFIERS (branch names, filenames, messages), not on the
-// scaffolding around them.
+// contextTokenAllowlist is shell keywords/flags/command names
+// ContainsTokenNotInContext must never flag as "invented" — otherwise every
+// suggestion trivially "invents" a token via ordinary shell vocabulary.
 var contextTokenAllowlist = map[string]bool{
 	// common commands
 	"git": true, "cd": true, "ls": true, "rm": true, "mv": true, "cp": true,
@@ -497,13 +489,10 @@ var argumentlessGitSubcommands = map[string]bool{
 // continuing the LAST history entry rather than a standalone new command:
 // the entry's first two words are "git" plus an argumentless subcommand
 // (e.g. "git push", already complete on its own), yet out's first token is
-// not a recognized command word. That combination is the FIM contiguity
-// failure mode: history and the predicted next command are rendered on
-// adjacent lines (RenderFIM) with nothing else marking the boundary, so
-// nothing stops the model from treating the last history line as an
-// unfinished buffer and appending to it — "git push" -> "origin main" reads
-// fine concatenated ("git push origin main") but "origin main" alone is not
-// a command a developer would type as the next line.
+// not a recognized command word. This is the FIM contiguity failure mode:
+// with nothing marking the boundary between history and the predicted next
+// command, the model can treat "git push" as unfinished and append
+// "origin main" — fine concatenated, not a command on its own line.
 func ContinuesLastHistoryCommand() Grader {
 	return GraderFunc{N: "continues-last-history-command", F: func(in protocol.Request, out string) (bool, error) {
 		if len(in.History) == 0 {

@@ -12,50 +12,13 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// FimCommentedHistoryVariant answers the plan doc's open question (b): does
-// raw-history rendering (the current default, "fim-raw-history" — see
-// DefaultVariant) actually beat the old commented form?
-//
-// # This does NOT do what the plan doc hypothesized — read before relying on it
-//
-// The plan doc's hypothesis was: build the Prompt normally, then nil out
-// p.History, and RenderFIM (daemon/internal/provider/codestral.go) would fall
-// back to rendering the "- recent commands: ..." Context line as a "#"
-// shell comment, since (per the doc) RenderFIM "skips [it] only when History
-// is populated".
-//
-// That is NOT what RenderFIM actually does. Reading it
-// (daemon/internal/provider/codestral.go:174-185): the loop that turns
-// p.Context lines into "#" comments skips any line matching
-// prompt.RecentCommandsLabel UNCONDITIONALLY —
-//
-//	stripped := strings.TrimPrefix(line, "- ")
-//	if strings.HasPrefix(stripped, prompt.RecentCommandsLabel) {
-//		continue // <-- always taken for the recent-commands line, regardless
-//	}           //     of whether p.History is populated
-//
-// — and separately, the raw-history loop just ranges over p.History. So:
-//
-//   - Prompt.Build populates BOTH p.Context (which contains the "- recent
-//     commands: ..." line, since req.History was non-empty) AND p.History.
-//   - Nilling p.History after Build only empties the raw-history loop.
-//   - The Context line is dropped anyway, unconditionally, by RenderFIM.
-//
-// Net effect: this variant does not produce "commented history" — it
-// produces NO history at all in the rendered FIM prompt. Reproducing this
-// finding rather than working around it (production code, codestral.go, is
-// out of this task's file lane): the case corpus's history-bearing cases
-// (C1-C3, D1-D4, E1/E2/E6/E7, the FIM adapter under this variant) become a
-// "no history" condition, not a "commented history" condition, until
-// RenderFIM itself grows a seam for it (the plan doc's deferred
-// WithFIMRenderer functional option, Part 4 "only if the ordering variant is
-// in scope" — it is not, here).
-//
-// The variant is kept and named as specified, because it is still a real,
-// useful condition to measure (does the model do worse/better/the same with
-// NO history at all vs raw-history) — it is just not the condition the name
-// suggests today. FimCommentedHistoryVariant's doc comment is the correction;
-// do not remove this note without re-verifying RenderFIM's behavior.
+// FimCommentedHistoryVariant despite its name does NOT render commented
+// history: RenderFIM drops the "- recent commands: ..." Context line
+// unconditionally (codestral.go), so nilling p.History here yields NO
+// history at all, not a commented form of it. It's kept under this name
+// anyway because "no history vs. raw-history" is still a useful condition to
+// measure. Producing actual commented history needs a RenderFIM seam
+// (WithFIMRenderer) that doesn't exist yet.
 func FimCommentedHistoryVariant() Variant {
 	return Variant{
 		Name: "fim-commented-history",
@@ -67,17 +30,10 @@ func FimCommentedHistoryVariant() Variant {
 	}
 }
 
-// FimNoPromptMarkerVariant renders the PRE-A9 shape — raw history lines, no
-// "$ " transcript marker (provider.RenderFIMNoPromptMarker).
-//
-// This is the BASELINE, not a candidate: the marker shape it is missing won
-// the corpus run and is now what "default" renders. It exists so that
-// decision stays falsifiable — re-running default vs. this one re-measures
-// the change on demand, instead of requiring someone to hand-edit
-// RenderFIM to ask the question again.
-//
-// Unlike Build-only variants this changes the RENDERER, so it is a real
-// condition only in a codestral cell (see Variant.FIMRenderer).
+// FimNoPromptMarkerVariant renders the pre-marker shape (raw history, no
+// "$ " transcript marker) so the marker's win over this baseline stays
+// re-measurable instead of asserted. Changes the renderer, not Build, so
+// it's only a distinct condition in a codestral cell (see Variant.FIMRenderer).
 func FimNoPromptMarkerVariant() Variant {
 	return Variant{
 		Name:        "fim-no-prompt-marker",
@@ -87,14 +43,10 @@ func FimNoPromptMarkerVariant() Variant {
 }
 
 // FimExitCodeAlwaysVariant emits an "# exit: N" line between the history
-// block and the cursor even when N is 0, on top of the shipped marker shape
-// (provider.RenderFIMExitCodeAlways).
-//
-// It lost to the marker as an A9 fix. It stays registered because it now
-// asks a DIFFERENT question than it did then: with the boundary problem
-// already solved by the marker, does explicit exit status still buy
-// anything? Its cost side is unchanged — tokens on every request to restate
-// "the last command succeeded".
+// block and the cursor even when N is 0, on top of the shipped marker shape.
+// Lost as a boundary fix to the marker, but stays registered to ask a
+// separate question: does explicit exit status help once the boundary
+// problem is already solved, worth its per-request token cost?
 func FimExitCodeAlwaysVariant() Variant {
 	return Variant{
 		Name:        "fim-exit-code-always",

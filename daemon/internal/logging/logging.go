@@ -13,16 +13,9 @@ import (
 	"sync"
 )
 
-// compactHandler is a terse slog.Handler for the dev log panel. Instead of
-// slog's default `time=... level=... msg=... key=val`, it prints
-//
-//	HH:MM:SS.mmm L msg=... key=val ...
-//
-// dropping the time=/level= keys and shortening the level to one letter
-// (D/I/W/E), while keeping msg= and the structured attrs' key=value form,
-// quoted (Go-style) when a value contains spaces, `=`, `"`, or is empty. It's
-// dev tooling; the shipped build can swap back to a JSON/text handler if
-// machine-readable logs are ever wanted.
+// compactHandler prints `HH:MM:SS.mmm L msg=... key=val ...` (level
+// shortened to one letter D/I/W/E), quoting a value Go-style when it
+// contains spaces, `=`, `"`, or is empty.
 type compactHandler struct {
 	mu    *sync.Mutex // shared across WithAttrs/WithGroup clones so writes stay serialized
 	w     io.Writer

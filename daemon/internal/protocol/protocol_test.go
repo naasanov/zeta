@@ -49,12 +49,11 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDecodeClientContextJSON decodes JSON in the exact shape the hand-written
-// zsh client emits (zsh/50_socket.zsh). It guards the cross-language seam the
-// round-trip test can't: encoding/json silently ignores unknown keys, so a
-// field-name drift between the client's literal JSON keys and these struct tags
-// would NOT fail round-trip — the field would just stay zero. So decode literal
-// client bytes and assert the context values actually land.
+// TestDecodeClientContextJSON decodes JSON in the exact shape the zsh client
+// emits. It guards the cross-language seam the round-trip test can't:
+// encoding/json silently ignores unknown keys, so a field-name drift between
+// the client's JSON and these struct tags would leave a field zero rather
+// than failing round-trip.
 func TestDecodeClientContextJSON(t *testing.T) {
 	full := `{"v":1,"id":"s.1","kind":"typing","buf":"git sta","cwd":"/home/u/p","git_branch":"phase-1","git_dirty":true,"last_exit":127,"history":["git commit -m \"wip\"","cat a > b & echo hi"],"dir_entries":["a","b"]}`
 	var got Request

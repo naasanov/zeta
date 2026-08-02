@@ -41,12 +41,9 @@ func TestFimCommentedHistoryVariant_NilsHistory(t *testing.T) {
 }
 
 // TestFimCommentedHistoryVariant_ActuallyDropsHistoryFromFIM locks in the
-// documented finding: RenderFIM (codestral.go) drops the recent-commands
-// Context line UNCONDITIONALLY, not only when Prompt.History is populated.
-// So this variant does not resurrect history as a "#" comment — it produces
-// NO history in the rendered FIM prompt at all. This test guards against
-// RenderFIM's behavior silently changing out from under variants.go's doc
-// comment (which explains this at length) without anyone noticing.
+// documented finding: RenderFIM drops the recent-commands Context line
+// UNCONDITIONALLY, not only when Prompt.History is populated, so this
+// variant produces NO history in the rendered FIM prompt at all.
 func TestFimCommentedHistoryVariant_ActuallyDropsHistoryFromFIM(t *testing.T) {
 	req := protocol.Request{
 		Kind:    protocol.KindNextCommand,

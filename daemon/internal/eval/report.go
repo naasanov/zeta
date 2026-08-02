@@ -85,22 +85,14 @@ func JSON(w io.Writer, results []CaseResult, meta Meta) error {
 }
 
 // PrettyJSON writes the same document JSON writes, but easier to eyeball in
-// a terminal: embedded newlines in string fields (chiefly CaseResult.Prompt)
-// render as literal newlines instead of JSON's required "\n" escape, and
-// HTML-sensitive characters (<, >, &, common in shell commands like
-// "git push && git status") are left unescaped instead of becoming <
-// etc. (encoding/json's default, meant for embedding JSON in HTML — not a
-// concern in a terminal).
+// a terminal: embedded newlines render literally and HTML-sensitive
+// characters (<, >, &, common in shell commands) stay unescaped.
 //
-// The output is NOT valid JSON: -diff/LoadRun must always read what JSON()
-// wrote, never this. The newline rendering works by a blunt find-and-replace
-// of the two-byte "\n" sequence in the encoded bytes, which is safe for the
-// overwhelming majority of this corpus (shell commands and prompt text) but
-// has one known blind spot: a string containing the two literal characters
-// backslash-n (e.g. a prompt that itself quotes a regex like '\n') encodes
-// as the four-byte "\\n" and would have its trailing "\n" portion misread as
-// an escaped newline too. A token-aware unescape would avoid that at the
-// cost of real machinery this is a viewer convenience, not a parser.
+// The output is NOT valid JSON — -diff/LoadRun must always read what JSON()
+// wrote, never this. Newline rendering is a blunt find-and-replace of the
+// two-byte "\n" sequence, which misreads a literal backslash-n (e.g. a
+// prompt quoting a regex like '\n') as an escaped newline; a viewer
+// convenience, not a parser.
 func PrettyJSON(w io.Writer, results []CaseResult, meta Meta) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -199,12 +191,10 @@ func writeTripWires(w io.Writer, results []CaseResult) error {
 	return err
 }
 
-// CellLabel identifies the (provider, variant) cell a CaseResult belongs to.
-// It is the scorecard's column key — the plan doc's deliverable is
-// "case × (provider × prompt-variant) → pass-rate", so a report that renders
-// results as a flat list is unreadable the moment there is more than one
-// cell: the same case ID appears once per cell with nothing distinguishing
-// the rows, which is exactly the comparison the harness exists to produce.
+// CellLabel identifies the (provider, variant) cell a CaseResult belongs to
+// — the scorecard's column key. A flat list would be unreadable once there's
+// more than one cell: the same case ID would repeat with nothing
+// distinguishing the rows.
 func CellLabel(cr CaseResult) string {
 	provider := orNA(cr.Provider)
 	if cr.Variant == "" {
@@ -221,14 +211,11 @@ type assertionKey struct {
 	Label    string
 }
 
-// writeScorecard renders the pivot: one row per (case, assertion), one column
-// per cell, so cells are read side by side rather than as repeated blocks.
-//
-// Each cell renders as "<symbol> <rate>" — symbol first, because a column of
-// failures should be visible by shape before any number is read, and it keeps
-// the glyphs consistent with the live progress row (see CaseSymbol). k/N stays
-// in the JSON dump for the diff; putting it in every cell here would triple
-// the width of a 6-column matrix for information the rate already conveys.
+// writeScorecard renders the pivot: one row per (case, assertion), one
+// column per cell, so cells are read side by side rather than as repeated
+// blocks. Each cell renders as "<symbol> <rate>" — symbol first, so a column
+// of failures is visible by shape before any number is read. k/N stays in
+// the JSON dump; adding it here would triple the width of a wide matrix.
 func writeScorecard(w io.Writer, results []CaseResult) error {
 	cells := orderedCells(results)
 	rows, byCellRow := scorecardRows(results)
@@ -389,11 +376,8 @@ func scorecardRows(results []CaseResult) ([]assertionKey, map[string]map[asserti
 }
 
 func writeFooter(w io.Writer, results []CaseResult, meta Meta) error {
-	// Per-cell sampling summary. A single flat "escalated: A3" list across a
-	// matrix run is ambiguous and, worse, prints the same case ID once per
-	// cell — the old footer rendered "A1, A2, ... A1, A2, ..." for two cells,
-	// which reads as a bug in the corpus rather than two cells' worth of
-	// results.
+	// Per-cell sampling summary — a flat list across a matrix run would print
+	// the same case ID once per cell, reading as a corpus bug.
 	cells := orderedCells(results)
 	type cellStats struct {
 		runs, errors, successes int
@@ -432,13 +416,9 @@ func writeFooter(w io.Writer, results []CaseResult, meta Meta) error {
 				st.successes++
 			}
 			totalGraderErrors += ar.GraderErrors
-			// Graded == 0 means the assertion never actually ran. It is
-			// scored as a failure, but it needs calling out separately —
-			// "failed" and "never evaluated" demand different fixes. Append
-			// the first grader error's message, if any, so "NEVER EVALUATED"
-			// is diagnosable from the report alone rather than requiring a
-			// re-run under a debugger — this is what a bad judge model id
-			// (a 404 that reads like an auth failure) previously hid.
+			// Graded == 0 means the assertion never ran; scored as a failure
+			// but called out separately since "failed" and "never
+			// evaluated" demand different fixes.
 			if ar.Graded == 0 {
 				line := "[" + CellLabel(cr) + "] " + cr.CaseID + "/" + ar.Label
 				if ar.FirstGraderError != "" {

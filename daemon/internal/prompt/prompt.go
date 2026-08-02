@@ -9,21 +9,12 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// systemPrompt tells the model to emit only the text to append to the command
-// buffer. Typing completion and next-command prediction intentionally share
-// this one stable system prompt: next-command is just the append contract with
-// an empty buffer. Two properties are load-bearing and tuned by dogfooding
-// (design §235):
-//   - Spacing: the reply is req.Buf + suffix with nothing inserted between, so
-//     the model must supply the leading space itself when the completion starts
-//     a new word (otherwise "git add" + "." => "git add.").
-//   - Restraint: prefer a short completion and stop before free-form input it
-//     cannot know (a commit message, a filename) instead of fabricating one. A
-//     partial completion is useful; the whole command is not required.
-//
-// The model's OUTPUT must stay single-line (provider.Complete cuts at the first
-// newline). The prompt itself may span multiple lines. The « » in the examples
-// only mark exact output boundaries so leading spaces are visible.
+// systemPrompt tells the model to emit only the text to append to the buffer.
+// Typing completion and next-command prediction share it — next-command is
+// just the append contract with an empty buffer. The reply is req.Buf +
+// suffix with nothing inserted between, so the model must supply its own
+// leading space (otherwise "git add" + "." => "git add."). Output must stay
+// single-line; provider.Complete cuts at the first newline.
 const systemPrompt = `You are a shell command suggestion engine. You receive a shell command buffer and output only the text to append at the end — nothing else. When the buffer is empty, the appended text may be a complete next command.
 
 Rules:
@@ -41,35 +32,23 @@ git add -A => && git commit -m "
 git commit -m  => "
 docker run => -it `
 
-// User-turn directives are deliberately outside the system prompt so typing and
-// next-command can share one cacheable system prefix. For typing, placing the
-// spacing directive right next to the input gives it more attention on instruct
-// models than the system prompt alone — empirically this fixed the model
-// dropping leading spaces. req.Buf stays at the very end so the completion
-// continues directly from it, and the static prefix here is still a stable cache
-// prefix for Phase 2 prompt caching.
+// User-turn directives stay outside the system prompt so typing and
+// next-command can share one system prefix. Placing the spacing directive
+// next to the input (not just in the system prompt) fixed instruct models
+// dropping leading spaces.
 const (
 	typingUserPrefix      = "Complete this command, keeping any needed leading space:\n"
 	nextCommandUserPrefix = "The prompt is empty. Based on the recent commands and context above, predict the single most likely next command. Keep it short and common:\n"
 )
 
-// RecentCommandsLabel is the exact label prefixing the recent-commands line
-// in contextBlock's output ("- " + RecentCommandsLabel + "cmd1; cmd2..."). It
-// is exported so RenderFIM (codestral.go) can identify and skip that line
-// when re-rendering ambient context as comments — history is rendered raw
-// there instead, via Prompt.History, so this avoids double-rendering it.
+// RecentCommandsLabel prefixes the recent-commands line in contextBlock's
+// output. Exported so callers rendering history separately can identify and
+// skip that line rather than duplicating it.
 const RecentCommandsLabel = "recent commands: "
 
-// contextBlock renders whatever step-5 context fields (design §7) are present
-// on req into a compact "Context:" block for the user turn, one line per
-// present field, omitting lines for absent/zero fields entirely (no "git:"
-// line without a branch, no "last command" line when LastExit == 0, no
-// "recent commands" line with empty History, no "files:" line with empty
-// DirEntries). It returns "" when no context fields are present at all, so
-// callers can skip the block cleanly.
-//
-// This is a pure function (no I/O) so it's unit-testable without a running
-// daemon or provider.
+// contextBlock renders whatever context fields are present on req into a
+// compact "Context:" block, one line per present field, omitting lines for
+// absent/zero fields. Returns "" when nothing is present.
 func contextBlock(req protocol.Request) string {
 	var lines []string
 	if req.Cwd != "" {
@@ -106,18 +85,12 @@ type Prompt struct {
 	Context     string   // "Context:\n cwd: ...\n" — changes on chpwd/precmd
 	Prefix      string   // the buffer being completed; may be ""
 	Suffix      string   // always "" in Phase 2; the FIM infill hook
-	History     []string // raw recent commands, oldest-first (design §7/FIM raw-history). FIM
-	// renders these as raw command lines contiguous with Prefix (a code model
-	// continues real preceding code better than commented metadata); chat
-	// adapters keep history in the Context block instead (see contextBlock).
+	History     []string // raw recent commands, oldest-first; FIM renders these as raw
+	// command lines contiguous with Prefix, chat adapters keep them in Context instead.
 
-	// LastExit is req.LastExit verbatim, including 0. Context already carries
-	// the exit status, but ONLY when it's non-zero (contextBlock omits the
-	// line at 0, since "the last command succeeded" is the uninteresting
-	// default). Renderers that want the value regardless — e.g. a FIM shape
-	// using "# exit: 0" as a structural boundary between history and the
-	// cursor — need it as a field, because it cannot be recovered from
-	// Context once omitted.
+	// LastExit is req.LastExit verbatim, including 0 — unlike Context, which
+	// omits the exit line entirely at 0, so this is the only way to recover
+	// the value once Context has dropped it.
 	LastExit int
 }
 
@@ -142,17 +115,8 @@ func Build(req protocol.Request) Prompt {
 
 // ChatUser renders the user turn for chat adapters: Context + Instruction +
 // Prefix, with Prefix last so the completion continues directly from the
-// buffer.
-//
-// T4 considered reordering this to Instruction-before-Context so a stable
-// instruction prefix could seed a provider prompt cache (design §7). Measured
-// and DROPPED: prompt caching is unreachable for every current profile — the
-// full chat prefix (system prompt ~1171 tokens + this user turn) is far below
-// Anthropic Haiku's 4096-token minimum cacheable prefix, Groq's default llama
-// doesn't support caching, and the default provider (codestral, FIM) doesn't
-// use ChatUser at all. Reorder only becomes worthwhile alongside a
-// caching-capable chat model whose prefix clears its minimum; see the note in
-// anthropic.go where a cache_control breakpoint would otherwise go.
+// buffer. Reordering to cache Instruction as a stable prefix was considered
+// and dropped as unreachable (see CLAUDE.md "Prompt caching").
 func (p Prompt) ChatUser() string {
 	return p.Context + p.Instruction + p.Prefix
 }

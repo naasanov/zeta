@@ -3,15 +3,9 @@
 // connections to LLM providers, debounces keystroke-driven requests, cancels
 // stale in-flight requests, and streams suggestions back to the shell.
 //
-// See .docs/zeta_design_doc_v3.md §3 for the architecture. Phase 1 step 2
-// built only the socket listener and process skeleton, answering every
-// request with a canned echo suggestion (internal/server). Step 4 wired in a
-// real LLM-backed suggester (internal/provider) when an API key is present.
-// Phase 2 (design §6) replaces the single hardcoded Groq client with TOML
-// config/profiles (internal/config) selecting among multiple provider
-// adapters; this file is still the composition root ONLY — config
-// resolution and provider construction happen here, internal/ packages take
-// plain resolved values and never read env themselves.
+// See .docs/zeta_design_doc_v3.md §3 for the architecture. This file is the
+// composition root ONLY — config resolution and provider construction happen
+// here; internal/ packages take plain resolved values and never read env.
 package main
 
 import (
@@ -74,9 +68,7 @@ func main() {
 	// report.
 	var emit func(metrics.RequestEvent)
 	// METRICS(§12): rawText is passed into suggest.LLM below; false unless
-	// metrics are enabled AND the opt-in raw-text capture flag is also set
-	// (ZSH_AUTOPILOT_METRICS_RAW_TEXT). It stays false whenever metrics
-	// themselves are off, since there is nowhere for the raw text to go.
+	// metrics are enabled AND ZSH_AUTOPILOT_METRICS_RAW_TEXT is also set.
 	rawText := false
 	if mcfg, ok := metrics.ConfigFromEnv(); ok {
 		mlog, err := metrics.New(mcfg.LogPath, mcfg.User)
@@ -93,11 +85,8 @@ func main() {
 			log.Info("metrics enabled", "log", mcfg.LogPath, "socket", mcfg.SocketPath, "user", mcfg.User)
 			rawText = mcfg.RawText
 			if rawText {
-				// METRICS(§12): raw-text capture is TEMPORARILY default-ON for
-				// dogfooding, so this warning now fires on almost every start —
-				// deliberately. Users must never have their command buffers,
-				// suggestions and cwd written verbatim to a log without knowing,
-				// least of all when it's the default. Name the opt-out.
+				// METRICS(§12): default-ON for dogfooding, so this fires on
+				// almost every start — deliberately, so users always know.
 				log.Warn("raw-text metrics capture ENABLED (default) — command buffers, suggestions and cwd are written verbatim to the event log; set "+metrics.EnvRawText+"=0 to disable", "log", mcfg.LogPath)
 			}
 		}
@@ -162,11 +151,9 @@ func main() {
 }
 
 // newProvider constructs a provider.Provider from a resolved profile,
-// switching on the internal Adapter (not the user-facing brand in Provider)
-// — several brands share an adapter (groq/ollama both speak "openai"). It
-// lives here, not in internal/provider, so that provider adapters never
-// import internal/config (config knows about providers; providers must not
-// know about config).
+// switching on the internal Adapter, not the user-facing brand — several
+// brands share an adapter (groq/ollama both speak "openai"). Lives here, not
+// in internal/provider, so provider adapters never import internal/config.
 func newProvider(r config.ResolvedProfile, apiKey string, maxTokens int) (provider.Provider, error) {
 	switch r.Adapter {
 	case "openai":
@@ -185,15 +172,10 @@ func newProvider(r config.ResolvedProfile, apiKey string, maxTokens int) (provid
 	}
 }
 
-// echoMissingKey returns a suggest closure that stands in for the LLM
-// suggester when a provider is selected but its API key isn't set. It never
-// makes up plausible-looking ghost text for a missing key:
-//
-//   - On the empty-buffer next-command prompt, the "suggestion" is a shell
-//     comment ("# autopilot: set X") — if the user reflexively accepts it, it's
-//     a harmless no-op line, never a bad command.
-//   - While typing (non-empty buffer), the suggestion is exactly req.Buf, i.e.
-//     an empty suffix — no ghost text is appended mid-command.
+// echoMissingKey stands in for the LLM suggester when a provider is selected
+// but its API key isn't set. It never fabricates plausible ghost text: an
+// empty buffer gets a shell comment ("# autopilot: set X", harmless if
+// accepted); a non-empty buffer gets an empty suffix (no ghost text at all).
 func echoMissingKey(keyEnv string) func(context.Context, protocol.Request) (protocol.Reply, error) {
 	return func(_ context.Context, req protocol.Request) (protocol.Reply, error) {
 		suggestion := req.Buf
@@ -209,14 +191,11 @@ func echoMissingKey(keyEnv string) func(context.Context, protocol.Request) (prot
 	}
 }
 
-// loadConfig loads the config.toml (see configPath for where) if present, or
-// a zero-value Config with defaults applied if not — presets resolve on
-// demand (config.Config.Resolve), so there is no built-in profile to seed
-// anymore. A present-but-malformed file is always an error. A *missing* file
-// is an error only when the path was named explicitly via ZSH_AUTOPILOT_CONFIG
-// — an explicit path that doesn't exist is a typo the user wants to hear
-// about, whereas the implicit XDG default simply being absent falls back
-// silently.
+// loadConfig loads config.toml (see configPath) if present, or defaults if
+// not. A malformed file is always an error; a *missing* file errors only
+// when the path was named explicitly via ZSH_AUTOPILOT_CONFIG — an explicit
+// typo should be heard about, but the implicit XDG default being absent
+// falls back silently.
 func loadConfig() (config.Config, error) {
 	path, explicit := configPath()
 	data, err := os.ReadFile(path)
@@ -230,10 +209,9 @@ func loadConfig() (config.Config, error) {
 }
 
 // configPath resolves the config.toml location and reports whether it was
-// named explicitly. ZSH_AUTOPILOT_CONFIG wins when set (handy for pointing the
-// daemon at a gitignored sandbox/config.toml in dev without touching
-// ~/.config); otherwise it is $XDG_CONFIG_HOME/autopilot/config.toml, falling
-// back to ~/.config/autopilot/config.toml per the XDG base directory spec.
+// named explicitly. ZSH_AUTOPILOT_CONFIG wins when set; otherwise it's
+// $XDG_CONFIG_HOME/autopilot/config.toml, falling back to
+// ~/.config/autopilot/config.toml.
 func configPath() (path string, explicit bool) {
 	if p := os.Getenv("ZSH_AUTOPILOT_CONFIG"); p != "" {
 		return p, true

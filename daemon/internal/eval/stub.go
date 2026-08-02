@@ -17,15 +17,13 @@ type StubResult struct {
 }
 
 // StubProvider is a provider.Provider that returns scripted results in
-// sequence, never touching the network. It backs both the unit tests in
-// this package and `cmd/eval -dry-run`, which is why it's exported rather
-// than a test-only helper.
+// sequence, never touching the network. Backs both this package's unit
+// tests and `cmd/eval -dry-run`, hence exported.
 //
-// The script is replayed cyclically (index i % len(script)), so a
-// single-element script naturally drives "identical outputs" tests
-// (saturation at MinRuns), a two-element alternating script drives
-// "disagreement" tests (escalation to MaxRuns), and a script containing
-// StubResult{Err: ...} entries drives the errors-excluded-from-grading path.
+// The script replays cyclically (index i % len(script)): a single-element
+// script drives "identical outputs" tests, a two-element alternating script
+// drives "disagreement"/escalation tests, and StubResult{Err: ...} entries
+// drive the errors-excluded-from-grading path.
 type StubProvider struct {
 	mu  sync.Mutex
 	idx int

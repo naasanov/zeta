@@ -1,24 +1,13 @@
 // Package eval is the suggestion-quality evaluation harness (see
-// .docs/eval_harness_plan.md). It drives provider.Provider (the same seam
-// internal/suggest programs against) with hand-written Cases, grades the
-// output with deterministic Graders (and, in a later part, an LLM judge),
-// and reports pass-rates rather than pass/fail — see the plan doc's
-// "Sampling: adaptive, not fixed-N" section for why.
+// .docs/eval_harness_plan.md). It drives provider.Provider with hand-written
+// Cases, grades output with deterministic Graders or an LLM judge, and
+// reports pass-RATES rather than pass/fail (sampling is adaptive, not fixed-N).
 //
-// This is Part 1: types, the adaptive-sampling Runner, and the report
-// renderer, all driven by a scripted StubProvider. No real cases and no
-// network calls live here yet (Parts 2/3).
-//
-// # Import invariant
-//
-// Nothing outside daemon/cmd/eval may import this package. Evals are slow,
-// costly, rate-limited, and non-deterministic by construction — they must
-// never run under `go test ./...`. cmd/eval is a `main` package specifically
-// so `go build ./...` still compile-checks this code without a build tag,
-// while `go test ./...` never executes it (Go doesn't run "main" packages as
-// tests). Keep it that way: if you're tempted to import "internal/eval" from
-// anywhere other than cmd/eval, that's a sign the thing you're writing
-// belongs in cmd/eval instead.
+// Import invariant: nothing outside cmd/eval may import this package. Evals
+// are slow, costly, rate-limited, and non-deterministic, so they must never
+// run under `go test ./...`. cmd/eval is a `main` package specifically so
+// `go build ./...` compile-checks this code while `go test ./...` never
+// executes it.
 package eval
 
 import (
@@ -46,16 +35,11 @@ const (
 )
 
 // Grader reports whether the shape it looks for is present in out. in
-// carries the originating request so a grader can compare against context
-// (dir entries, history, git branch) — e.g. "does the suggestion name a file
-// that's actually in in.DirEntries".
-//
-// out is a Sample.Output: the raw completion suffix, NOT req.Buf+suffix. See
-// Sample's doc comment for why.
-// ctx is threaded through for graders that do I/O — in practice the LLM judge,
-// which must be cancellable and time-limited like any other network call.
-// Deterministic graders ignore it; GraderFunc drops it so the ~20 regex and
-// string graders need no ctx parameter they would never use.
+// carries the originating request for context-aware checks (e.g. "does the
+// suggestion name a file in in.DirEntries"). out is the raw completion
+// suffix (Sample.Output), never req.Buf+suffix. ctx is threaded through for
+// graders that do I/O (the LLM judge); GraderFunc drops it since
+// deterministic graders never need it.
 type Grader interface {
 	Name() string
 	Grade(ctx context.Context, in protocol.Request, out string) (present bool, err error)
@@ -112,26 +96,18 @@ type Case struct {
 
 // Sample is one provider call's outcome for a Case.
 //
-// Output holds the completion SUFFIX, i.e. Completion.Text verbatim — NOT
-// req.Buf+suffix. provider.Complete already returns only the suffix (see
-// internal/suggest/suggest.go, which builds reply.Suggestion =
-// req.Buf + completion.Text); there is no buffer prefix to strip here.
-// Graders reason about the suffix, and leading-space assertions (A2/A3 in
-// the plan doc) depend on that: " " vs "" only makes sense if Output starts
-// exactly where the model's output starts.
+// Output holds the completion SUFFIX (Completion.Text verbatim), never
+// req.Buf+suffix — leading-space assertions (A2/A3) depend on Output
+// starting exactly where the model's output starts.
 //
-// Err is set instead of Output when the provider call itself failed
-// (network error, rate limit, canceled context). An errored Sample is never
-// graded — see Runner's "errors are not failures" rule.
+// Err is set instead of Output when the provider call itself failed. An
+// errored Sample is never graded (errors are not failures).
 type Sample struct {
 	Output string
 	Err    error
 
-	// TTFT is completion.TTFT verbatim from the provider call that produced
-	// this sample (zero when Err is set — the call never got a first byte).
-	// It's what the report's per-cell P50 LATENCY column pools across, so a
-	// cell that passes more cases but is slower is visible in the same table
-	// rather than requiring a separate metrics run to notice.
+	// TTFT is zero when Err is set. Pooled across a cell for the report's P50
+	// LATENCY column.
 	TTFT time.Duration
 }
 
@@ -177,21 +153,16 @@ type AssertionResult struct {
 	Present   int // successful runs where the shape was present
 	Graded    int // successful runs graded (excludes errored runs)
 
-	// GraderErrors counts samples the provider returned successfully but this
-	// assertion's Grader could not decide on. It is NOT the same as
-	// CaseResult.Errors (provider failures) and must stay separate: a grader
-	// that always errors produces Graded == 0, and a "0 of 0" result must
-	// never read as a pass for ANY polarity — including TripWire, whose
-	// natural formulation (Present == 0) would otherwise report a silent
-	// green for an assertion that was never actually evaluated.
+	// GraderErrors counts samples the provider returned but the Grader could
+	// not decide on. Distinct from CaseResult.Errors (provider failures): a
+	// grader that always errors yields Graded == 0, which must never read as
+	// a pass for ANY polarity, including TripWire (Present == 0 alone would
+	// look like a silent, never-evaluated green).
 	GraderErrors int
 
-	// FirstGraderError carries the first grader error's message (truncated —
-	// see truncateGraderError in runner.go), so a run that reports
-	// "grader errors: 3" is diagnosable without re-running under a debugger.
-	// Same pattern as FirstOffending below: keep the first instance, not all
-	// of them — subsequent grader errors on the same assertion are still
-	// counted in GraderErrors, just not individually retained.
+	// FirstGraderError is the first grader error's message (truncated, see
+	// truncateGraderError), kept for diagnosability. Only the first is
+	// retained; later errors still count toward GraderErrors.
 	FirstGraderError string
 
 	Pass           bool

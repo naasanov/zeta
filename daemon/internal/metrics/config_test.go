@@ -6,11 +6,8 @@ import (
 	"testing"
 )
 
-// TestConfigFromEnv_EnabledByDefault pins the TEMPORARY dogfooding default-ON:
-// with no env set, metrics must be enabled so friends' installs emit without
-// editing .zshrc. This inverts design §12's "default off" on purpose; when the
-// Phase-3 metrics strip restores default-OFF, this test flips back to asserting
-// disabled (see the comment on ConfigFromEnv).
+// TestConfigFromEnv_EnabledByDefault pins the TEMPORARY dogfooding
+// default-ON; flips to asserting disabled at the Phase-3 metrics strip.
 func TestConfigFromEnv_EnabledByDefault(t *testing.T) {
 	t.Setenv(EnvEnable, "")
 	if _, ok := ConfigFromEnv(); !ok {
@@ -18,9 +15,8 @@ func TestConfigFromEnv_EnabledByDefault(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_OnlyExplicitZeroDisables guards the disable contract with
-// the zsh side: only the literal "0" or "false" turns metrics off; every other
-// value (including unset and truthy strings) leaves them on.
+// TestConfigFromEnv_OnlyExplicitZeroDisables: only literal "0"/"false" turns
+// metrics off; every other value leaves them on.
 func TestConfigFromEnv_OnlyExplicitZeroDisables(t *testing.T) {
 	for _, v := range []string{"0", "false"} {
 		t.Setenv(EnvEnable, v)
@@ -36,8 +32,7 @@ func TestConfigFromEnv_OnlyExplicitZeroDisables(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_Defaults checks the resolved values when only the gate is
-// set: XDG state path, the short default socket, and a non-empty user.
+// TestConfigFromEnv_Defaults checks resolved values when only the gate is set.
 func TestConfigFromEnv_Defaults(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 	t.Setenv(EnvLogPath, "")
@@ -77,8 +72,6 @@ func TestConfigFromEnv_Overrides(t *testing.T) {
 	if cfg.SocketPath != "/tmp/custom.sock" {
 		t.Errorf("SocketPath = %q, want the override", cfg.SocketPath)
 	}
-	// The override is the whole point of EnvUser: OS usernames collide across
-	// the machines these logs get collected from.
 	if cfg.User != "nico" {
 		t.Errorf("User = %q, want the override %q", cfg.User, "nico")
 	}
@@ -96,11 +89,7 @@ func TestDefaultLogPath_FallsBackToHome(t *testing.T) {
 }
 
 // TestConfigFromEnv_RawTextEnabledByDefault pins the TEMPORARY dogfooding
-// default-ON: with EnvRawText unset, Config.RawText must be true so friends'
-// installs emit replayable eval cases without editing .zshrc. This inverts
-// design §12's "no command/buffer text by default, even locally" on purpose
-// (see the warning on EnvRawText); when raw-text capture reverts to opt-in
-// before real release, this test flips back to asserting false.
+// default-ON; flips to asserting false once raw-text reverts to opt-in.
 func TestConfigFromEnv_RawTextEnabledByDefault(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 	t.Setenv(EnvRawText, "")
@@ -114,11 +103,8 @@ func TestConfigFromEnv_RawTextEnabledByDefault(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_RawTextOnlyExplicitZeroDisables guards the opt-OUT
-// contract: only the literal "0" or "false" turns raw-text capture off; every
-// other value (including unset and arbitrary junk like "yes") leaves it on.
-// Mirrors TestConfigFromEnv_OnlyExplicitZeroDisables for EnvEnable, and is
-// temporary in exactly the same way.
+// TestConfigFromEnv_RawTextOnlyExplicitZeroDisables: only literal "0"/"false"
+// turns raw-text capture off; every other value leaves it on.
 func TestConfigFromEnv_RawTextOnlyExplicitZeroDisables(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 
@@ -145,10 +131,8 @@ func TestConfigFromEnv_RawTextOnlyExplicitZeroDisables(t *testing.T) {
 	}
 }
 
-// TestDefaultUser_NeverEmpty is the invariant that matters: whatever happens,
-// DefaultUser must return something attributable rather than "". An empty user
-// fails silently — it yields a well-formed event whose only symptom is
-// unattributable rows once the logs are collected.
+// TestDefaultUser_NeverEmpty: DefaultUser must never return "" (an empty
+// user fails silently as an unattributable row).
 func TestDefaultUser_NeverEmpty(t *testing.T) {
 	if got := DefaultUser(); strings.TrimSpace(got) == "" {
 		t.Error("DefaultUser() = empty, want the OS user or \"unknown\"")

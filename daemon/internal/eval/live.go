@@ -1,11 +1,8 @@
-// This file is Part 4 of .docs/eval_harness_plan.md: the live-provider axis.
-// It is the first thing in this package that can make a real network call —
-// everything through Part 3 drove StubProvider only. It deliberately
-// reimplements no provider-construction logic: it mirrors
-// daemon/cmd/autopilotd/main.go's newProvider switch (Adapter -> constructor)
-// and reuses internal/config's brand-preset table verbatim, because
-// duplicating that mapping with different behavior is exactly how an eval
-// run and a production run end up silently measuring two different things.
+// This file is the live-provider axis: the first thing in this package that
+// makes a real network call. It mirrors cmd/autopilotd/main.go's newProvider
+// switch and reuses internal/config's brand-preset table verbatim, so an
+// eval run and a production run can never silently diverge on how a
+// provider is constructed.
 package eval
 
 import (
@@ -15,34 +12,23 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// groqPerMinute is the plan doc's rate-limit line: "groq 25/min (free tier is
-// 30/min and we've already seen 19% 429s in the field)". Kept a hair under
-// the advertised limit deliberately, not equal to it — the field data showed
-// 429s even without the eval harness's own concurrent worker pool adding
-// load on top.
+// groqPerMinute is kept a hair under groq's advertised 30/min free tier —
+// field data showed 19% 429s even before the eval harness's own concurrent
+// worker pool adds load.
 const groqPerMinute = 25
 
-// NewLiveProvider resolves brand (a config preset name — "codestral",
-// "anthropic", "groq", "ollama" — or the "openai" escape hatch, exactly as
-// accepted by config.Config.Resolve) into a real provider.Provider, using an
-// empty config.Config so only the preset table applies (an eval run has no
-// config.toml profile of its own; -model is how a run pins something a
-// profile would otherwise override).
+// NewLiveProvider resolves brand ("codestral"/"anthropic"/"groq"/"ollama", or
+// the "openai" escape hatch) into a real provider.Provider, using an empty
+// config.Config so only the preset table applies. modelOverride, if
+// non-empty, replaces the preset's default model.
 //
-// modelOverride, if non-empty, replaces the preset's default model — the
-// plan doc's "pin the model per run, record it" rule. Pass "" to keep the
-// preset default.
+// A missing required API key is a clear, named, fatal error — never a
+// silent fallback to echo/stub output, unlike cmd/autopilotd's degrade path:
+// an eval that quietly measured a stub would produce numbers that look real
+// and aren't.
 //
-// A missing required API key is a clear, named error — "set
-// ZSH_AUTOPILOT_<BRAND>_KEY" — never a silent fallback to echo or stub
-// output. Unlike cmd/autopilotd (which degrades to echo mode so a shell
-// keeps working without ghost text), an eval that quietly measured a stub
-// would produce numbers that look real and are not; there is no analogous
-// safe degradation here, so this is fatal to the caller.
-//
-// fimRenderer comes from the selected Variant (Variant.FIMRenderer) and is
-// applied only to the codestral adapter; nil means the adapter's shipped
-// RenderFIM. See Variant.FIMRenderer on why non-FIM adapters ignore it.
+// fimRenderer comes from the selected Variant and applies only to the
+// codestral adapter; nil means the adapter's shipped RenderFIM.
 func NewLiveProvider(brand string, modelOverride string, maxTokens int, fimRenderer provider.FIMRenderer) (provider.Provider, error) {
 	var cfg config.Config
 	resolved, err := cfg.Resolve(brand)
@@ -70,15 +56,11 @@ func NewLiveProvider(brand string, modelOverride string, maxTokens int, fimRende
 }
 
 // newLiveAdapter mirrors cmd/autopilotd/main.go's newProvider switch
-// (Adapter -> constructor) exactly. It is a deliberate near-duplicate, not a
-// shared helper, because internal/eval cannot import cmd/autopilotd (a main
-// package) and cmd/autopilotd must not import internal/eval (see
-// types.go's "Import invariant"). If this ever drifts from newProvider,
-// re-copy it from there rather than inventing a third mapping.
-// fimRenderer applies to the codestral case only — it is the one adapter
-// with a FIM rendering step to swap. Passing it to the others would have
-// nothing to bind to, which is exactly why Variant.FIMRenderer is documented
-// as a no-op outside a codestral cell rather than an error.
+// exactly. It's a deliberate near-duplicate, not a shared helper: neither
+// package may import the other (see types.go's "Import invariant"). Re-copy
+// from newProvider if this drifts, rather than inventing a third mapping.
+// fimRenderer applies to codestral only — the one adapter with a FIM
+// rendering step to swap.
 func newLiveAdapter(r config.ResolvedProfile, apiKey string, maxTokens int, fimRenderer provider.FIMRenderer) (provider.Provider, error) {
 	switch r.Adapter {
 	case "openai":
@@ -95,14 +77,10 @@ func newLiveAdapter(r config.ResolvedProfile, apiKey string, maxTokens int, fimR
 }
 
 // LimiterForBrand returns the rate limiter an eval run should use for calls
-// to brand, per the plan doc's "Rate limiting" section: groq is capped at
-// groqPerMinute/min (its free tier's 30/min already produced 19% 429s in the
-// field per [[metrics-findings]]); codestral/anthropic are treated as
-// "unlimited but concurrency-bounded" — the Runner's own worker pool
-// (defaultConcurrency) is what bounds their concurrency, not a request-rate
-// token bucket. Unknown brands also get NoopLimiter: an unrecognized brand
-// will already have failed in NewLiveProvider before a limiter is ever
-// needed, so this just avoids a second place that has to enumerate brands.
+// to brand: groq is capped at groqPerMinute/min; codestral/anthropic and
+// unknown brands get NoopLimiter (concurrency-bounded by the Runner's worker
+// pool instead — an unrecognized brand will already have failed in
+// NewLiveProvider before a limiter matters).
 func LimiterForBrand(brand string) Limiter {
 	switch brand {
 	case "groq":

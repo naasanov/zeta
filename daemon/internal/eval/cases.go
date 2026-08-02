@@ -3,28 +3,17 @@ package eval
 import "github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 
 // This file is the full case corpus (plan doc "Test cases"): categories A,
-// B, D, F1, the deterministic E cases (E1, E2, E4, E5, E6, E8), the
-// deterministic C cases (C1/C2) from Part 2, plus Part 3's four judged
-// cases (C3, E3, E7, F2), each backed by a rubric graded through
-// defaultJudgeGrader (judge.go) rather than a deterministic Grader.
+// B, D, F1, the deterministic C/E cases (C1/C2, E1/E2/E4/E5/E6/E8), plus four
+// judged cases (C3, E3, E7, F2) graded through defaultJudgeGrader (judge.go).
 //
-// Cases() is the single accessor cmd/eval drives; keep it in the plan doc's
-// table order (A -> B -> C -> D -> E -> F) so a diff against the plan is a
-// visual scan, not a search.
-//
-// README.md in this directory is a human-readable index of every case here.
-// Any time a case is added, removed, or modified (Req, Assert, threshold,
-// polarity, grader, rubric — anything), update the matching row(s) in
-// README.md in the same change.
+// Cases() keeps the plan doc's table order (A -> B -> C -> D -> E -> F) so a
+// diff against the plan is a visual scan. README.md in this directory
+// indexes every case; update it alongside any case change.
 
-// Cases returns the full corpus, in stable ID order. Calling it repeatedly
-// returns equivalent (fresh) slices/values — see cases_test.go's determinism
-// check — since every Case is built fresh here rather than shared as
-// package-level mutable state. This holds for the judged cases too:
-// defaultJudgeGrader re-resolves the judge from the environment on every
-// call rather than caching a package-level Judge, so two Cases() calls in
-// the same process/environment produce Graders with equal Name() (the only
-// thing TestCases_Deterministic compares a Grader on).
+// Cases returns the full corpus, in stable ID order. Every Case is built
+// fresh on each call (no shared package-level state), so two calls produce
+// equivalent values — see cases_test.go's determinism check, which compares
+// judged-case Graders by Name() rather than identity.
 func Cases() []Case {
 	var cases []Case
 	cases = append(cases, syntaxCases()...)
@@ -89,13 +78,9 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A5 guards the accumulator's first-line cutoff (accum.go). This
-			// should almost NEVER fire in practice — the cutoff already
-			// strips anything past the first newline before this grader
-			// ever sees it — which is the point: it's a regression guard on
-			// that cutoff, not a case that's expected to catch live
-			// multi-line output. Do not delete it for "never firing"; a trip
-			// here means the cutoff broke.
+			// A5 guards the accumulator's first-line cutoff (accum.go). It
+			// should almost never fire — the cutoff already strips anything
+			// past the first newline — so a trip here means the cutoff broke.
 			ID:       "A5",
 			Category: "syntax",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "grep -rn 'TODO' src"},
@@ -142,16 +127,13 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A9: dogfooding bug, now FIXED — this is its regression
-			// guard. History's last entry, "git push", is already
-			// complete on its own, but RenderFIM used to render history
-			// and the predicted next command on adjacent lines with
-			// nothing but a newline between them, so the model treated
-			// it as an unfinished buffer and appended "origin main"
-			// instead of predicting a standalone next command. The fix
-			// was the "$ " transcript marker now in RenderFIM's shipped
-			// shape (provider/codestral.go); `-variants
-			// fim-no-prompt-marker` re-runs this against the old shape.
+			// A9 regression guard: history's last entry ("git push") is
+			// already complete, but rendering it directly adjacent to the
+			// predicted next command (no boundary marker) made the model
+			// treat it as an unfinished buffer and append "origin main".
+			// Fixed by RenderFIM's "$ " transcript marker (codestral.go);
+			// `-variants fim-no-prompt-marker` re-runs this against the old
+			// shape.
 			ID:       "A9",
 			Category: "syntax",
 			Req: protocol.Request{
@@ -263,16 +245,14 @@ func fabricationCases() []Case {
 
 // ---- C. Nonsense incrementing ---------------------------------------------
 //
-// C1/C2 are Part 2's narrow deterministic graders (normalize + diff, flag a
-// numeric-only delta). C3 is the general case they can't catch: a
-// mechanically-plausible-looking next command that isn't actually what a
-// developer would do next, which needs a judge's judgment rather than a
-// regex.
+// C1/C2 are narrow deterministic graders (normalize + diff, flag a
+// numeric-only delta). C3 is the general case they can't catch — a
+// mechanically-plausible next command that isn't actually useful — so it's
+// judged instead.
 
-// c3Rubric is deliberately concrete: "plausible" alone is exactly the vague
-// criterion the plan doc warns produces a noisy judge, so it names the
-// specific failure mode (mechanical version-bump for no reason) as the fail
-// example.
+// c3Rubric names the specific failure mode (mechanical version-bump) as the
+// fail example rather than leaving "plausible" as a vague, judge-noising
+// criterion.
 const c3Rubric = `The context is a shell history ending in a git tag-and-push sequence. You
 are shown a suggested next command. Answer: is this suggestion a plausible
 next command a developer would actually run in this situation (e.g.
@@ -343,8 +323,7 @@ func loopingCases() []Case {
 		{
 			// D2 is the "correct repeat" control: after a failing build, a
 			// suppressor that punishes ALL repeats would wrongly suppress
-			// this one. Any future suppressor must move D1/D3 down without
-			// moving D2/D4 down (plan doc).
+			// this one.
 			ID:       "D2",
 			Category: "looping",
 			Req: protocol.Request{
@@ -387,15 +366,13 @@ func loopingCases() []Case {
 
 // ---- E. Context usage -------------------------------------------------------
 //
-// E1, E2, E4, E5, E6, E8 (Part 2, deterministic) are the reason the harness
-// exists. E3 and E7 (Part 3, judged) cover context-usage questions no regex
-// can answer: "did it react to the failure" and "did it follow the CURRENT
-// directory over stale history" both require judging the suggestion's
-// intent, not just matching a substring.
+// E1/E2/E4/E5/E6/E8 are deterministic. E3 and E7 are judged: "did it react to
+// the failure" and "did it follow the CURRENT directory over stale history"
+// both require judging intent, not matching a substring.
 
-// e3Rubric: a failed build is the single most common signal a next-command
-// prediction should react to. The fail example is explicit so the judge
-// doesn't credit an unrelated-but-superficially-plausible suggestion.
+// e3Rubric: a failed build is the most common signal a next-command
+// prediction should react to; the fail example keeps the judge from
+// crediting an unrelated-but-plausible-looking suggestion.
 const e3Rubric = `The context shows the last command in history was "go build ./..." and it
 exited with a non-zero status (a failed build). Answer: does the suggested
 next command respond to that failure — e.g. retrying the build, running a
@@ -408,12 +385,9 @@ build has an obvious correct response (retry, inspect, fix), so producing
 nothing is a miss, not a judgement call. You are looking only at this
 question, not at syntax or formatting.`
 
-// e7Rubric: the history is deliberately from a DIFFERENT project (Node,
-// npm/yarn) than the live cwd/dir_entries/git_branch (a Go project) — this
-// is the open-question (a) probe from the plan doc ("FIM prompt shape"):
-// does top-placed cwd/git make the model assume all history ran in the
-// current directory? The rubric asks the judge to grade exactly that
-// tension, not whether the suggestion is "good" in general.
+// e7Rubric: history is deliberately from a DIFFERENT project (Node/npm) than
+// the live cwd/dir_entries/git_branch (Go) — probes whether top-placed
+// cwd/git makes the model wrongly assume all history ran in the current dir.
 const e7Rubric = `The shell history shown is from a DIFFERENT project than the current
 directory: the history lines are Node.js/npm commands, but the current
 working directory, directory listing, and git branch all describe a Go
@@ -497,12 +471,9 @@ func contextCases() []Case {
 			},
 		},
 		{
-			// E6 is the open-question (a) probe: does stale history from a
-			// different project (8 npm commands) win over the CURRENT cwd
-			// (a go module, no package.json in sight) once the transcript
-			// has moved on ("cd ../gotool", "go mod tidy")? "npm" in the
-			// output means the model anchored on stale history instead of
-			// the live cwd/dir_entries.
+			// E6: does stale history (8 npm commands) win over the CURRENT
+			// cwd (a Go module) once the transcript has moved on? "npm" in
+			// the output means the model anchored on stale history.
 			ID:       "E6",
 			Category: "context",
 			Req: protocol.Request{
@@ -529,10 +500,8 @@ func contextCases() []Case {
 			},
 		},
 		{
-			// E7 is E6's judged sibling, same open-question (a) probe, but
-			// asking the general question directly instead of pattern-
-			// matching for "npm": does the suggestion follow the CURRENT
-			// directory over stale cross-project history.
+			// E7 is E6's judged sibling: asks the same question directly
+			// instead of pattern-matching for "npm".
 			ID:       "E7",
 			Category: "context",
 			Req: protocol.Request{
@@ -556,11 +525,8 @@ func contextCases() []Case {
 			},
 		},
 		{
-			// E8: with genuinely no context (no history, no cwd/git/dir
-			// signal) there is nothing to predict from, so abstaining
-			// (empty output) IS the correct behavior. This is the abstain
-			// rate, tracked not asserted — there's no established target
-			// yet, only a number to watch move.
+			// E8: with no context at all, abstaining (empty output) is
+			// correct. Tracked, not asserted — no established target yet.
 			ID:       "E8",
 			Category: "context",
 			Req:      protocol.Request{Kind: protocol.KindNextCommand},
@@ -573,15 +539,13 @@ func contextCases() []Case {
 
 // ---- F. Abstention ----------------------------------------------------------
 //
-// F1 (Part 2, deterministic) covers plain garbage input. F2 (Part 3, judged)
-// covers the harder case a regex can't grade: a buffer that's already a
-// complete, valid command, where the ONLY correct behaviors are "append a
+// F1 covers plain garbage input. F2 is judged: a buffer that's already a
+// complete, valid command, where the only correct behaviors are "append a
 // sensible continuation" or "abstain" — never noise.
 
-// f2Rubric explicitly states that an empty suggestion is a GOOD outcome
-// here, per the task brief: without that line a judge grading "is the
-// appended text a sensible continuation" naively would penalize a correct
-// abstention for having no continuation to evaluate.
+// f2Rubric states explicitly that an empty suggestion is a GOOD outcome, so
+// the judge doesn't penalize a correct abstention for having nothing to
+// evaluate.
 const f2Rubric = `The buffer already typed is "ls -la" — a complete, valid, self-contained
 shell command with common flags. You are shown what (if anything) the
 system suggests appending after it. An EMPTY suggestion is a GOOD, correct
@@ -601,11 +565,9 @@ func abstentionCases() []Case {
 			Category: "abstention",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "asdkjhqwe"},
 			Asserts: []Assertion{
-				// Two assertions on one case, deliberately not one compound
-				// grader (plan doc: "prefer multiple assertions... a
-				// compound grader that fails tells you less"). AnyOf is
-				// used ONLY for the genuine disjunction the plan describes
-				// ("empty or <=8 chars").
+				// Two assertions, not one compound grader — a compound
+				// grader that fails tells you less. AnyOf here is a genuine
+				// disjunction ("empty or <=8 chars").
 				{Label: "empty-or-short", Polarity: Must, Threshold: 0.70,
 					Grader: AnyOf("empty-or-not-longer-than-8", IsEmpty(), Not(LongerThan(8)))},
 				{Label: "prose-markers", Polarity: TripWire, Grader: LooksLikeProse()},

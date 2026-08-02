@@ -14,31 +14,18 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// LLM adapts a provider.Provider into the server's suggest seam
-// (func(ctx, protocol.Request) (protocol.Reply, error)). It builds the
-// prompt from req.Buf plus whatever step-5 context fields (design §7) are
-// present on the request (see prompt.Build), calls the provider, and
-// assembles the reply so Suggestion always starts with req.Buf: the zsh
-// client strips that exact prefix before painting ghost text, so this
-// invariant is load-bearing, not cosmetic.
+// LLM adapts a provider.Provider into the server's suggest seam. It builds
+// the prompt from req (see prompt.Build), calls the provider, and assembles
+// the reply so Suggestion always starts with req.Buf — the zsh client strips
+// that exact prefix before painting ghost text, so this is load-bearing.
+// Taking the Provider interface makes LLM testable with a stub instead of an
+// httptest.Server.
 //
-// Taking provider.Provider (the interface) rather than a concrete client is
-// the point of this seam: it makes LLM testable with a stub instead of an
-// httptest.Server (see TestLLM_StubProvider).
-//
-// METRICS(§12): emit, when non-nil, receives the "request" event built from
-// req + the provider's Completion stats after every call (success or
-// error). nil disables metrics entirely with zero added cost on this path.
-//
-// METRICS(§12): rawText gates opt-in raw-text capture (design §12; see
-// metrics.Config.RawText). When true, the emitted event's raw-text fields
-// (Buf/Suggestion/Cwd/GitBranch/GitDirty/LastExit/History/DirEntries) are
-// filled from req (and, on success, reply.Suggestion) so the event alone is
-// enough to reconstruct the originating protocol.Request for eval-harness
-// replay. When false, none of those fields are touched — they stay zero and
-// omitempty, so the emitted JSON is unchanged from before this parameter
-// existed. This is the flag the Phase-3 metrics strip should grep for
-// (METRICS(§12)) alongside everything else in this package.
+// METRICS(§12): emit, when non-nil, receives the "request" event after every
+// call. rawText gates opt-in raw-text capture (metrics.Config.RawText): when
+// true the event's raw-text fields are filled from req (and, on success,
+// reply.Suggestion) so it alone can reconstruct the request for eval-harness
+// replay; when false those fields stay zero/omitempty.
 func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent), rawText bool) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 		built := prompt.Build(req)
@@ -58,9 +45,8 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 				errorType = string(perr.Kind)
 			}
 
-			// METRICS(§12): a cancelled/superseded request (ctx.Err() != nil)
-			// gets its own event shape so cancellations are distinguishable
-			// from real provider errors in the log.
+			// METRICS(§12): a cancelled/superseded request gets its own event
+			// shape so it's distinguishable from a real provider error.
 			if emit != nil {
 				ev := metrics.RequestEvent{
 					V:                 1,
@@ -81,10 +67,8 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 					ev.Cancelled = true
 					ev.CancelledAtStage = "in_flight"
 				}
-				// METRICS(§12): raw-text capture, error path — no Suggestion
-				// exists (the call failed), but the request-side fields are
-				// still filled: a failed/cancelled request is still a valid
-				// eval-harness input to replay.
+				// METRICS(§12): error path — no Suggestion (the call failed),
+				// but request-side fields are still filled for eval replay.
 				if rawText {
 					ev.Buf = req.Buf
 					ev.Cwd = req.Cwd
@@ -133,10 +117,8 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 				CostUSD:           metrics.CostUSD(p.Name(), p.Model(), completion.InputTokens, completion.OutputTokens, completion.CachedTokens),
 				PriceTableVersion: metrics.PriceTableVersion,
 			}
-			// METRICS(§12): raw-text capture, success path — the full
-			// reply.Suggestion (which by contract starts with req.Buf) is
-			// captured alongside the request-side fields, enough to
-			// reconstruct req verbatim and replay it as an eval case.
+			// METRICS(§12): success path — reply.Suggestion plus the
+			// request-side fields, enough to replay req as an eval case.
 			if rawText {
 				ev.Buf = req.Buf
 				ev.Suggestion = reply.Suggestion

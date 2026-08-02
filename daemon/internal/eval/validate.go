@@ -1,35 +1,16 @@
-// validate.go is Part 5's judge-validation harness (plan doc "The judge" ->
-// "Validating the judge before trusting it"): the build half of the
-// non-negotiable rule that NO judged number (C3/E3/E7/F2) may be quoted
-// until a candidate judge model has been measured at >=90% agreement with
-// hand-written human labels on the SAME samples, and that the judge is
-// picked empirically by agreement-per-dollar, not by reputation.
+// validate.go is the judge-validation harness: no judged number (C3/E3/E7/F2)
+// may be quoted until a candidate judge model is measured at >=90% agreement
+// with hand-written human labels on the SAME samples, and the judge is
+// picked by agreement-per-dollar, not reputation.
 //
-// # Reusing the production JudgeInput path
+// judgedAssertion reads rubric/label directly off the *judgeGrader Cases()
+// already built (same package, unexported fields visible), so this file
+// never re-types rubric text that could drift from cases.go.
 //
-// judge.go's judgeGrader.Grade builds JudgeInput{Rubric: g.rubric, Req: in,
-// Suggestion: suggestion} inline — a three-field struct literal, not a
-// separate constructor function. There is nothing to call to "reuse" beyond
-// that literal itself, so this file gets at the same two ingredients
-// (rubric text, assertion label) the production grader closes over by
-// reading them directly off the *judgeGrader Cases() already built for the
-// case (judgedAssertion, below) — same package, so the unexported fields are
-// visible — rather than re-typing rubric strings here where they could
-// silently drift from cases.go. The Suggestion field is the label's
-// Suggestion verbatim: per the pinned label-file format, that string IS the
-// full resulting command line (what fullCommand(in, out) would have
-// produced), exactly what judgeGrader.Grade passes as JudgeInput.Suggestion.
-//
-// # Cost estimation caveat
-//
-// The Judge interface (judge.go) returns only a JudgeVerdict — it does not
-// surface token usage, and this file's scope forbids editing judge.go to add
-// it. So cost here is always the price-table estimate (judgeInputPriceTable
-// below) applied to a rough token count of the exact rendered prompt
-// (judgeSystemPrompt + renderJudgeUser, the same functions the production
-// judge uses to build its request), not a real usage figure from the API
-// response. Good enough for ranking candidates against each other — the
-// plan doc's "agreement-per-dollar" comparison only needs relative cost.
+// Cost estimation caveat: the Judge interface returns no token usage, so
+// cost here is always a chars/4 estimate applied to the exact rendered
+// prompt — good enough to rank candidates against each other, not a billing
+// figure.
 package eval
 
 import (
@@ -70,14 +51,10 @@ type labelLine struct {
 }
 
 // LoadLabels reads and validates a judge_labels.jsonl stream against cases
-// (normally eval.Cases()). Every row is checked eagerly and any problem is a
-// fatal error naming the offending line — a typo'd case_id that silently
-// scored nothing is exactly the failure this harness exists to prevent, so
-// there is no "skip and warn" path here, unlike JudgeCache's corrupt-entry
-// handling (that cache is a pure optimization; this is ground truth).
-//
-// Blank lines and lines starting with "#" are skipped, so the file can carry
-// human annotations.
+// (normally eval.Cases()). Every row is checked eagerly; any problem is a
+// fatal error naming the offending line — unlike JudgeCache's corrupt-entry
+// handling (a pure optimization), this is ground truth, so there is no
+// "skip and warn" path. Blank lines and "#" lines are skipped.
 func LoadLabels(r io.Reader, cases []Case) ([]Label, error) {
 	caseIndex := make(map[string]Case, len(cases))
 	for _, c := range cases {
@@ -126,11 +103,9 @@ func LoadLabels(r io.Reader, cases []Case) ([]Label, error) {
 }
 
 // judgedAssertion finds the judge-backed Assertion on c, if any, and returns
-// the exact label/rubric the production grader (defaultJudgeGrader in
-// cases.go) closes over. This is the single place validate.go reaches into
-// judge.go's unexported *judgeGrader shape, so that rubric text lives in
-// exactly one place (cases.go) and can never drift between what's graded for
-// real and what's graded during validation.
+// the exact label/rubric the production grader closes over — the one place
+// this file reaches into judge.go's unexported *judgeGrader shape, so rubric
+// text can never drift between real grading and validation.
 func judgedAssertion(c Case) (label, rubric string, ok bool) {
 	for _, a := range c.Asserts {
 		if jg, isJudge := a.Grader.(*judgeGrader); isJudge {
@@ -189,15 +164,12 @@ type JudgeScore struct {
 }
 
 // ValidateJudges scores each of judges against labels, building JudgeInput
-// exactly as the production grader would (same rubric, same Req, same
-// Suggestion text) via judgedAssertion. ctx is forwarded to every Judge call
-// so the whole validation run stays cancellable like any other network-bound
-// eval operation.
+// exactly as the production grader would via judgedAssertion. ctx is
+// forwarded to every Judge call so the run stays cancellable.
 //
-// Callers are responsible for constructing judges with a bypassed verdict
-// cache (or none at all) — ValidateJudges never touches JudgeCache itself,
-// so there is nothing here that could accidentally score cached verdicts
-// left over from a previous rubric. See NewJudgeCache's bypass parameter.
+// ValidateJudges never touches JudgeCache itself — callers are responsible
+// for constructing judges with a bypassed cache (or none) so a previous
+// rubric's cached verdicts can't leak in.
 func ValidateJudges(ctx context.Context, labels []Label, cases []Case, judges []Judge) []JudgeScore {
 	caseIndex := make(map[string]Case, len(cases))
 	for _, c := range cases {
@@ -304,16 +276,13 @@ func safeDiv(num, den int) float64 {
 // cohenKappa computes Cohen's kappa for a 2x2 confusion matrix between two
 // raters (human, judge): aa=both-pass, bb=human-pass/judge-fail,
 // cc=human-fail/judge-pass, dd=both-fail. Kappa corrects raw agreement for
-// the agreement expected by chance given each rater's marginal — the plan
-// doc's explicit reason to report it alongside Agreement: a judge that
-// always says "fail" on a lopsided 27/30-fail label set scores 90% raw
-// agreement while being worthless, and kappa ~0 is what exposes that.
+// chance agreement given each rater's marginal: a judge that always says
+// "fail" on a lopsided 27/30-fail set scores 90% raw agreement while being
+// worthless, and kappa ~0 exposes that.
 //
-// pe==1 (both raters' marginals are degenerate, e.g. every label AND every
-// verdict is "fail") makes the standard formula's denominator zero; that
-// case is treated as kappa=1 if observed agreement is also perfect (there is
-// no disagreement to explain) and kappa=0 otherwise (can't happen
-// arithmetically, but guards against surprises from float rounding).
+// pe==1 (both marginals degenerate) makes the standard formula's denominator
+// zero; treated as kappa=1 if observed agreement is also perfect, kappa=0
+// otherwise (guards against float rounding surprises).
 func cohenKappa(aa, bb, cc, dd int) float64 {
 	n := aa + bb + cc + dd
 	if n == 0 {
@@ -356,13 +325,10 @@ type judgeModelPrice struct {
 	OutPerM float64
 }
 
-// judgeInputPriceTable mirrors the plan doc's judge pricing table ("The
-// judge" section). Prices are the same directional, vendor-sourced numbers
-// cited there — re-check against each vendor's own pricing page before
-// quoting a budget from this, same caveat the plan doc states for itself.
-// An unknown model id prices at 0 (an advisory number, not billing) rather
-// than erroring, so validating an unlisted model still produces an
-// agreement score.
+// judgeInputPriceTable is directional, vendor-sourced pricing — re-check
+// against each vendor's own page before quoting a budget from this. An
+// unknown model id prices at 0 (advisory, not billing) rather than erroring,
+// so validating an unlisted model still produces an agreement score.
 var judgeInputPriceTable = map[string]judgeModelPrice{
 	"gemini-3.5-flash-lite": {InPerM: 0.30, OutPerM: 2.50},
 	"gemini-3.1-flash-lite": {InPerM: 0.25, OutPerM: 1.50},
@@ -416,11 +382,9 @@ func RankByAgreementPerDollar(scores []JudgeScore) []JudgeScore {
 }
 
 // LabelImbalance reports the fraction of labels marked "pass" and whether
-// the label set is heavily imbalanced (>=80% one verdict) — the condition
-// under which raw Agreement alone is misleading and Kappa must be read
-// instead (plan doc: "a judge that always says fail scores 90% while being
-// worthless"). threshold is fixed at 0.80 rather than exposed as a
-// parameter: it's a reporting heuristic, not a tunable knob.
+// the set is heavily imbalanced (>=80% one verdict) — the condition under
+// which raw Agreement is misleading and Kappa must be read instead. 0.80 is
+// a fixed reporting heuristic, not a tunable parameter.
 func LabelImbalance(labels []Label) (fracPass float64, imbalanced bool) {
 	if len(labels) == 0 {
 		return 0, false

@@ -14,9 +14,8 @@ import (
 )
 
 // newAnthropicTestClient builds a Provider whose requests are aimed at srv
-// via option.WithBaseURL. Production code (NewAnthropic) never sets a
-// baseURL — the native Anthropic endpoint is fixed — so this test suite goes
-// through the unexported newAnthropicClient constructor instead.
+// via option.WithBaseURL, going through the unexported newAnthropicClient
+// constructor since NewAnthropic never sets a baseURL.
 func newAnthropicTestClient(t *testing.T, baseURL string) Provider {
 	t.Helper()
 	p, err := newAnthropicClient("test-model", "test-key", 48, baseURL)
@@ -30,10 +29,9 @@ func testReqAnthropic(system, user string) Request {
 	return Request{Prompt: prompt.Prompt{System: system, Prefix: user}, MaxTokens: 48}
 }
 
-// sseEvent builds one SSE event with an explicit "event:" line, matching the
-// shape anthropic-sdk-go's decoder requires: it reads the event type from the
-// "event:" field, not from the JSON payload's own "type" key (see
-// ssestream.eventStreamDecoder.Next), so every event below carries both.
+// sseEvent builds one SSE event with an explicit "event:" line: the SDK's
+// decoder reads the event type from that field, not the JSON payload's own
+// "type" key, so every event below carries both.
 func sseEvent(t *testing.T, eventType string, data any) string {
 	t.Helper()
 	b, err := json.Marshal(data)
@@ -143,13 +141,10 @@ func TestAnthropicComplete_HappyPath(t *testing.T) {
 	}
 }
 
-// TestAnthropicComplete_FirstLineCutoff mirrors openai_test.go's
-// TestComplete_FirstLineCutoff: a stream whose text spans a newline partway
-// through, with a deliberately slow final chunk. Asserts both that (a) only
-// the text before the newline comes back, and (b) Complete returns long
-// before the late chunk would have arrived — proving the client actually
-// stopped reading early rather than happening to produce the right prefix
-// after consuming everything.
+// TestAnthropicComplete_FirstLineCutoff: a stream spans a newline partway
+// through, with a deliberately slow final chunk. Asserts only the text
+// before the newline comes back, and Complete returns before the late chunk
+// arrives — proving the client stopped reading early.
 func TestAnthropicComplete_FirstLineCutoff(t *testing.T) {
 	const lateDelay = 300 * time.Millisecond
 
@@ -199,11 +194,8 @@ func TestAnthropicComplete_FirstLineCutoff(t *testing.T) {
 	}
 }
 
-// TestAnthropicComplete_Cancellation forces a stream that blocks indefinitely
-// after its first chunk, then cancels the ctx passed to Complete. It asserts
-// Complete returns promptly (not after the block would otherwise clear) with
-// a context error, proving the in-flight request is actually aborted by ctx
-// cancellation and the call does not hang.
+// TestAnthropicComplete_Cancellation: a stream blocks indefinitely after its
+// first chunk; cancelling ctx must abort it promptly with a context error.
 func TestAnthropicComplete_Cancellation(t *testing.T) {
 	blockCh := make(chan struct{})
 
@@ -281,11 +273,9 @@ func TestAnthropicComplete_HTTPError(t *testing.T) {
 	}
 }
 
-// TestAnthropicComplete_UsageAndFinishReason drives a stream that ends (no
-// newline in the content, so the first-line cutoff doesn't fire) with a
-// message_delta carrying usage and stop_reason, asserting both decode onto
-// the returned Completion. Mirrors openai_test.go's
-// TestComplete_UsageAndFinishReason.
+// TestAnthropicComplete_UsageAndFinishReason: a stream ends (no newline, so
+// the cutoff doesn't fire) with a message_delta carrying usage and
+// stop_reason; both must decode onto the returned Completion.
 func TestAnthropicComplete_UsageAndFinishReason(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

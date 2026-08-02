@@ -1,12 +1,9 @@
 // Package server implements the autopilotd process: a Unix-socket listener
-// that speaks the protocol package's wire format and a per-connection request
+// speaking the protocol package's wire format, plus a per-connection request
 // coordinator (design §3, §13 "Goroutine/cancellation leaks"). Within one
-// connection (one shell session), a newly arriving request supersedes and
-// cancels the previous in-flight one via context.Context cancellation, so
-// stale work never blocks a fresher request or leaks a goroutine. The
-// suggestion source itself (see suggest / suggestEcho) is still a stub — the
-// real provider layer lands in a later step and only needs to replace that
-// one seam.
+// connection, a newly arriving request supersedes and cancels the previous
+// in-flight one via context.Context, so stale work never blocks a fresher
+// request or leaks a goroutine.
 package server
 
 import (
@@ -51,12 +48,10 @@ type Server struct {
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
 
-	// suggest produces the reply for a request. This is the seam the real
-	// provider layer replaces in a later step; today it defaults to an
-	// instant echo stub. Tests override it with a controlled stub (one that
-	// blocks on ctx, or on a per-request channel) to create deterministic
-	// cancellation windows. It MUST respect ctx: return promptly when ctx is
-	// done so a superseded/cancelled request's goroutine doesn't leak.
+	// suggest produces the reply for a request; defaults to an instant echo
+	// stub, overridden via SetSuggest. It MUST respect ctx: return promptly
+	// when ctx is done so a superseded/cancelled request's goroutine doesn't
+	// leak.
 	suggest func(ctx context.Context, req protocol.Request) (protocol.Reply, error)
 }
 
@@ -211,32 +206,22 @@ func (s *Server) closeAllConns() {
 // which debounces bursts and dispatches processing goroutines, until EOF/a
 // decode error ends the connection or the server shuts down.
 //
-// Debounce (design §4): a burst of rapid requests (e.g. one per keystroke)
-// must not each hit the provider — free-tier rate limits (e.g. Groq's 30
-// req/min) make that fail fast. So the coordinator never dispatches the
-// instant a request arrives; it buffers the latest one and (re)starts a
-// timer. Only once the timer fires — meaning s.Debounce has passed with no
-// newer request superseding it — does the buffered request actually get
-// sent to the provider. Cancellation alone can't substitute for this: a
-// cancelled request was already sent and still counted against the rate
-// limit.
+// Debounce (design §4): a burst of rapid requests must not each hit the
+// provider — free-tier rate limits make that fail fast, and cancellation
+// alone doesn't help since a cancelled request was already sent and still
+// counted against the limit. So dispatch only happens once s.Debounce has
+// passed since the latest buffered request with nothing superseding it.
 //
 // Dispatch, cancelPrev, and the debounce timer are all owned by this single
-// goroutine (never the reader), which is deliberate: it's what lets teardown
-// wait on wg (outstanding processing goroutines) without a timer callback
-// racing a wg.Add against wg.Wait from another goroutine.
+// goroutine (never the reader) so teardown can wait on wg without a timer
+// callback racing wg.Add against wg.Wait from elsewhere.
 //
-// Per-connection state:
-//   - connCtx/connCancel: cancelled when the server shuts down (ctx) OR this
-//     handler returns (EOF/close), so every processing goroutine for this
-//     connection is torn down at the latest by connection teardown.
-//   - cancelPrev: the supersede handle. A newly dispatched request cancels
-//     whatever was previously in flight before installing itself. Only this
-//     goroutine touches it, so it needs no mutex.
-//   - writeMu: serializes writes to conn so two processing goroutines never
-//     interleave bytes on the wire.
-//   - wg: tracks outstanding processing goroutines so handle does not return
-//     (and does not let conn.Close race a write) until they've all exited.
+// Per-connection state: connCtx/connCancel tear down every processing
+// goroutine at the latest by connection teardown; cancelPrev is the
+// supersede handle (only this goroutine touches it, no mutex needed);
+// writeMu serializes writes to conn; wg tracks outstanding processing
+// goroutines so handle doesn't return (racing conn.Close against a write)
+// until they've all exited.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	connCtx, connCancel := context.WithCancel(ctx)
 
@@ -368,11 +353,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// suggestEcho is a PLACEHOLDER echo suggestion, ported from
-// spike/echo-server's suggest(). It exists only to prove the protocol and
-// process skeleton end-to-end; a later step replaces this with the real
-// provider layer. The reply MUST begin with the buffer itself, because the
-// zsh client paints only the remainder after stripping the typed prefix.
+// suggestEcho is the default (no-provider) echo suggestion. The reply MUST
+// begin with the buffer itself: the zsh client paints only the remainder
+// after stripping the typed prefix.
 func suggestEcho(buf string) string {
 	switch {
 	case buf == "":

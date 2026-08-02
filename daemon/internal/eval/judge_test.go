@@ -438,12 +438,9 @@ func TestJudgeGrader_NameIsStableAndCaseScoped(t *testing.T) {
 }
 
 // TestDefaultJudgeModel_UsesDots guards a real bug: Gemini model ids use
-// dots ("gemini-3.5-flash-lite"), not dashes ("gemini-3" + "-5-flash-lite",
-// deliberately not written as one literal here so it doesn't itself become a
-// grep hit for the typo it's guarding against). The dashed form parses fine
-// as a config value and fails only at request time with a 404 that reads
-// like an auth failure, not a typo'd model id — verified against the live
-// API before this default was fixed.
+// dots, not dashes ("gemini-3"+"-5-flash-lite", split so this test isn't
+// itself a grep hit for the typo). The dashed form parses fine as a config
+// value and 404s at request time in a way that reads like an auth failure.
 func TestDefaultJudgeModel_UsesDots(t *testing.T) {
 	if defaultJudgeModel != "gemini-3.5-flash-lite" {
 		t.Errorf("defaultJudgeModel = %q, want the dotted form %q", defaultJudgeModel, "gemini-3.5-flash-lite")

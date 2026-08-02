@@ -12,39 +12,23 @@ import (
 )
 
 // Variant builds a provider-neutral prompt.Prompt from a request, under a
-// name that identifies it in the scorecard. The "variant axis" (plan doc,
-// "The variant axis") is how the harness answers prompt-shape questions: swap
-// in a Build that mutates the Prompt (e.g. drop Prompt.History to compare
-// fim-raw-history against fim-commented-history) without touching Runner or
-// the cases.
-//
-// Name is a plain field rather than something derived from the function: a
-// variant is usually a closure, and closure names ("eval.foo.func1") are both
-// unstable and meaningless in a report that exists to be diffed across runs.
+// Name field (rather than a derived name) since a variant is usually a
+// closure and closure names are unstable and meaningless in a diffable report.
 type Variant struct {
 	Name  string
 	Build func(protocol.Request) prompt.Prompt
 
 	// FIMRenderer, when non-nil, replaces how the codestral adapter renders
-	// the Prompt into FIM prompt+suffix (provider.WithFIMRenderer). Build
-	// varies the prompt's CONTENT; this varies its SHAPE — a distinction the
-	// Build seam alone cannot express, because rendering happens inside the
-	// adapter, after Build has run.
-	//
-	// Ignored by every non-FIM adapter: the chat providers render System +
-	// ChatUser() and have no FIM step to swap. A variant setting this
-	// therefore only produces a distinct condition in a codestral cell; in
-	// an anthropic/groq cell it is silently identical to "default", which is
-	// correct (the hypothesis is FIM-specific) but means a matrix run's
-	// non-codestral rows for such a variant carry no new information.
+	// the Prompt (provider.WithFIMRenderer): Build varies prompt content,
+	// this varies rendering shape, which only the adapter can do. Ignored by
+	// chat adapters, so a variant using only this is identical to "default"
+	// outside a codestral cell.
 	FIMRenderer provider.FIMRenderer
 }
 
-// DefaultVariant is the unmodified pipeline: prompt.Build with no mutation.
-// Deliberately named "default" rather than "fim-raw-history" — the same
-// neutral Prompt renders as raw-history FIM through the codestral adapter and
-// as chat-baseline through the others, so the name belongs to the
-// provider×variant cell that Part 4 assembles, not to this func.
+// DefaultVariant is the unmodified pipeline. Named "default" rather than
+// "fim-raw-history": the same neutral Prompt renders as raw-history FIM
+// under codestral and as chat-baseline elsewhere.
 func DefaultVariant() Variant {
 	return Variant{Name: "default", Build: prompt.Build}
 }
@@ -110,21 +94,15 @@ func (l *RateLimiter) Wait(ctx context.Context) error {
 	}
 }
 
-// defaultMinRuns, defaultMaxRuns are the adaptive-sampling defaults from the
-// plan doc ("Sampling: adaptive, not fixed-N"): run 3, escalate to 10 on any
-// disagreement.
+// defaultMinRuns, defaultMaxRuns: adaptive sampling runs 3, escalates to 10
+// on any disagreement (see Runner.FixedN to opt out).
 const (
 	defaultMinRuns = 3
 	defaultMaxRuns = 10
 
-	// defaultConcurrency bounds how many Cases the Runner works on at once.
-	// Runs *within* one case stay sequential (the plan doc: "Keep the
-	// concurrency simple and obvious ... the runs within a case are few"),
-	// so this is the only concurrency knob Part 1 needs. It's only a
-	// sensible default when a cell has no shared Limiter (NoopLimiter, or
-	// codestral/anthropic's per-worker HTTP concurrency); a cell with a real
-	// rate limiter should override it via Runner.Concurrency — see that
-	// field's doc comment.
+	// defaultConcurrency bounds how many Cases run at once; runs within one
+	// case stay sequential. Only sensible without a shared Limiter — a cell
+	// with a real rate limiter should set Runner.Concurrency instead.
 	defaultConcurrency = 4
 )
 
@@ -137,39 +115,24 @@ type Runner struct {
 	MaxRuns  int // default 10
 	FixedN   int // 0 = adaptive; otherwise exactly N, hard-capped at MaxRuns
 
-	// Concurrency overrides defaultConcurrency (0 = use the default). A
-	// Limiter shared across workers (e.g. groq's RateLimiter) makes extra
-	// workers pure queuing latency with no throughput benefit — the calls
-	// are still paced to one per interval, worker count only decides which
-	// case's calls occupy which slots. Since Progress reports strictly in
-	// case order (see below), spreading a cell's limited slots across
-	// several concurrent cases delays the first reported result for no
-	// gain; callers building a rate-limited cell should pass Concurrency: 1.
+	// Concurrency overrides defaultConcurrency (0 = default). With a shared
+	// Limiter (e.g. groq's RateLimiter) extra workers only add queuing
+	// latency, not throughput, and since Progress reports in case order,
+	// spreading limited slots across concurrent cases delays the first
+	// result for no gain — rate-limited cells should pass Concurrency: 1.
 	Concurrency int
 
-	// ProviderLabel overrides what CaseResult.Provider records, and must be
-	// the user-facing BRAND (codestral/anthropic/groq/ollama) rather than
-	// Provider.Name(), which returns the internal ADAPTER. Several brands
-	// share the openai adapter (see cmd/autopilotd's newProvider), so
-	// Name() alone reports groq as "openai" — and since the scorecard pivots
-	// on the cell label, groq and ollama in one matrix would collapse into a
-	// single column, each silently overwriting the other's results. Empty
-	// falls back to Provider.Name().
+	// ProviderLabel overrides CaseResult.Provider and must be the brand
+	// (codestral/anthropic/groq/ollama), not Provider.Name() (the adapter):
+	// several brands share the openai adapter, so Name() alone would report
+	// groq as "openai" and collide with it in the scorecard. Empty falls
+	// back to Provider.Name().
 	ProviderLabel string
 
-	// Progress, when non-nil, is called once per completed case for live
-	// pytest-style output. Two guarantees callers depend on:
-	//
-	//   - It is called in CASE ORDER, not completion order, even though cases
-	//     run concurrently. A progress stream whose Nth symbol isn't the Nth
-	//     case is worse than none: it invites reading "the 5th case failed"
-	//     off a dot that belongs to whichever case happened to finish 5th.
-	//   - It is called from exactly one goroutine at a time and never while
-	//     Run holds a lock, so an implementation is free to write to a shared
-	//     io.Writer without its own synchronization, and cannot deadlock Run.
-	//
-	// A slow Progress func serializes the pool's completions, so keep it to
-	// formatting and a write.
+	// Progress, when non-nil, is called once per completed case, in CASE
+	// ORDER (not completion order, even though cases run concurrently) and
+	// from one goroutine at a time without Run holding a lock — safe to
+	// write to a shared io.Writer, but a slow Progress serializes the pool.
 	Progress func(Case, CaseResult)
 }
 
@@ -234,44 +197,11 @@ func (r *Runner) resolved() (min, max, concurrency int, variant Variant, limiter
 	return min, max, concurrency, variant, limiter
 }
 
-// Run drives every case in cases through r.Provider and returns one
-// CaseResult per case, in the same order as cases.
-//
-// # Goroutine lifecycle
-//
-// Run owns a small bounded worker pool, all of it contained within this one
-// call:
-//
-//  1. Run allocates `results` sized len(cases) up front and starts
-//     min(defaultConcurrency, len(cases)) worker goroutines via a
-//     sync.WaitGroup, each ranging over a `jobs` channel of case indices.
-//  2. Run itself (the caller's goroutine) sends every index 0..len(cases) on
-//     `jobs`, then closes it. Close happens only after every send has
-//     completed synchronously in this same goroutine, so no worker can ever
-//     observe a closed-but-not-fully-drained channel racing a send.
-//  3. Each worker computes results[idx] = r.runCase(...) and writes directly
-//     to its own index. No mutex is needed for that write: every worker
-//     owns a disjoint set of indices (one case is only ever processed by
-//     the worker that received it), so there is no shared mutable state
-//     between workers at all — the classic "shard by index, no lock needed"
-//     pattern.
-//  4. Run calls wg.Wait() after closing `jobs`. Workers exit their range
-//     loop (and call wg.Done) once `jobs` is closed AND drained, which is
-//     guaranteed to happen because nothing blocks a worker from consuming
-//     jobs (runCase always returns — errors are captured as Sample.Err, not
-//     propagated as a stuck call) and nothing blocks the send side from
-//     finishing (the channel is buffered to len(cases), so every send
-//     completes without needing a receiver first).
-//
-// Why it can't deadlock: the only channel (`jobs`) is closed exactly once,
-// after all sends complete, by the same goroutine that owns the send side —
-// so "send on closed channel" is impossible. The only blocking wait
-// (wg.Wait) is on workers whose own blocking operations (Limiter.Wait,
-// Provider.Complete) already take ctx and return promptly on
-// cancellation, so a canceled ctx unblocks the whole pool rather than
-// hanging it. Run does not read `results` until wg.Wait() returns, so the
-// WaitGroup is the only synchronization needed for the writes to become
-// visible to the caller (happens-before via sync.WaitGroup).
+// Run drives every case through r.Provider and returns one CaseResult per
+// case, in the same order as cases. A bounded worker pool consumes case
+// indices from a channel and each worker writes only to its own result
+// index, so no locking is needed for the writes; ctx cancellation unblocks
+// workers via Limiter.Wait/Provider.Complete rather than hanging the pool.
 func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 	results := make([]CaseResult, len(cases))
 	if len(cases) == 0 {
@@ -364,31 +294,19 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 			samples = append(samples, Sample{Err: err})
 			return
 		}
-		// Mirror the one transformation the production path applies between
-		// provider.Complete and the text the user actually sees:
-		// internal/suggest.LLM trims trailing whitespace off the completion
-		// before building reply.Suggestion. Grading untrimmed text would
-		// measure a string no user is ever shown — and would do it precisely
-		// where it matters most, since several category-A assertions turn on
-		// exact leading/trailing whitespace. Leading whitespace is deliberately
-		// NOT trimmed: it is load-bearing (the model must supply its own
-		// separating space, see prompt.systemPrompt).
+		// Mirror internal/suggest.LLM's trailing-whitespace trim so grading
+		// sees what the user sees. Leading whitespace stays untouched — it's
+		// load-bearing (see prompt.systemPrompt).
 		s := Sample{Output: strings.TrimRight(completion.Text, " \t\r\n"), TTFT: completion.TTFT}
 		samples = append(samples, s)
 		for i, a := range c.Asserts {
 			ok, gerr := a.Grader.Grade(ctx, c.Req, s.Output)
 			if gerr != nil {
-				// A grader error excludes this (case, assertion, sample)
-				// triple from grading — it is neither a run error (the
-				// provider call succeeded) nor a graded result (the grader
-				// itself couldn't decide). It IS counted, though: an
-				// uncounted grader error is invisible, and an assertion that
-				// silently never ran is worse than one that fails.
+				// Neither a run error nor a graded result, but still counted:
+				// an assertion that silently never ran must not look the
+				// same as "ran and passed" (see CLAUDE.md: Graded == 0 never
+				// passes).
 				graderErrs[i]++
-				// Keep the first message, not all of them — same pattern as
-				// firstOffending below. Diagnosing "grader errors: 3" without
-				// this meant bypassing the harness and calling the judge API
-				// by hand; see AssertionResult.FirstGraderError.
 				if !graderErrSet[i] {
 					firstGraderErr[i] = truncateGraderError(gerr.Error())
 					graderErrSet[i] = true
@@ -447,11 +365,9 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 			GraderErrors:     graderErrs[i],
 			FirstGraderError: firstGraderErr[i],
 		}
-		// graded == 0 means this assertion was never actually evaluated (every
-		// sample errored, or the grader itself did). That is never a pass, for
-		// any polarity — including Measure, which reports nothing, and
-		// TripWire, whose "Present == 0" would otherwise render an
-		// unevaluated assertion as a confident green.
+		// graded == 0 (every sample or grader call errored) is never a pass,
+		// for any polarity — TripWire's "Present == 0" would otherwise read
+		// an unevaluated assertion as a confident green.
 		switch {
 		case graded == 0:
 			ar.Pass = false
@@ -485,18 +401,10 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 	}
 }
 
-// allAgree reports whether, for every assertion, all of its graded samples
-// so far agree (all present, or all absent). An assertion with zero graded
-// samples (every sample errored, or every grader call itself errored)
-// agrees vacuously — it must not by itself force escalation, since more
-// runs won't produce more grade-able data if the provider keeps erroring.
-// maxGraderErrorLen bounds how much of a grader error's message is retained
-// in AssertionResult.FirstGraderError. An API error body (the live judge
-// failure that motivated this) can be arbitrarily large; the identifying
-// bits — an HTTP status code and a model id — sit in the first line or two
-// of any error this package produces (provider errors, judge parse errors,
-// judge.go's %w-wrapped HTTP errors), so a prefix truncation keeps them
-// intact without needing to parse the message.
+// maxGraderErrorLen bounds how much of a grader error message
+// AssertionResult.FirstGraderError retains. API error bodies can be
+// arbitrarily large; a prefix truncation is enough since the identifying
+// bits (HTTP status, model id) sit in the first line or two.
 const maxGraderErrorLen = 300
 
 // truncateGraderError truncates msg to maxGraderErrorLen runes, appending a
@@ -510,6 +418,9 @@ func truncateGraderError(msg string) string {
 	return string(r[:maxGraderErrorLen]) + "... (truncated)"
 }
 
+// allAgree reports whether every assertion's graded samples so far agree
+// (all present or all absent). Zero graded samples agrees vacuously, since
+// more runs won't help if the provider keeps erroring.
 func allAgree(present [][]bool) bool {
 	for _, ps := range present {
 		if len(ps) == 0 {

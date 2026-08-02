@@ -1,23 +1,13 @@
 // Package config parses the daemon's TOML configuration (design §6):
 // provider profiles, plus the top-level debounce/max-tokens/default-profile
-// knobs that used to be env-only.
-//
-// Phase 2's provider-presets rework (T2.5) turns `provider` from an adapter
-// name into a user-facing BRAND: codestral/anthropic/groq/ollama are preset
-// brands with tested base_url/model/api_key_env defaults baked in, so the
-// simple path is two env vars (ZSH_AUTOPILOT_PROVIDER + the matching
-// ZSH_AUTOPILOT_*_KEY). `openai` remains a generic escape hatch for custom
-// OpenAI-compatible endpoints, but it is NOT a preset — it requires an
-// explicit [profiles.*] block supplying base_url/model/api_key_env (or
-// api_key_cmd), because there is nothing sensible to default those to.
+// knobs. `provider` is a user-facing BRAND (codestral/anthropic/groq/ollama)
+// backed by a preset with tested base_url/model/api_key_env defaults; `openai`
+// is a generic escape hatch, NOT a preset — it requires an explicit
+// [profiles.*] block since there's nothing sensible to default it to.
 //
 // This package is PURE: Parse takes bytes and returns a validated Config, no
-// filesystem or env reads. That mirrors internal/metrics and internal/server
-// (design "internal/ packages never read env") and keeps Parse trivially
-// testable with inline TOML strings. The one deliberate exception is
-// ResolvedProfile.ResolveKey, which the doc comment on that method calls out
-// explicitly: resolving a key inherently means touching the environment or
-// shelling out, so it's isolated there rather than smeared across Parse.
+// filesystem or env reads. The one exception is ResolvedProfile.ResolveKey,
+// which shells out/reads env to resolve a key.
 package config
 
 import (
@@ -137,18 +127,13 @@ type ResolvedProfile struct {
 }
 
 // Parse decodes TOML bytes into a Config, applies defaults for absent
-// top-level fields, and validates cross-field invariants that the TOML
-// decoder itself can't express (unknown provider/brand names, a
-// default_profile that doesn't exist). A malformed document, an unknown
-// provider, or a dangling default_profile are all reported as errors here
-// rather than deferred to first use, so a bad config.toml fails at startup,
-// not on the first keystroke.
+// top-level fields, and validates cross-field invariants the TOML decoder
+// can't express (unknown provider/brand, dangling default_profile) so a bad
+// config.toml fails at startup, not on the first keystroke.
 //
-// Parse deliberately does NOT validate the openai-escape-hatch's required
-// fields (base_url/model/api_key_env|api_key_cmd) — that check lives in
-// Resolve only, because Parse can't distinguish a bare-brand profile (valid,
-// fills from presets) from an incomplete escape-hatch profile, and because
-// the simple env-only path synthesizes profiles outside Parse entirely.
+// Parse deliberately does NOT validate the openai escape hatch's required
+// fields — that lives in Resolve only, since Parse can't tell a bare-brand
+// profile (valid) from an incomplete escape-hatch one.
 func Parse(data []byte) (Config, error) {
 	var cfg Config
 	if err := toml.Unmarshal(data, &cfg); err != nil {
@@ -182,22 +167,13 @@ func Parse(data []byte) (Config, error) {
 
 // Resolve turns a selection (a config-profile name, a preset brand, or the
 // "openai" escape hatch) into a fully-resolved ResolvedProfile ready for
-// provider construction. Exact resolution order (T2.5):
-//
-//  1. If name is a key in c.Profiles, start from that Profile (its Provider
-//     field is the brand). Else, if name is itself a preset brand or
-//     "openai", synthesize a bare Profile{Provider: name} — this is the
-//     simple path: ZSH_AUTOPILOT_PROVIDER=codestral with no [profiles.*]
-//     block at all. Else, error.
-//  2. brand := profile.Provider.
-//  3. If brand has a preset: fill Adapter/BaseURL/Model/APIKeyEnv from the
-//     preset, then let the profile's non-empty BaseURL/Model/APIKeyEnv/
-//     APIKeyCmd override those fields.
-//  4. If brand == "openai" (no preset): Adapter is "openai";
-//     BaseURL/Model/APIKeyEnv/APIKeyCmd all come straight from the profile,
-//     and base_url, model, and (api_key_env or api_key_cmd) are all
-//     REQUIRED — this is why the escape hatch can't be reached via the bare
-//     env path, only via a [profiles.*] block.
+// provider construction: a name not in c.Profiles but matching a preset brand
+// (or "openai") synthesizes a bare Profile{Provider: name} — the simple path,
+// e.g. ZSH_AUTOPILOT_PROVIDER=codestral with no [profiles.*] block. Preset
+// brands fill Adapter/BaseURL/Model/APIKeyEnv from the preset, then let the
+// profile override; "openai" requires base_url, model, and
+// api_key_env|api_key_cmd straight from the profile (so it's only reachable
+// via a [profiles.*] block, never the bare env path).
 func (c Config) Resolve(name string) (ResolvedProfile, error) {
 	profile, ok := c.Profiles[name]
 	if !ok {
@@ -263,14 +239,12 @@ func (c Config) Resolve(name string) (ResolvedProfile, error) {
 }
 
 // ResolveKey resolves this profile's API key: APIKeyEnv first, then
-// APIKeyCmd as a fallback that shells out. Neither set is valid (a
-// local/Ollama-style profile needs no key at all) and returns "", nil.
+// APIKeyCmd as a shell-out fallback. Neither set (e.g. a local/Ollama
+// profile) returns "", nil.
 //
-// The command path trims trailing whitespace from stdout because password
-// managers (`pass show ...`, `op read ...`) always emit a trailing newline;
-// leaving it in place produces a key that's silently wrong — the request
-// still goes out, just with an invalid Authorization header, which shows up
-// as a baffling 401 instead of a clear config error.
+// Trailing whitespace is trimmed from the command's stdout: password
+// managers (`pass show`, `op read`) emit a trailing newline that, left in,
+// produces a silently-wrong key — a 401 instead of a clear config error.
 func (r ResolvedProfile) ResolveKey() (string, error) {
 	if r.APIKeyEnv != "" {
 		if v := os.Getenv(r.APIKeyEnv); v != "" {

@@ -30,10 +30,8 @@ func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) Provi
 }
 
 // sseChunk builds one SSE "data:" line carrying content as a chat-completions
-// delta, matching the shape streamChunk expects. json.Marshal takes care of
-// escaping any embedded newline in content as the two characters `\` `n`, so
-// the emitted line is still exactly one physical line, just like a real
-// provider's stream.
+// delta. json.Marshal escapes any embedded newline as `\n`, so the emitted
+// line stays exactly one physical line, like a real provider's stream.
 func sseChunk(t *testing.T, content string) string {
 	t.Helper()
 	payload := map[string]any{
@@ -75,12 +73,9 @@ func TestComplete_HappyPath(t *testing.T) {
 	}
 }
 
-// TestComplete_FirstLineCutoff drives a stream whose content spans a newline
-// partway through, with a deliberately slow final chunk. It asserts both that
-// (a) only the text before the newline comes back, and (b) Complete returns
-// long before the final chunk would have been sent, proving the client
-// stopped reading early rather than happening to produce the right prefix
-// after consuming everything.
+// TestComplete_FirstLineCutoff: content spans a newline partway through, with
+// a deliberately slow final chunk. Asserts only the text before the newline
+// comes back, and Complete returns before the final chunk would arrive.
 func TestComplete_FirstLineCutoff(t *testing.T) {
 	const lateDelay = 300 * time.Millisecond
 
@@ -123,11 +118,8 @@ func TestComplete_FirstLineCutoff(t *testing.T) {
 	}
 }
 
-// TestComplete_Cancellation forces a stream that blocks indefinitely after
-// its first chunk, then cancels the ctx passed to Complete. It asserts
-// Complete returns promptly (not after the block would otherwise clear) with
-// a context error, proving the in-flight HTTP call is actually aborted by ctx
-// cancellation and the call does not hang.
+// TestComplete_Cancellation: a stream blocks indefinitely after its first
+// chunk; cancelling ctx must abort it promptly with a context error.
 func TestComplete_Cancellation(t *testing.T) {
 	blockCh := make(chan struct{})
 
@@ -173,14 +165,9 @@ func TestComplete_HTTPError(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
-				// The SDK's error path (requestconfig.RequestConfig.Execute)
-				// decodes the response body into *openai.Error, which expects
-				// the standard OpenAI error *object* shape under "error" —
-				// {"error": {"message": ..., "type": ..., ...}} — not a flat
-				// string. A flat {"error":"boom"} (what the old hand-rolled
-				// client's test used, since it only cared about status code
-				// and raw body text) fails that decode, so this is adapted to
-				// the shape the SDK genuinely requires.
+				// The SDK decodes the body into *openai.Error, which requires
+				// the standard OpenAI error object shape under "error" — a
+				// flat {"error":"boom"} string fails that decode.
 				fmt.Fprint(w, `{"error":{"message":"boom","type":"invalid_request_error","code":"boom_code","param":""}}`)
 			}))
 			defer srv.Close()
@@ -199,10 +186,9 @@ func TestComplete_HTTPError(t *testing.T) {
 	}
 }
 
-// METRICS(§12): TestComplete_UsageAndFinishReason drives a stream that ends
-// (no newline in the content, so the first-line cutoff doesn't fire) with a
-// trailing usage chunk and a finish_reason, asserting both decode onto the
-// returned Completion.
+// METRICS(§12): TestComplete_UsageAndFinishReason: a stream ends (no newline,
+// so the cutoff doesn't fire) with a trailing usage chunk and finish_reason,
+// asserting both decode onto the returned Completion.
 func TestComplete_UsageAndFinishReason(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

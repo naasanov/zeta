@@ -61,12 +61,9 @@ func TestLogger_EmitWritesLine(t *testing.T) {
 	}
 }
 
-// TestLogger_EmitRequestStampsUser is a regression test for the whole point of
-// shipping this log to other people's machines: per-user attribution. The
-// caller (internal/suggest) deliberately builds RequestEvent without a User —
-// it has no Logger to ask — so EmitRequest must stamp it. An unstamped event
-// fails silently, producing a well-formed line whose only symptom is
-// unattributable rows once the files come back.
+// TestLogger_EmitRequestStampsUser: EmitRequest must stamp User even when
+// the caller builds RequestEvent without one (internal/suggest has no
+// Logger to ask). Unstamped events fail silently as unattributable rows.
 func TestLogger_EmitRequestStampsUser(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 
@@ -75,7 +72,6 @@ func TestLogger_EmitRequestStampsUser(t *testing.T) {
 		t.Fatalf("New() err = %v", err)
 	}
 
-	// Exactly as suggest.LLM builds it: no User field set.
 	l.EmitRequest(RequestEvent{V: 1, Event: "request", RequestID: "sess.1"})
 
 	if err := l.Close(); err != nil {
@@ -131,8 +127,7 @@ func TestLogger_DropOnFull(t *testing.T) {
 	}
 	defer l.Close()
 
-	// Block the writer goroutine so the channel actually fills: hold the
-	// mutex it needs before every Encode call.
+	// Hold the writer's mutex so the channel actually fills.
 	l.mu.Lock()
 
 	total := chanBufSize + 50
@@ -172,17 +167,13 @@ func TestLogger_CloseNoLeakOrPanic(t *testing.T) {
 		}
 	}()
 
-	// Close races the still-running Emit loop above on purpose: Emit must
-	// never panic on a send to a closing/closed channel (see Logger.Emit /
-	// Close docs), regardless of how this interleaves.
+	// Close races the still-running Emit loop on purpose.
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close() err = %v", err)
 	}
 	<-done
 
-	// Second Close must also be safe (sync.Once) and Emit after Close must
-	// not panic (nil-Logger-style no-op is NOT what's being tested here —
-	// this is a real, closed Logger).
+	// Second Close must also be safe (sync.Once).
 	if err := l.Close(); err != nil {
 		t.Fatalf("second Close() err = %v", err)
 	}

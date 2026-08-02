@@ -1,37 +1,15 @@
-// This file is Part 3b of .docs/eval_harness_plan.md: the importer that turns
-// real dogfooding failures (the §12 metrics log, raw-text capture — see
-// CLAUDE.md "Metrics (design §12)") into eval Cases. It reads events.jsonl,
-// reconstructs the protocol.Request that produced each "request" event, and
-// recovers the completion suffix the model actually emitted, so a bad
-// suggestion hit while dogfooding becomes a regression guard instead of an
-// anecdote.
+// Importer that turns real dogfooding failures (the §12 metrics log) into
+// eval Cases: reads events.jsonl, reconstructs the protocol.Request behind
+// each "request" event, and recovers the completion suffix the model emitted.
 //
-// # Why this file does not import internal/metrics
+// rawRequestEvent below is a local, minimal mirror of metrics.RequestEvent's
+// JSON shape rather than an import of internal/metrics — metrics must stay
+// deletable as one directory (see CLAUDE.md), so this package depends on the
+// wire format, not the Go type.
 //
-// internal/metrics is deliberately a removable leaf (see its package doc and
-// CLAUDE.md: "stripping metrics = deleting the directory, then revert the
-// lines tagged METRICS(§12)"). If internal/eval imported it, metrics could no
-// longer be deleted in one step — the eval package would be a second place
-// that breaks. rawRequestEvent below is a local, minimal mirror of the JSON
-// shape metrics.RequestEvent produces (same field tags, only the subset this
-// importer needs), so this package depends on the WIRE FORMAT, not the Go
-// type. If the metrics JSON shape changes, this file needs an update either
-// way; it just doesn't need metrics.go to compile.
-//
-// # Privacy — not redaction
-//
-// events.jsonl currently holds unredacted command lines (raw-text capture is
-// temporarily default-ON for the dogfooding window; Phase-3 secret redaction
-// is not built yet — see CLAUDE.md). SkipLikelySecrets below is a best-effort
-// heuristic filter, NOT redaction: it catches common secret shapes (cloud
-// access key prefixes, API-key-style tokens, PEM blocks, key=value
-// assignments, long base64/hex runs) so an import run doesn't casually
-// reproduce a credential into a stub file. It will miss secrets that don't
-// match any pattern (a bespoke internal token format, a plain-English
-// password with no distinguishing shape, a secret split across an
-// unassuming-looking argument). A human MUST read every rendered stub before
-// pasting it into cases.go — this filter reduces the odds of an accidental
-// leak, it does not eliminate them.
+// SkipLikelySecrets is a best-effort heuristic filter, NOT redaction — it
+// will miss secrets with no distinguishing shape. A human MUST review every
+// rendered stub before pasting it into cases.go.
 package eval
 
 import (
@@ -94,28 +72,16 @@ type ImportOptions struct {
 	MaxCases int
 
 	// SkipLikelySecrets drops rows whose buf/suggestion/history match common
-	// secret shapes. Default-ON: callers must opt OUT explicitly, because
-	// the safe default for a privacy-sensitive importer is "skip", not
-	// "import". See the package doc above: this is a heuristic, not
-	// redaction. Use NewImportOptions (or just the zero value) to get the
-	// safe default; setting this field directly to false is how a caller
-	// opts out, and should be a deliberate, reviewed choice.
+	// secret shapes. Use DefaultImportOptions for the safe (skipped) default
+	// — a bare struct literal defaults this to false, Go having no "unset"
+	// state for a bool field.
 	SkipLikelySecrets bool
 
-	// secretsExplicitlySet distinguishes "zero value, apply the default" from
-	// "caller explicitly chose false" when ImportOptions is constructed via
-	// a struct literal rather than NewImportOptions. See DefaultImportOptions.
 	secretsExplicitlySet bool
 }
 
 // DefaultImportOptions returns the safe default: no trigger filter, no cap,
-// secrets skipped. Callers building ImportOptions via a struct literal (e.g.
-// ImportOptions{TriggerFilter: "typing"}) get SkipLikelySecrets=false unless
-// they set it explicitly, since Go has no way to distinguish "unset" from
-// "false" on a bare bool field — so this constructor exists specifically for
-// callers who want the on-by-default privacy behavior without repeating
-// `SkipLikelySecrets: true` (and risking someone deleting that line without
-// realizing what it disables).
+// secrets skipped.
 func DefaultImportOptions() ImportOptions {
 	return ImportOptions{SkipLikelySecrets: true, secretsExplicitlySet: true}
 }
@@ -172,13 +138,8 @@ func looksLikeSecret(ss ...string) bool {
 // ImportEvents reads newline-delimited §12 metrics events from r, reconstructs
 // a protocol.Request plus the observed completion suffix for every importable
 // "request" row, deduplicates, and returns the harvested cases plus stats on
-// every row that did NOT make it in.
-//
-// opts.SkipLikelySecrets defaults to true only when opts was built via
-// DefaultImportOptions; a bare ImportOptions{} (or one built with only some
-// fields set) defaults to false for that field, matching normal Go zero-value
-// semantics — callers who want the safe default should start from
-// DefaultImportOptions().
+// every row that did NOT make it in. Callers wanting the safe secret-skipping
+// default should build opts via DefaultImportOptions.
 func ImportEvents(r io.Reader, opts ImportOptions) ([]ImportedCase, ImportStats, error) {
 	var stats ImportStats
 	var result []ImportedCase
@@ -278,10 +239,7 @@ func ImportEvents(r io.Reader, opts ImportOptions) ([]ImportedCase, ImportStats,
 
 // dedupKey hashes the reconstructed request plus the observed suggestion so
 // identical (request, output) pairs collapse to one case regardless of which
-// request_id produced them. Hashing the request struct via JSON rather than
-// comparing Go values directly keeps the key stable and independent of slice
-// identity/ordering-sensitive equality quirks, and keeps this function simple
-// if protocol.Request grows fields later (they just join the hash input).
+// request_id produced them.
 func dedupKey(req protocol.Request, suggestion string) string {
 	b, _ := json.Marshal(req) // Request is plain data; Marshal cannot fail here
 	h := sha256.New()
@@ -291,19 +249,10 @@ func dedupKey(req protocol.Request, suggestion string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// RenderCaseStub emits compilable Go source for one harvested case: a Case
-// literal with the reconstructed Req and a TODO for the assertions, plus a
-// comment showing the observed suggestion so a reviewer can see what was
-// wrong without cross-referencing events.jsonl. id becomes the Case's ID
-// field and the local variable name is derived from it, so the caller (or a
-// human editing the paste) can rename freely.
-//
-// The output is a single case entry, formatted as a Go composite literal
-// statement — NOT a full source file — meant to be pasted inside one of the
-// []Case{...} slices in cases.go. Callers that want a standalone,
-// parser-checked fragment (as import_test.go does, to validate via
-// go/parser) should wrap it in a minimal package+func shell first; see the
-// test for the pattern.
+// RenderCaseStub emits one Go composite-literal Case entry (not a full
+// source file) meant to be pasted into a []Case{...} slice in cases.go,
+// with the reconstructed Req, the observed suggestion in a comment, and a
+// TODO for the assertions.
 func RenderCaseStub(w io.Writer, ic ImportedCase, id string) error {
 	var b strings.Builder
 
@@ -366,14 +315,9 @@ func RenderCaseStub(w io.Writer, ic ImportedCase, id string) error {
 	return err
 }
 
-// kindConstant renders a protocol.Request.Kind string value back to its
-// symbolic Go constant name (protocol.KindTyping / protocol.KindNextCommand)
-// so the emitted stub reads the same way hand-written cases in cases.go do,
-// rather than a bare string literal that would silently drift if the
-// underlying constant value ever changed. Falls back to a quoted literal for
-// any value that doesn't match a known constant (defensive: an event log
-// could in principle carry a trigger value from a newer/older protocol
-// version than this build knows about).
+// kindConstant renders a Kind string back to its symbolic constant name so
+// the stub matches hand-written cases.go entries, falling back to a quoted
+// literal for an unrecognized value.
 func kindConstant(kind string) string {
 	switch kind {
 	case protocol.KindTyping:

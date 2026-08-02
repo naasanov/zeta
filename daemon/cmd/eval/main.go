@@ -3,13 +3,6 @@
 // precisely so it never runs under `go test ./...`: evals are slow, cost
 // money, hit live rate limits, and are non-deterministic by construction.
 // `go build ./...` still compile-checks it.
-//
-// Parts 1-3 built the harness skeleton, case corpus, and judge, all driven
-// by a scripted stub provider (-dry-run). This is Part 4's wiring: real
-// providers (internal/eval/live.go), the variant axis
-// (internal/eval/variants.go), and the -providers/-variants/-matrix/-model
-// flags that assemble a (provider, variant) matrix out of them, plus -import
-// (Part 3b's importer, wired here for the first time).
 package main
 
 import (
@@ -30,19 +23,15 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// maxN mirrors the plan doc's guardrail ("-n is hard-capped at 10"):
-// adaptive sampling already escalates to at most this many runs, so a
-// fixed-N override above it would just waste calls for no more signal. It
-// also stands in for the adaptive ceiling (eval.defaultMaxRuns, unexported)
-// when estimating a pre-flight worst-case call count below.
+// maxN is the hard cap on -n: adaptive sampling already escalates to at most
+// this many runs, so a fixed-N override above it wastes calls for no more
+// signal. Also stands in for the adaptive ceiling when estimating a
+// pre-flight worst-case call count below.
 const maxN = 10
 
-// matrixProviders is what `-matrix` expands -providers to: the plan doc's
-// "3 providers" full matrix. ollama and the openai escape hatch are
-// deliberately excluded — ollama's model is an untested local placeholder
-// (config.go's presets comment) and openai has no sensible default
-// base_url/model to run unattended, so neither belongs in an unattended
-// full-matrix run.
+// matrixProviders is what `-matrix` expands -providers to. ollama (untested
+// local placeholder model) and the openai escape hatch (no sensible default
+// base_url/model) are excluded from an unattended full-matrix run.
 var matrixProviders = []string{"codestral", "anthropic", "groq"}
 
 func main() {
@@ -260,11 +249,9 @@ func main() {
 	}
 }
 
-// defaultOutFilename builds the file name -out writes to when it's pointed
-// at a directory instead of a file: a "20060102-150405" timestamp prefix
-// (alpha-sorting a directory of these also sorts them chronologically, oldest
-// first) followed by the provider x variant combo that produced the report,
-// so `ls` alone tells the two things you'd otherwise open the file to check.
+// defaultOutFilename builds the -out filename when it's pointed at a
+// directory: a timestamp prefix (alpha-sorts chronologically) plus the
+// provider x variant combo, so `ls` alone tells you what's inside.
 func defaultOutFilename(meta eval.Meta) string {
 	return fmt.Sprintf("%s_%s_%s.json",
 		meta.Timestamp.Format("20060102-150405"),
@@ -273,9 +260,7 @@ func defaultOutFilename(meta eval.Meta) string {
 }
 
 // sanitizeForFilename turns a comma-joined meta field (e.g.
-// "codestral,anthropic") into a filename-safe segment ("codestral+anthropic")
-// — combinedMeta already comma-joins multi-cell runs, so this only needs to
-// swap the one separator that can't appear in a path component.
+// "codestral,anthropic") into a filename-safe segment ("codestral+anthropic").
 func sanitizeForFilename(s string) string {
 	return strings.ReplaceAll(s, ",", "+")
 }
@@ -292,10 +277,8 @@ type cell struct {
 func cellLabel(c cell) string { return c.Provider + "/" + c.Variant.Name }
 
 // resolveCells assembles the matrix. Under -dry-run, -providers/-matrix are
-// ignored entirely — Part 1's -dry-run behavior stays exactly a single
-// scripted stub, no network, no provider axis — but -variants still selects
-// which prompt-building path the stub run exercises, since that's a pure
-// in-process concern with no cost or network attached.
+// ignored entirely (a single scripted stub, no network, no provider axis),
+// but -variants still selects which prompt-building path the stub exercises.
 func resolveCells(dryRun, matrix bool, providersFlag, variantsFlag string) []cell {
 	variantNames := splitCSV(variantsFlag)
 	if matrix {
@@ -334,11 +317,9 @@ func resolveCells(dryRun, matrix bool, providersFlag, variantsFlag string) []cel
 	return cells
 }
 
-// buildCellProvider constructs the provider.Provider and eval.Limiter for
-// one matrix cell. Under -dry-run it always returns a freshly scripted
-// StubProvider (matching Part 1's -dry-run script exactly) with a
-// NoopLimiter, regardless of c.Provider, since -dry-run cells are always
-// {Provider: "stub", ...}.
+// buildCellProvider constructs the provider.Provider and eval.Limiter for one
+// matrix cell. Under -dry-run it always returns a freshly scripted
+// StubProvider with a NoopLimiter, regardless of c.Provider.
 func buildCellProvider(c cell, dryRun bool, modelOverride string) (provider.Provider, eval.Limiter, error) {
 	if dryRun {
 		return eval.NewStubProvider(
@@ -359,10 +340,9 @@ func buildCellProvider(c cell, dryRun bool, modelOverride string) (provider.Prov
 }
 
 // concurrencyFor returns the Runner.Concurrency to use for a cell's limiter:
-// 1 for a real *eval.RateLimiter (see Runner.Concurrency's doc comment on why
-// spreading a shared per-minute budget across several concurrent workers only
-// adds queuing latency, never throughput), 0 (Runner's own default) for
-// anything else, i.e. eval.NoopLimiter.
+// 1 for a real *eval.RateLimiter (spreading a shared per-minute budget across
+// workers only adds queuing latency, never throughput), 0 (Runner's default)
+// otherwise.
 func concurrencyFor(limiter eval.Limiter) int {
 	if _, ok := limiter.(*eval.RateLimiter); ok {
 		return 1
@@ -371,9 +351,8 @@ func concurrencyFor(limiter eval.Limiter) int {
 }
 
 // combinedMeta builds the report Meta for a multi-cell run: Provider/Model/
-// Variant become comma-joined summaries (there is no single value to show)
-// rather than silently picking the last cell's, which would misrepresent a
-// matrix run as a single-provider run in the header.
+// Variant become comma-joined summaries rather than silently picking the
+// last cell's, which would misrepresent a matrix run as single-provider.
 func combinedMeta(cells []cell, nPolicy string, ts time.Time) eval.Meta {
 	return eval.Meta{
 		Provider:  strings.Join(distinctProviders(cells), ","),
@@ -426,12 +405,10 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// runOnlyFlagNames are the flags that only mean something for an actual run
-// (cases + a provider matrix + a report). Both terminal modes (-diff,
-// -import) exit before ever reaching that code, so any of these being set
-// alongside one would be silently dropped rather than honored — surfacing
-// that explicitly is better than a report that quietly ran a smaller (or
-// different) thing than what was asked for.
+// runOnlyFlagNames are the flags that only mean something for an actual run.
+// The terminal modes (-diff, -import, -judge-validate) exit before reaching
+// that code, so any of these being set alongside one is surfaced as an error
+// rather than silently dropped.
 var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "providers", "variants", "matrix", "model"}
 
 // setRunOnlyFlags returns which of runOnlyFlagNames were explicitly passed on
@@ -446,10 +423,8 @@ func setRunOnlyFlags(setFlags map[string]bool) []string {
 	return ignored
 }
 
-// runDiff is -diff's whole flow: load both scorecard dumps, render the text
-// diff to stdout, and exit(1) if anything regressed — the CI/pre-commit gate
-// the plan doc's "Regression use" section describes. It never touches
-// providers, cases, or the report writer used by a real run.
+// runDiff loads both scorecard dumps, renders the text diff to stdout, and
+// exit(1)s if anything regressed — the CI/pre-commit gate.
 func runDiff(beforePath, afterPath string) {
 	before, err := loadRunFile(beforePath)
 	if err != nil {
@@ -471,10 +446,8 @@ func runDiff(beforePath, afterPath string) {
 }
 
 // loadRunFile opens path and decodes it as a scorecard dump, wrapping any
-// failure (missing file, unreadable, not valid JSON, wrong shape) with the
-// path so a bad "before"/"after" argument never resolves to a silent
-// zero-value Run that would misread as "nothing changed" — see LoadRun's own
-// doc comment on exactly that failure mode.
+// failure with the path so a bad argument never resolves to a silent
+// zero-value Run that would misread as "nothing changed".
 func loadRunFile(path string) (eval.Run, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -489,13 +462,10 @@ func loadRunFile(path string) (eval.Run, error) {
 	return run, nil
 }
 
-// runImport is -import's whole flow: read a §12 metrics events.jsonl, print
-// one compilable case stub per importable row to stdout (Part 3b's
-// RenderCaseStub), then print ImportStats to stderr so a near-total drop of
-// the log (nearly everything skipped as malformed/no-raw-text/secret-like)
-// is visible rather than indistinguishable from a small, healthy import. It
-// never runs any cases — this is purely the harvesting step described in
-// the plan doc's Part 3b.
+// runImport reads a §12 metrics events.jsonl, prints one compilable case
+// stub per importable row to stdout, then prints ImportStats to stderr so a
+// near-total drop of the log is visible rather than looking like a small,
+// healthy import. Never runs any cases.
 func runImport(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -538,13 +508,10 @@ func runImport(path string) {
 // until some candidate judge clears this on the hand-labeled set.
 const judgeAgreementGate = 0.90
 
-// runJudgeValidate is -judge-validate's whole flow (Part 5's build half):
-// resolve one or more candidate judge models from -judges (defaulting to the
-// single configured judge), score each against -labels via
-// eval.ValidateJudges, print a ranked table plus the disagreement detail,
-// and exit(1) unless the best-agreeing candidate clears judgeAgreementGate —
-// so this reads as a gate, not just a report. It never constructs a
-// suggestion provider and never runs a case.
+// runJudgeValidate resolves candidate judge models from -judges (default:
+// the configured judge), scores each against -labels, prints a ranked table
+// plus disagreements, and exit(1)s unless the best clears
+// judgeAgreementGate — a gate, not just a report.
 func runJudgeValidate(judgesFlag, labelsPath string) {
 	cfg := eval.JudgeConfigFromEnv()
 	if cfg.APIKey == "" {
@@ -624,10 +591,8 @@ func printJudgeScoreboard(w io.Writer, ranked []eval.JudgeScore) {
 			s.Judge, s.Agreement*100, s.Agreed, s.Total, s.Kappa, s.Errors, s.CostUSD, formatAgreementPerDollar(s))
 	}
 	tw.Flush()
-	// The table's "errors" column is a bare count — a judge that fails every
-	// call renders as "0.0% (0/0)  errors 2" with nothing pointing at why.
-	// Print the first error per judge that had one, right below the table,
-	// same reasoning as report.go's NEVER EVALUATED line.
+	// The "errors" column is a bare count; print the first error per judge
+	// that had one so a total-failure row isn't just "0.0% (0/0) errors 2".
 	for _, s := range ranked {
 		if s.Errors > 0 && s.FirstError != "" {
 			fmt.Fprintf(w, "  %s: first error — %s\n", s.Judge, s.FirstError)
@@ -646,9 +611,8 @@ func formatAgreementPerDollar(s eval.JudgeScore) string {
 }
 
 // printJudgeDisagreements prints every sample where a candidate's verdict
-// differed from the human label, with the judge's own stated reason — the
-// point of falling below the gate is finding out whether the JUDGE is wrong
-// or the RUBRIC is ambiguous, and that requires reading these.
+// differed from the human label, with the judge's stated reason — needed to
+// tell whether the JUDGE is wrong or the RUBRIC is ambiguous.
 func printJudgeDisagreements(w io.Writer, ranked []eval.JudgeScore) {
 	for _, s := range ranked {
 		if len(s.Disagreements) == 0 {

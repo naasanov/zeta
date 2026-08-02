@@ -22,13 +22,11 @@ func newAccumulator(start time.Time) *accumulator {
 	return &accumulator{start: start}
 }
 
-// Push appends a text delta. It stamps TTFT on the first non-empty delta
-// (empty deltas — e.g. a chunk carrying only finish_reason or usage — must
-// not stamp it). It returns stop=true once a newline has been seen in the
-// accumulated text; the caller MUST break out of its stream loop and return
-// at that point rather than keep reading to collect trailing usage stats —
-// that's the whole point of the cutoff. Once stopped, further Push calls are
-// no-ops that keep returning stop=true.
+// Push appends a text delta, stamping TTFT on the first non-empty one (a
+// chunk carrying only finish_reason/usage must not stamp it). Returns
+// stop=true once a newline has been seen; the caller MUST break its stream
+// loop there rather than keep reading for trailing usage stats — that's the
+// point of the cutoff. Once stopped, further Push calls are no-ops.
 func (a *accumulator) Push(delta string) (stop bool) {
 	if a.stopped {
 		return true

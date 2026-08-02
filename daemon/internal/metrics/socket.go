@@ -17,16 +17,11 @@ import (
 // server.DefaultSocket).
 const DefaultSocket = "/tmp/zsh-autopilot-metrics.sock"
 
-// Serve listens on socketPath for the zsh client's "shown" and "outcome"
-// events (newline-delimited JSON, write-only from the client's perspective —
-// this listener never writes a reply). Each decoded line is stamped with
-// user and a derived session_id, then handed to log.Emit. Serve blocks until
-// ctx is cancelled, then tears down and returns nil (or a non-nil error if
-// the socket cannot be claimed/listened on).
-//
-// Teardown mirrors internal/server.Server.Run's proven discipline exactly
-// (cancel -> close in-flight conns to unblock readers -> wg.Wait -> remove
-// socket file); the reverse order deadlocks there and would here too.
+// Serve listens on socketPath for the zsh client's "shown"/"outcome" events
+// (newline-delimited JSON, write-only — no reply). Each line is stamped with
+// user and a derived session_id, then handed to log.Emit. Blocks until ctx
+// is cancelled. Teardown order (cancel -> close conns -> wg.Wait -> remove
+// socket) mirrors internal/server.Server.Run; reversed, it deadlocks.
 func Serve(ctx context.Context, socketPath string, log *Logger, slogger *slog.Logger) error {
 	if slogger == nil {
 		slogger = slog.Default()
@@ -115,11 +110,9 @@ func claimSocket(socketPath string, slogger *slog.Logger) error {
 }
 
 // handleConn reads newline-delimited JSON events off conn until EOF, a
-// decode error, or ctx cancellation (which closes conn out from under the
-// blocked read, same as internal/server's handling). Each event is decoded
-// loosely into a map so unknown/additive fields survive untouched (design:
-// treat "shown"/"outcome" as passthrough), then user and session_id are
-// stamped in before forwarding to log.Emit. No reply is ever written.
+// decode error, or ctx cancellation. Each event decodes loosely into a map
+// (passthrough, so additive fields survive), gets user/session_id stamped
+// in, then forwards to log.Emit. No reply is ever written.
 func handleConn(ctx context.Context, conn net.Conn, log *Logger, slogger *slog.Logger) {
 	defer conn.Close()
 

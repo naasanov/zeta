@@ -8,29 +8,15 @@ import (
 )
 
 // Select filters cases down to those matching a comma-separated selector
-// list, preserving the original corpus order (so a scorecard is diffable
-// against a full run regardless of the order selectors were typed in).
+// list, preserving the original corpus order. Each selector matches a case
+// (case-insensitively) if it equals the case ID ("A1"), equals the category
+// ("syntax"), or glob-matches the ID ("A*", "E[12]"). Cases matched by more
+// than one selector appear once.
 //
-// Each selector matches a case if any of the following hold, case-insensitively:
-//
-//   - it equals the case ID          — "A1"
-//   - it equals the case category    — "syntax", "fabrication"
-//   - it glob-matches the case ID    — "A*", "B?", "E[12]"
-//
-// The three forms overlap deliberately: "A1" is both an exact ID and a
-// degenerate glob, and a category name is the ergonomic way to say "all the
-// syntax trip-wires" without knowing which IDs exist today. Cases matched by
-// more than one selector appear once.
-//
-// # Why every selector must match something
-//
-// Select returns an error naming any selector that matched no case, rather
-// than silently returning the cases that did match. A typo'd selector that
-// quietly narrows the run is the worst kind of eval bug: the harness exits 0,
-// prints a clean scorecard, and the case you thought you were guarding was
-// never executed. That is the same failure mode as an assertion with zero
-// graded samples (see AssertionResult.GraderErrors) — "didn't run" must never
-// be presentable as "fine".
+// A selector that matches no case is a fatal error, not a silent narrowing:
+// a typo'd selector would otherwise exit 0 with a clean scorecard for a case
+// that never ran — the same "didn't run must never look like fine" failure
+// mode as a zero-graded assertion (AssertionResult.GraderErrors).
 func Select(cases []Case, selectors string) ([]Case, error) {
 	sels := splitSelectors(selectors)
 	if len(sels) == 0 {

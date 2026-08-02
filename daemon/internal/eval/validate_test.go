@@ -47,13 +47,10 @@ func TestLoadLabels_BlankAndCommentLinesSkipped(t *testing.T) {
 	}
 }
 
-// TestLoadLabels_PinnedFile_C3EmptyIsPass loads the actual pinned
-// judge_labels.jsonl (not a fixture) and checks the C3 empty-suggestion
-// entry specifically: calibration found the judge (correctly) disagreeing
-// with a human "fail" label there, traced to prompt.systemPrompt's "if
-// nothing useful comes to mind, output nothing" — abstention is intended
-// behaviour, so the label was corrected to "pass" and c3Rubric now says so
-// explicitly. This guards that correction from silently reverting.
+// TestLoadLabels_PinnedFile_C3EmptyIsPass loads the pinned judge_labels.jsonl
+// and checks the C3 empty-suggestion entry is labeled "pass": abstention is
+// intended behaviour per prompt.systemPrompt, and c3Rubric states so
+// explicitly — guards that from silently reverting.
 func TestLoadLabels_PinnedFile_C3EmptyIsPass(t *testing.T) {
 	f, err := os.Open("testdata/judge_labels.jsonl")
 	if err != nil {

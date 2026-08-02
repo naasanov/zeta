@@ -1,9 +1,7 @@
 // codestral.go is a hand-rolled client for Mistral's Codestral FIM
-// (fill-in-the-middle) endpoint (design §6, §13 Phase 2). Codestral is a
-// base completion model, not an instruct/chat model, so it takes a
-// prompt+suffix request shape instead of messages — that different shape is
-// why this is its own adapter rather than another OpenAI-compatible base URL.
-// No SDK/deps: Mistral ships no official Go client.
+// (fill-in-the-middle) endpoint: a base completion model taking a
+// prompt+suffix request shape instead of messages, hence its own adapter
+// rather than another OpenAI-compatible base URL. No SDK: Mistral ships none.
 package provider
 
 import (
@@ -21,36 +19,25 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
 
-// fimStopSequences halt generation early. Only the newline is used: it keeps
-// a code model from spilling onto a second line, and the shared accumulator
-// cuts there too. Command-chaining (";"/"&&") is deliberately NOT a stop
-// sequence — see firstShellCommand for why: a code model predicting a next
-// command often *leads* with a separator ("; source .venv/bin/activate"), and
-// a ";" stop would halt at that leading char and return empty. Chains are
-// handled by post-processing instead, which a leading separator can't defeat.
+// fimStopSequences halt generation early. Only the newline is used.
+// Command-chaining (";"/"&&") is deliberately NOT a stop sequence: a next-
+// command prediction often *leads* with a separator ("; source
+// .venv/bin/activate"), and a ";" stop would halt on that leading char and
+// return empty. Chains are handled by post-processing instead (see
+// firstShellCommand), which a leading separator can't defeat.
 var fimStopSequences = []string{"\n"}
 
-// firstShellCommand extracts the first command from a raw FIM completion.
-// Codestral is a code model and, left to its own devices, does two unwanted
-// things for a single-suggestion ghost-text UX:
+// firstShellCommand extracts the first command from a raw FIM completion,
+// stripping any leading separator/whitespace and cutting at the first
+// top-level ";" or "&&" (left alone: "|", which is within one command, not a
+// chain) — left unhandled, a code model chains commands on one line
+// ("mkdir x; cd y; git init") or leads a next-command prediction with a
+// stray separator.
 //
-//   - leads a next-command prediction with a separator, e.g.
-//     "; source .venv/bin/activate" — natural in code ("<cmd>; <next>"), but
-//     here the buffer is empty so the ";" is spurious;
-//   - chains commands on one line, e.g. "mkdir x; cd y; git init".
-//
-// So: strip any leading separators/whitespace, then keep only up to the first
-// top-level ";" or "&&". Pipes ("|") are left intact — they're within one
-// command (`ps aux | grep`), not a chain. This runs on the accumulated text
-// rather than as a stop sequence precisely so a leading separator becomes the
-// real command instead of nuking the whole suggestion.
-//
-// typing selects which whitespace rule applies (see stripLeadingSeparators):
-// pass true when completing a non-empty buffer (the system prompt tells the
-// model to lead with a space to separate words, and that space must survive),
-// false for a next-command prediction against an empty buffer (no word to
-// separate from, and a leading space would silently keep the command out of
-// zsh history under HIST_IGNORE_SPACE).
+// typing picks the whitespace rule in stripLeadingSeparators: true for a
+// non-empty buffer, where the model's leading word-separator space must
+// survive; false for next-command mode, where a leading space would
+// silently keep the command out of zsh history under HIST_IGNORE_SPACE.
 func firstShellCommand(s string, typing bool) string {
 	s = stripLeadingSeparators(s, typing)
 	if i := indexSeparator(s); i >= 0 {
@@ -60,46 +47,25 @@ func firstShellCommand(s string, typing bool) string {
 }
 
 // firstCommandComplete reports whether s already holds a complete first
-// command followed by a separator — meaning we can stop reading the stream
-// early, because everything past that separator would be discarded by
-// firstShellCommand anyway. Leading separators are stripped first so a
-// next-command prediction that opens with "; " is NOT treated as complete
-// before its real command has streamed in (that was the empty-output bug the
-// ";" stop sequence caused). Returns false while only a leading separator has
-// arrived, or while the first command is still streaming.
+// command followed by a separator, so the stream can stop early — everything
+// past that separator would be discarded by firstShellCommand anyway.
+// Leading separators are stripped first so a next-command prediction opening
+// with "; " isn't mistaken for complete before its real command streams in
+// (the empty-output bug a raw ";" stop sequence caused). The mode passed to
+// stripLeadingSeparators only affects a single trailing leading space, never
+// whether a separator is found, so it's arbitrary here.
 func firstCommandComplete(s string) bool {
-	// The mode argument only changes whether a single leading space survives
-	// when NO separator is found at all (see stripLeadingSeparators) — it
-	// never changes whether a separator is found, which is all this cares
-	// about. So the mode passed here is arbitrary; false is picked for no
-	// particular reason.
 	return indexSeparator(stripLeadingSeparators(s, false)) >= 0
 }
 
-// stripLeadingSeparators removes any run of leading ";"/"&&" separators (a
-// code model tends to open a next-command prediction with one), along with
-// all whitespace immediately touching a removed separator — that whitespace
-// belongs to the separator's own formatting ("; cmd", " && cmd"), not to the
-// completion text, so it is always fully discarded regardless of mode.
-//
-// What's left, if no separator was ever found, is s's original leading
-// whitespace run (if any). That run is a DIFFERENT thing: the word-separator
-// space the system prompt tells the model to lead with when completing a
-// non-empty buffer ("Begin with a space when the completion starts a new
-// word or argument", see prompt.go). So its handling is mode-dependent:
-//
-//   - typing == true (non-empty buffer): collapse the run to exactly one
-//     leading space — a model that emits "   ." should still produce " .",
-//     not "git add   .", but the single space must survive or the shipped
-//     suggestion collides with the buffer ("git add" + "." -> "git add.",
-//     the exact bug this function exists to prevent).
-//   - typing == false (empty buffer, next-command mode): strip it entirely.
-//     The suggestion IS the whole command; a leading space is pure noise,
-//     and under zsh's HIST_IGNORE_SPACE a command that starts with a space
-//     is silently kept out of history — a real user-visible defect.
-//
-// Shared by firstShellCommand and firstCommandComplete so both treat the
-// leading run identically.
+// stripLeadingSeparators removes leading ";"/"&&" separators and any
+// whitespace touching them. If no separator is found, the remaining leading
+// whitespace is the system prompt's word-separator space instead (see
+// prompt.go), so it's mode-dependent: typing==true collapses it to exactly
+// one space (must survive or "git add"+"." collides into "git add.");
+// typing==false (next-command mode) strips it entirely, since a leading
+// space would silently keep the command out of zsh history under
+// HIST_IGNORE_SPACE.
 func stripLeadingSeparators(s string, typing bool) string {
 	foundSeparator := false
 	cur := s
@@ -146,9 +112,8 @@ func indexSeparator(s string) int {
 }
 
 // codestralClient talks to a single Mistral-compatible /v1/fim/completions
-// endpoint. It holds a shared *http.Client so the daemon never pays TLS/TCP
-// setup cost per keystroke (design §4 "warm connections") — construct one via
-// NewCodestral at startup and reuse it for every request.
+// endpoint. Holds a shared *http.Client so the daemon isn't paying TLS/TCP
+// setup per keystroke — construct one via NewCodestral and reuse it.
 type codestralClient struct {
 	baseURL   string
 	model     string
@@ -161,21 +126,15 @@ type codestralClient struct {
 
 // FIMRenderer turns a provider-neutral Prompt into the prompt+suffix pair a
 // FIM endpoint takes. RenderFIM is the shipped default; the type exists so
-// the eval harness can measure alternative prompt SHAPES (not just alternate
-// Prompt contents, which the Variant.Build seam already covers) without
-// those experiments living in production code paths. See WithFIMRenderer.
+// the eval harness can measure alternative prompt shapes without those
+// experiments living in the production path.
 type FIMRenderer func(prompt.Prompt) (fimPrompt, suffix string)
 
-// CodestralOption customizes a codestral client at construction. Variadic
-// options rather than more positional params: the only current knob is
-// eval-only, and it must not push itself into every production call site.
+// CodestralOption customizes a codestral client at construction.
 type CodestralOption func(*codestralClient)
 
-// WithFIMRenderer replaces the FIM prompt renderer. Production passes
-// nothing and gets RenderFIM; the eval harness passes an experimental shape
-// (see eval.Variant.FIMRenderer) so a prompt-shape hypothesis can be scored
-// against the default across the whole corpus. A nil renderer is ignored, so
-// a zero-value/unset option can't silently produce an empty prompt.
+// WithFIMRenderer replaces the FIM prompt renderer (eval-only; production
+// passes nothing and gets RenderFIM). A nil renderer is ignored.
 func WithFIMRenderer(r FIMRenderer) CodestralOption {
 	return func(c *codestralClient) {
 		if r != nil {
@@ -186,11 +145,9 @@ func WithFIMRenderer(r FIMRenderer) CodestralOption {
 
 // NewCodestral builds a Provider backed by a shared, keep-alive-tuned
 // http.Client. Defaults: baseURL "https://api.mistral.ai", model
-// "codestral-latest" — the design originally named codestral.mistral.ai, but
-// a pay-as-you-go Mistral account cannot mint a Codestral-specific key, so
-// the general per-token endpoint (which serves the same FIM endpoint under a
-// regular Mistral key) is the default. baseURL stays configurable so
-// codestral.mistral.ai still works for anyone holding that key.
+// "codestral-latest" — a pay-as-you-go account can't mint a
+// codestral.mistral.ai key, so the general per-token endpoint is the
+// default; baseURL stays configurable for anyone holding that key.
 func NewCodestral(baseURL, model, apiKey string, maxTokens int, opts ...CodestralOption) (Provider, error) {
 	if baseURL == "" {
 		baseURL = "https://api.mistral.ai"
@@ -238,84 +195,54 @@ func (c *codestralClient) RenderPrompt(req Request) string {
 	return "PROMPT:\n" + fimPrompt + "\n\nSUFFIX:\n" + suffix
 }
 
-// RenderFIM renders a Prompt for a FIM endpoint. FIM models take no system
-// role, so ambient context (cwd/files/git/last-exit) is encoded as shell
-// comment lines above the buffer, same as before.
+// RenderFIM renders a Prompt for a FIM endpoint: ambient context as "#"
+// comments (FIM takes no system role), then recent history as RAW,
+// uncommented command lines contiguous with the buffer — Codestral continues
+// in-distribution shell code far better than it reasons over commented
+// metadata. The ambient context block's own "recent commands" line is
+// skipped here to avoid rendering it twice.
 //
-// Recent shell history gets different treatment: it is rendered as RAW,
-// uncommented command lines contiguous with the buffer, not as a "#"
-// comment. Codestral is a base code-completion model — it continues
-// in-distribution code far better than it "reasons" over commented metadata,
-// and shell history entries are themselves valid shell commands, i.e. real
-// code. So the rendered prompt looks like an actual shell session ("git add
-// .\ngit commit -m \"wip\"\ngit status\n" + buffer) rather than a comment
-// block, priming the model to continue the session instead of summarizing
-// it. The ambient context block's own "recent commands" line (from
-// prompt.contextBlock, labeled via prompt.RecentCommandsLabel) is skipped
-// here to avoid rendering the same req.History data twice.
-//
-// Each command line — history and the cursor line alike — is prefixed with a
-// "$ " prompt marker, so the whole thing reads as a shell TRANSCRIPT. That
-// marker is load-bearing, not decoration: without it the model completed the
-// LAST HISTORY LINE instead of predicting a new command ("git push" ->
-// "origin master", eval case A9). A trailing newline alone did NOT fix that —
-// the rendered prompt already ended in one — because either the endpoint
-// trims trailing whitespace off `prompt` or the model simply reads "git push"
-// as a prefix of "git push origin main". A non-whitespace marker is what
-// makes "a new command starts here" structural rather than positional.
-// Measured: the marker shape beat both the unmarked default and the
-// "# exit: N" boundary across the corpus, on codestral.
-//
-// Suffix is "" today, making this pure prefix continuation — exactly what
-// FIM models are trained to nail.
+// Every command line, history and cursor alike, is prefixed with a "$ "
+// transcript marker. Without it the model completed the LAST HISTORY LINE
+// instead of predicting a new one ("git push" -> "origin master"); a
+// trailing newline alone didn't fix it, since the model just read "git
+// push" as a prefix of "git push origin main". Suffix is "" today, making
+// this pure prefix continuation.
 func RenderFIM(p prompt.Prompt) (fimPrompt, suffix string) {
 	return renderFIMShape(p, defaultFIMShape())
 }
 
-// defaultPromptMarker is the shipped transcript marker. A trailing space is
-// part of it: it separates the marker from the command, and in next-command
-// mode it means the FIM prompt ends "$ ", putting the cursor where a real
-// shell would. Any leading space the model emits in response is stripped by
-// stripLeadingSeparators in next-command mode, so a marker-induced space can
-// never reach the suggestion.
+// defaultPromptMarker is the shipped transcript marker; the trailing space
+// puts the cursor at "$ " in next-command mode. Leading spaces the model
+// emits in response are stripped by stripLeadingSeparators, so this can't
+// leak into the suggestion.
 const defaultPromptMarker = "$ "
 
-// defaultFIMShape is the SHIPPED shape. Experimental shapes are expressed as
-// deltas from this (start here, change one thing) rather than from the zero
-// value — otherwise a variant would silently also revert whatever the
-// default has since adopted, and measure two changes while claiming one.
+// defaultFIMShape is the shipped shape. Experimental shapes are expressed as
+// deltas from this, not the zero value, so a variant only measures the one
+// thing it changes.
 func defaultFIMShape() fimShape {
 	return fimShape{promptMarker: defaultPromptMarker}
 }
 
-// fimShape is the set of knobs renderFIMShape varies. The zero value is NOT
-// the shipped default (see defaultFIMShape) — it is the pre-A9 unmarked
-// shape, kept reachable only so the eval harness can still measure against
-// it. Nothing here changes production behavior without a caller opting in
-// via WithFIMRenderer.
+// fimShape is the set of knobs renderFIMShape varies. The zero value is the
+// pre-marker shape, kept reachable only for the eval harness to measure
+// against; nothing here affects production without WithFIMRenderer.
 type fimShape struct {
-	// promptMarker, when non-empty, prefixes every raw history line AND is
-	// emitted once more immediately before Prefix, so the cursor sits after
-	// it. See RenderFIM for why this is the shipped default.
+	// promptMarker, when non-empty, prefixes every raw history line and is
+	// emitted once more immediately before Prefix.
 	promptMarker string
 
-	// alwaysExitCode emits a "# exit: N" comment line between the history
-	// block and Prefix even when N is 0 — which contextBlock deliberately
-	// omits. Measured and NOT adopted: it lost to promptMarker, and it can't
-	// separate its two effects anyway (real signal vs. acting as a
-	// non-whitespace boundary), while costing tokens on every request to
-	// restate "the last command succeeded".
+	// alwaysExitCode emits "# exit: N" between history and Prefix even when
+	// N is 0 (which contextBlock omits). Lost to promptMarker in eval, kept
+	// registered to re-ask the narrower question in isolation.
 	alwaysExitCode bool
 }
 
 func renderFIMShape(p prompt.Prompt, shape fimShape) (fimPrompt, suffix string) {
-	// p.Context is pre-rendered like "Context:\n- cwd: ...\n- git: ...\n\n"
-	// (prompt.contextBlock). Strip the "Context:" header and the trailing
-	// blank-line separator, then re-render each remaining "- " line as a "#"
-	// shell comment, EXCEPT the recent-commands line, which is rendered raw
-	// (below) instead. p.System and p.Instruction are chat-model
-	// append-contract text a FIM model neither needs nor benefits from, so
-	// they are deliberately excluded.
+	// Re-render each "- " line of p.Context as a "#" comment, except the
+	// recent-commands line (rendered raw below). p.System/p.Instruction are
+	// chat-only and excluded.
 	ctx := strings.TrimPrefix(p.Context, "Context:\n")
 	ctx = strings.TrimSuffix(ctx, "\n\n")
 
@@ -331,54 +258,36 @@ func renderFIMShape(p prompt.Prompt, shape fimShape) (fimPrompt, suffix string) 
 			b.WriteString("\n")
 		}
 	}
-	// History as raw command lines, oldest-first, contiguous with the
-	// buffer — no "#" prefix, so the model sees a real shell session to
-	// continue rather than commented-out metadata.
 	for _, cmd := range p.History {
 		b.WriteString(shape.promptMarker)
 		b.WriteString(cmd)
 		b.WriteString("\n")
 	}
-	// The exit-status line goes AFTER history and BEFORE the buffer on
-	// purpose: its job in this shape is to sit between the last command and
-	// the cursor. Putting it up with the other ambient comments (where
-	// contextBlock renders it for chat) would leave the history/cursor seam
-	// exactly as bare as it is today.
+	// Exit status goes between history and the buffer specifically to sit
+	// at that seam, not up with the other ambient comments.
 	if shape.alwaysExitCode {
 		b.WriteString("# exit: ")
 		b.WriteString(strconv.Itoa(p.LastExit))
 		b.WriteString("\n")
 	}
-	// Buffer goes last, with no trailing newline, so the model's completion
-	// continues directly from it. The marker is written even when Prefix is
-	// empty — that is precisely the next-command case A9 covers, where the
-	// marker is the only thing telling the model a fresh command starts here.
+	// Marker is written even when Prefix is empty — in next-command mode
+	// it's the only signal that a fresh command starts here.
 	b.WriteString(shape.promptMarker)
 	b.WriteString(p.Prefix)
 	return b.String(), p.Suffix
 }
 
-// RenderFIMNoPromptMarker renders the PRE-A9 shape: raw history lines and a
-// bare cursor line, with no "$ " transcript marker.
-//
-// This is what RenderFIM used to do, kept reachable so the change that
-// replaced it stays measurable — a default with no way to A/B against its
-// predecessor can only be re-litigated by hand-editing production code. It
-// is the baseline, not a candidate: it is known to lose (it is the shape
-// that produced A9).
+// RenderFIMNoPromptMarker renders the pre-marker shape (no "$ " transcript
+// marker) — kept reachable as a known-losing baseline so RenderFIM's win
+// over it stays re-measurable.
 func RenderFIMNoPromptMarker(p prompt.Prompt) (fimPrompt, suffix string) {
 	return renderFIMShape(p, fimShape{})
 }
 
-// RenderFIMExitCodeAlways renders the shipped shape PLUS an "# exit: N"
-// comment line between the history block and the cursor, emitted even when N
-// is 0 (contextBlock omits it there).
-//
-// Deliberately built on defaultFIMShape, so it keeps the prompt marker and
-// differs from production in exactly one thing. Measured and not adopted; it
-// stays registered because "does explicit exit status help now that the
-// boundary problem is solved" is a different question from the one it
-// originally lost, and re-running it is cheaper than rebuilding it.
+// RenderFIMExitCodeAlways is the shipped shape plus an "# exit: N" line
+// (even when N is 0) between history and the cursor. Lost to the plain
+// marker in eval; stays registered to re-ask whether it helps once the
+// boundary problem is already solved.
 func RenderFIMExitCodeAlways(p prompt.Prompt) (fimPrompt, suffix string) {
 	shape := defaultFIMShape()
 	shape.alwaysExitCode = true
@@ -426,18 +335,10 @@ type fimUsage struct {
 }
 
 // Complete issues a streaming FIM completions request and returns the
-// model's first line of output (design §4 "stream + take first line only"),
-// driving the shared accumulator for TTFT stamping and the cutoff.
-//
-// It honors ctx throughout: the HTTP request itself is built with
-// NewRequestWithContext, so cancelling ctx (e.g. because a newer keystroke
-// superseded this request — see server.handle) aborts the call, including
-// mid-stream reads of the response body.
+// model's first line of output, driving the shared accumulator for TTFT
+// stamping and the cutoff. Honors ctx throughout, including mid-stream
+// reads, via NewRequestWithContext.
 func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion, error) {
-	// typing mirrors the system prompt's own mode split (prompt.go): a
-	// non-empty buffer is a typing-mode completion, which must preserve the
-	// model's leading word-separator space; an empty buffer is a
-	// next-command prediction, which must not. See stripLeadingSeparators.
 	typing := req.Prompt.Prefix != ""
 
 	maxTokens := req.MaxTokens
@@ -466,24 +367,18 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	// METRICS(§12): TTFT is measured from just before the round trip starts
-	// to the first chunk carrying non-empty delta content (accumulator.Push).
+	// METRICS(§12): TTFT from just before the round trip to the first chunk
+	// with non-empty delta content.
 	acc := newAccumulator(time.Now())
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		// Covers network errors AND ctx cancellation/deadline (http.Client.Do
-		// returns ctx.Err(), possibly wrapped, when ctx ends before or during
-		// the round trip).
 		if ctx.Err() != nil {
 			return Completion{}, &Error{Kind: ErrCanceled, Provider: c.Name(), Err: err}
 		}
 		return Completion{}, &Error{Kind: ErrTransport, Provider: c.Name(), Err: fmt.Errorf("provider: request: %w", err)}
 	}
-	// Closing the body (a) prevents leaking the connection on every return
-	// path below, including the early "first newline seen" cutoff, and (b)
-	// is what actually aborts the in-progress read on a slow/blocked stream
-	// once ctx is cancelled or we simply stop caring.
+	// Also aborts the in-progress read on a cancelled ctx, not just cleanup.
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -496,11 +391,6 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 		}
 	}
 
-	// SSE parsing: the response body is a sequence of lines. Each event we
-	// care about looks like "data: {...json...}\n"; a blank line separates
-	// events but bufio.Scanner's default ScanLines split already gives us
-	// one line at a time, so we just filter for the "data:" prefix and skip
-	// everything else (blank keep-alive lines, comments, other fields).
 	var stopReason string
 	var inputTokens, outputTokens, cachedTokens int
 	scanner := bufio.NewScanner(resp.Body)
@@ -540,21 +430,11 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 			stopReason = chunk.Choices[0].FinishReason
 		}
 
-		// Two cutoffs stop the read early (design §4 — the point of streaming):
-		//
-		//  1. Newline (shared accumulator): a complete single-line suggestion.
-		//  2. Shell separator (firstCommandComplete, codestral-specific): the
-		//     first command plus a trailing ";"/"&&" has arrived, so the rest
-		//     of the chain is about to be discarded by firstShellCommand
-		//     anyway — stop now rather than stream it. This is what keeps a
-		//     code model's chaining ("mkdir x; cd y; ...") from costing the
-		//     ~66ms p50 / ~490ms p95 of stream time it did before, WITHOUT the
-		//     empty-output bug the ";" stop sequence had: a leading "; " is
-		//     stripped first, so we wait for the real command before stopping.
-		//
-		// METRICS(§12) note: returning here precedes the trailing usage chunk,
-		// so InputTokens/OutputTokens/CachedTokens are typically zero on this
-		// path — expected, and not worth chasing at the cost of the cutoff.
+		// Two early-stop conditions: a newline (shared accumulator), or a
+		// shell separator (firstCommandComplete) — the rest of a chained
+		// command would be discarded by firstShellCommand anyway, so stop
+		// streaming it. Returning here means the trailing usage chunk hasn't
+		// arrived, so token counts are typically zero on this path.
 		stop := acc.Push(chunk.Choices[0].Delta.Content)
 		if !stop && firstCommandComplete(acc.Raw()) {
 			stop = true
@@ -573,9 +453,8 @@ func (c *codestralClient) Complete(ctx context.Context, req Request) (Completion
 	}
 
 	if serr := scanner.Err(); serr != nil {
-		// Prefer ctx.Err() when set: a cancelled/expired ctx is what actually
-		// aborted the read, and scanner.Err() would otherwise surface as an
-		// opaque wrapped "context canceled" from the transport anyway.
+		// Prefer ctx.Err(): scanner.Err() would otherwise surface as an
+		// opaque wrapped "context canceled" from the transport.
 		if ctx.Err() != nil {
 			return Completion{HTTPStatus: resp.StatusCode}, &Error{Kind: ErrCanceled, HTTPStatus: resp.StatusCode, Provider: c.Name(), Err: ctx.Err()}
 		}
