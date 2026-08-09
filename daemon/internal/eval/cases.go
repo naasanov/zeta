@@ -149,6 +149,11 @@ func syntaxCases() []Case {
 
 // ---- B. Fabrication — "stop before free-form input you can't know" -------
 
+// A "b"-suffixed case pairs the bare case above it: same buffer, realistic
+// context. Read each pair together — B1-B8 send almost no context, so a rate
+// that collapses in the paired case means the fix is more grounded context,
+// not a tighter output filter. The grounded value sits mid-history, never
+// last, so a pass can't come from continuing the adjacent line.
 func fabricationCases() []Case {
 	return []Case{
 		{
@@ -166,7 +171,8 @@ func fabricationCases() []Case {
 		{
 			// B2: the ONLY acceptable output here is the opening quote and
 			// its leading space (` "`, 2 runes) — anything longer means the
-			// model kept going past the point it should have stopped.
+			// model kept going past the point it should have stopped. No
+			// B1b/B2b: a commit message is free-form input no context supplies.
 			ID:       "B2",
 			Category: "fabrication",
 			Req: protocol.Request{
@@ -189,6 +195,33 @@ func fabricationCases() []Case {
 			},
 			Asserts: []Assertion{
 				{Label: "invents-branch-name", Polarity: MustNot, Threshold: 0.20, Grader: ContainsTokenNotInContext()},
+			},
+		},
+		{
+			// B3's own buffer has no paired form: a branch being created does
+			// not exist yet, so no context can ground it. Switching to an
+			// EXISTING branch is the groundable sibling.
+			ID:       "B3b",
+			Category: "fabrication",
+			Req: protocol.Request{
+				Kind:      protocol.KindTyping,
+				Buf:       "git switch ",
+				Cwd:       "/Users/dev/projects/zeta",
+				GitBranch: "feature/auth-refactor",
+				History: []string{
+					"git switch -c feature/auth-refactor",
+					"git add .",
+					`git commit -m "wip"`,
+					"git push -u origin feature/auth-refactor",
+					"git switch main",
+					"git pull",
+					"git switch feature/auth-refactor",
+					"go test ./...",
+				},
+			},
+			Asserts: []Assertion{
+				{Label: "invents-branch-name", Polarity: MustNot, Threshold: 0.20, Grader: ContainsTokenNotInContext()},
+				{Label: "uses-known-branch", Polarity: Measure, Grader: ContainsAny("feature/auth-refactor", "main")},
 			},
 		},
 		{
@@ -224,6 +257,34 @@ func fabricationCases() []Case {
 			},
 		},
 		{
+			// ContainsURL (B6's grader) can't be reused here: with a real
+			// remote in history, producing a URL is the CORRECT output.
+			ID:       "B6b",
+			Category: "fabrication",
+			Req: protocol.Request{
+				Kind: protocol.KindTyping,
+				Buf:  "git remote add origin ",
+				Cwd:  "/Users/dev/projects/zeta",
+				History: []string{
+					"cd ~/projects",
+					"git clone https://github.com/naasanov/dotfiles.git",
+					"cd dotfiles",
+					"git log --oneline",
+					"cd ..",
+					"mkdir zeta",
+					"cd zeta",
+					"git init",
+					"git add .",
+					`git commit -m "initial commit"`,
+				},
+			},
+			Asserts: []Assertion{
+				{Label: "invents-remote-host", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
+				{Label: "invents-token-not-in-context", Polarity: MustNot, Threshold: 0.30, Grader: ContainsTokenNotInContext()},
+				{Label: "uses-known-host", Polarity: Measure, Grader: Contains("github.com/naasanov")},
+			},
+		},
+		{
 			ID:       "B7",
 			Category: "fabrication",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "curl "},
@@ -233,11 +294,58 @@ func fabricationCases() []Case {
 			},
 		},
 		{
+			// The known host is undotted (localhost:3000)
+			ID:       "B7b",
+			Category: "fabrication",
+			Req: protocol.Request{
+				Kind: protocol.KindTyping,
+				Buf:  "curl ",
+				Cwd:  "/Users/dev/projects/api",
+				History: []string{
+					"npm install",
+					"npm run dev",
+					"curl http://localhost:3000/health",
+					"git status",
+					"npm test",
+					"curl http://localhost:3000/api/users",
+					"docker compose up -d",
+					"git add .",
+				},
+			},
+			Asserts: []Assertion{
+				{Label: "invents-url-with-unknown-host", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
+				{Label: "uses-known-host", Polarity: Measure, Grader: Contains("localhost:3000")},
+			},
+		},
+		{
 			ID:       "B8",
 			Category: "fabrication",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "ssh "},
 			Asserts: []Assertion{
 				{Label: "invents-hostname", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
+			},
+		},
+		{
+			ID:       "B8b",
+			Category: "fabrication",
+			Req: protocol.Request{
+				Kind: protocol.KindTyping,
+				Buf:  "ssh ",
+				Cwd:  "/Users/dev/infra",
+				History: []string{
+					"cd ~/infra",
+					"ssh deploy@build01.internal.example.com",
+					"terraform plan",
+					"git status",
+					"scp ./app.conf deploy@build01.internal.example.com:/etc/app/",
+					"terraform apply",
+					"git add .",
+					`git commit -m "bump instance size"`,
+				},
+			},
+			Asserts: []Assertion{
+				{Label: "invents-hostname", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
+				{Label: "uses-known-host", Polarity: Measure, Grader: Contains("build01.internal.example.com")},
 			},
 		},
 	}

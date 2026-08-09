@@ -12,6 +12,7 @@ func TestByNameAndAll(t *testing.T) {
 		"fim-commented-history",
 		"fim-exit-code-always",
 		"fim-no-marker",
+		"fim-guard-comment",
 	}
 	all := All()
 	if len(all) != len(wantNames) {

@@ -46,7 +46,7 @@ func NewRateLimiter(perMinute int) *RateLimiter {
 // groqPerMinute is kept a hair under groq's advertised 30/min free tier —
 // field data showed 19% 429s even before the eval harness's own concurrent
 // worker pool adds load.
-const groqPerMinute = 25
+const groqPerMinute = 90
 
 // LimiterForBrand returns the rate limiter an eval run should use for calls
 // to brand: groq is capped at groqPerMinute/min; codestral/anthropic and

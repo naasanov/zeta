@@ -49,6 +49,7 @@ var all = []Prompt{
 	fimCommentedHistory,
 	fimExitCodeAlways,
 	fimNoMarker,
+	fimGuardComment,
 }
 
 // All returns every registered prompt, in stable order.
@@ -285,4 +286,48 @@ var fimNoMarkerTmpl = mustParse("fim-no-marker", `
 
 func (fimNoMarkerPrompt) RenderFIM(req protocol.Request) FIMPayload {
 	return FIMPayload{Prefix: mustRender(fimNoMarkerTmpl, req)}
+}
+
+// ========================= fim-guard-comment ==============================
+
+// fimGuardCommentPrompt is "fim-guard-comment": the shipped shape plus a
+// fixed rules block up top, testing whether a base completion model honors an
+// instruction it can only receive as shell comments (FIM takes no system
+// role). Codestral fabricates specifics it cannot know — remote URLs,
+// hostnames, commit messages — most often when context is thin.
+//
+// The rules go ABOVE the ambient context, never between the last history
+// line and the cursor: that adjacency is what makes the model continue the
+// transcript rather than complete the previous line.
+//
+// The failure mode to watch is the model continuing the comment block instead
+// of emitting a command; the "$ " marker is what should pull it back.
+type fimGuardCommentPrompt struct{}
+
+var fimGuardComment = fimGuardCommentPrompt{}
+
+func (fimGuardCommentPrompt) Name() string { return "fim-guard-comment" }
+
+// The first conditional is `{{if}}`, not `{{- if}}` as in every other
+// template here: the dash trims ALL preceding whitespace, which would eat the
+// newline ending the rules block and run it into the cwd line.
+var fimGuardCommentTmpl = mustParse("fim-guard-comment", `# shell transcript - predict only the next command
+# never invent a name that does not appear above: commit messages,
+# branch names, file names, hostnames, URLs, values
+# stop before free-form input, e.g. end at the opening quote
+# a short, partial completion is better than a confident guess
+{{if .Cwd}}# cwd: {{.Cwd}}
+{{end}}
+{{- if .DirEntries}}# files: {{join .DirEntries " "}}
+{{end}}
+{{- if .GitBranch}}# git: branch {{.GitBranch}}{{if .GitDirty}} (dirty){{end}}
+{{end}}
+{{- if .LastExit}}# last command failed (exit {{.LastExit}})
+{{end}}
+{{- range .History}}$ {{.}}
+{{end}}
+{{- print "$ "}}{{.Buf}}`)
+
+func (fimGuardCommentPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	return FIMPayload{Prefix: mustRender(fimGuardCommentTmpl, req)}
 }

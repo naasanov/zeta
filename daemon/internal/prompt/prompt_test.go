@@ -205,3 +205,40 @@ func TestNextCommandPromptCarriesContextAndNoFakeBufferMarker(t *testing.T) {
 		t.Errorf("did not expect legacy empty-prompt sentinel, got:\n%s", user)
 	}
 }
+
+// TestFIMGuardCommentShape pins the two things the guard block can break:
+// its last line must not run into the ambient context (the `{{if}}` vs
+// `{{- if}}` trap noted on the template), and the rules must stay ABOVE the
+// transcript so history and the buffer remain adjacent.
+func TestFIMGuardCommentShape(t *testing.T) {
+	req := protocol.Request{
+		Kind:    protocol.KindTyping,
+		Buf:     "git com",
+		Cwd:     "/Users/x/project",
+		History: []string{"git add .", "git status"},
+	}
+	got := fimGuardComment.RenderFIM(req).Prefix
+
+	if !strings.Contains(got, "\n# cwd: /Users/x/project\n") {
+		t.Errorf("cwd line not on its own line (guard block ran into it), got:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "$ git status\n$ git com") {
+		t.Errorf("history and buffer must stay contiguous at the end, got:\n%s", got)
+	}
+	rules := strings.Index(got, "# never invent a name")
+	transcript := strings.Index(got, "$ git add .")
+	if rules < 0 || transcript < 0 || rules > transcript {
+		t.Errorf("rules block must precede the transcript, got:\n%s", got)
+	}
+}
+
+// TestFIMGuardCommentWithoutContext covers the thin-context case the variant
+// exists for: with no cwd/files/git, the rules block must still end cleanly
+// before the transcript rather than merging into the first command line.
+func TestFIMGuardCommentWithoutContext(t *testing.T) {
+	req := protocol.Request{Kind: protocol.KindTyping, Buf: "ssh "}
+	got := fimGuardComment.RenderFIM(req).Prefix
+	if !strings.HasSuffix(got, "guess\n$ ssh ") {
+		t.Errorf("rules block must end with a newline before the cursor line, got:\n%q", got)
+	}
+}

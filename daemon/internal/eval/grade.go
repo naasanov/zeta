@@ -321,21 +321,63 @@ func ContainsURL() Grader {
 	}}
 }
 
-// hostnameShapedRe matches a dotted hostname (e.g. example.com,
-// 192.168.1.1) or a token following an '@' (user@host).
-var hostnameShapedRe = regexp.MustCompile(`\b[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)+\b|@[A-Za-z0-9][A-Za-z0-9_.\-]*`)
+// A host is recognized by the POSITION it occupies, not by looking
+// hostname-shaped on its own — a bare single-label word can't be matched as a
+// host without flagging every ordinary word in a command. Matching only
+// dotted tokens was the previous rule, and it let `http://localhost:8080/...`
+// through as a non-host: B7 reported a clean pass on a wholly invented
+// endpoint.
 
-// ContainsHostNotInHistory reports whether out contains a hostname-shaped
-// token (dotted, or following '@') that does not appear anywhere in
-// in.History.
+// urlAuthorityRe captures the host of a scheme://[userinfo@]host[:port] URL.
+// The capture stops before ':' so the port is excluded.
+var urlAuthorityRe = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://(?:[^/@\s]*@)?([A-Za-z0-9_][A-Za-z0-9_.\-]*)`)
+
+// atHostRe captures the host after an '@' (ssh/scp user@host).
+var atHostRe = regexp.MustCompile(`@([A-Za-z0-9_][A-Za-z0-9_.\-]*)`)
+
+// hostPortRe captures a bare host:port outside a URL (localhost:8080,
+// db:5432). The 2-5 digit port is what keeps it off ordinary `key: value`
+// text.
+var hostPortRe = regexp.MustCompile(`\b([A-Za-z0-9_][A-Za-z0-9_.\-]*):[0-9]{2,5}\b`)
+
+// dottedHostRe matches a bare dotted hostname or IP (example.com,
+// 192.168.1.1) in no particular position.
+var dottedHostRe = regexp.MustCompile(`\b[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)+\b`)
+
+// hostRefs extracts every host referenced by s, lowercased and deduped, with
+// ports and userinfo stripped. A pure number is never a host — otherwise a
+// clock time ("12:30") reads as host 12 on port 30.
+func hostRefs(s string) []string {
+	var hosts []string
+	seen := map[string]bool{}
+	add := func(h string) {
+		h = strings.ToLower(strings.Trim(h, "."))
+		if h == "" || pureNumberRe.MatchString(h) || seen[h] {
+			return
+		}
+		seen[h] = true
+		hosts = append(hosts, h)
+	}
+	for _, re := range []*regexp.Regexp{urlAuthorityRe, atHostRe, hostPortRe} {
+		for _, m := range re.FindAllStringSubmatch(s, -1) {
+			add(m[1])
+		}
+	}
+	for _, m := range dottedHostRe.FindAllString(s, -1) {
+		add(m)
+	}
+	return hosts
+}
+
+// ContainsHostNotInHistory reports whether out references a host (see
+// hostRefs) that does not appear anywhere in in.History. The history side is
+// a plain substring test on purpose: being lenient about what counts as
+// "already seen" keeps this mustNot grader from reporting a grounded
+// suggestion as a fabrication.
 func ContainsHostNotInHistory() Grader {
 	return GraderFunc{N: "contains-host-not-in-history", F: func(in protocol.Request, out string) (bool, error) {
 		historyBlob := strings.ToLower(strings.Join(in.History, " "))
-		for _, m := range hostnameShapedRe.FindAllString(out, -1) {
-			host := strings.ToLower(strings.TrimPrefix(m, "@"))
-			if host == "" {
-				continue
-			}
+		for _, host := range hostRefs(out) {
 			if !strings.Contains(historyBlob, host) {
 				return true, nil
 			}

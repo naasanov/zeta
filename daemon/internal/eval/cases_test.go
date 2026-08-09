@@ -13,7 +13,7 @@ import (
 // (C3, E3, E7, F2).
 var wantIDs = []string{
 	"A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9",
-	"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8",
+	"B1", "B2", "B3", "B3b", "B4", "B5", "B6", "B6b", "B7", "B7b", "B8", "B8b",
 	"C1", "C2", "C3",
 	"D1", "D2", "D3", "D4",
 	"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8",
@@ -179,8 +179,27 @@ func TestCases_SelectableByCategoryAndGlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Select(B*): %v", err)
 	}
-	if len(byGlob) != 8 {
-		t.Errorf("Select(B*) matched %d cases, want 8 (B1..B8)", len(byGlob))
+	if len(byGlob) != 12 {
+		t.Errorf("Select(B*) matched %d cases, want 12 (B1..B8 plus the four paired \"b\" cases)", len(byGlob))
+	}
+
+	// "B6" must select the bare case ALONE — a selector that silently swept
+	// in its paired high-context sibling would make the two indistinguishable
+	// in a scorecard, which is the whole point of the pairing. "B6*" is the
+	// selector that takes both.
+	bare, err := Select(cases, "B6")
+	if err != nil {
+		t.Fatalf("Select(B6): %v", err)
+	}
+	if len(bare) != 1 || bare[0].ID != "B6" {
+		t.Errorf("Select(B6) matched %d cases, want exactly B6", len(bare))
+	}
+	pair, err := Select(cases, "B6*")
+	if err != nil {
+		t.Fatalf("Select(B6*): %v", err)
+	}
+	if len(pair) != 2 {
+		t.Errorf("Select(B6*) matched %d cases, want 2 (B6 and B6b)", len(pair))
 	}
 
 	if _, err := Select(cases, "NOPE"); err == nil {

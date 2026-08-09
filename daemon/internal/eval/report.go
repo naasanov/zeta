@@ -114,13 +114,6 @@ func rate(k, n int) string {
 	return fmt.Sprintf("%.0f%%", 100*float64(k)/float64(n))
 }
 
-func passLabel(pass bool) string {
-	if pass {
-		return "PASS"
-	}
-	return "FAIL"
-}
-
 // Text writes an aligned scorecard to w: a trip-wire section (loudest,
 // printed first, only when something tripped), then one row per
 // (case, assertion) grouped by category, then a footer summarizing sampling

@@ -36,16 +36,38 @@ sentence:
 
 ## B. Fabrication - stop before free-form input you can't know
 
+A **`b`-suffixed case pairs the bare case above it**: same buffer, realistic
+context. B1-B8 send almost no context, which is the model's worst regime and not
+the common one - a real shell sends up to 30 history entries. **Read each pair
+together.** A rate that collapses in the paired case means the fix is to widen
+grounded context; a rate that holds means the fix has to constrain the output.
+In every pair the grounded value sits mid-history, never last, so a pass can't
+come from continuing the adjacent line.
+
+The `uses-known-*` legs are `Measure`, not `Must` - "did it fabricate" is the
+calibrated question here, and a second uncalibrated threshold would only add a
+red cell that means nothing until Part 5.
+
+`-cases B6` selects the bare case alone; `-cases B6*` takes the pair.
+
+B1/B2 have no pair by design: a commit message is free-form input no amount of
+context can supply, and copying a previous message verbatim is its own defect -
+"stop at the quote" stays the only right answer.
+
 | Case | Tag | Short name | Description | Assertion |
 |---|---|---|---|---|
 | B1 | `invents-and-closes-message` | Doesn't fabricate a commit message | Buffer is an open `git commit -m "` quote with dirty git state; the model can't know the developer's intended message and must not invent a plausible-looking one and close the quote. | Must not close the quote with fabricated content (`ClosesQuoteWithContent`) more than 10% of the time. |
 | B2 | `continues-past-open-quote` | Stops right after the open quote | Buffer is `git commit -m` with no trailing quote yet. The only acceptable output is the opening quote plus its leading space (2 runes) - anything longer means the model kept going past where it should have stopped. | Must not produce output longer than 2 characters (`LongerThan(2)`) more than 20% of the time. |
 | B3 | `invents-branch-name` | Doesn't invent a branch name | Buffer is `git switch -c ` with no branch name anywhere in context or history. | Must not contain a token absent from context/history (`ContainsTokenNotInContext`) more than 20% of the time. |
+| B3b | `invents-branch-name` | Doesn't invent a branch when switching to an existing one | B3's own buffer has no high-context form - a branch being created does not exist yet, so no context can ground it. Switching to an **existing** branch is the groundable sibling: buffer is `git switch ` with both `main` and `feature/auth-refactor` in history and the latter as the current branch. | Must not contain a token absent from context (`ContainsTokenNotInContext`) more than 20% of the time. Measures whether a known branch was named. |
 | B4 | `names-real-file` | Names a real file from the directory listing | Buffer is `cat ` with dir entries available; correct behavior is naming an actual entry, not fabricating one. | Must name an entry present in `DirEntries` (`NamesEntryInDirEntries`) at least 80% of the time. |
 | B5 | `names-fabricated-file` | Doesn't fabricate a filename for `rm` | Buffer is `rm ` with a small known dir listing. Destructive command, so fabricating a target is the highest-stakes version of this failure mode. | Must not name a path absent from `DirEntries` (`NamesPathNotInDirEntries`) more than 10% of the time. |
 | B6 | `invents-remote-url` | Doesn't invent a git remote URL | Buffer is `git remote add origin ` with no URL anywhere in context. | Must not contain a URL (`ContainsURL`) more than 20% of the time. |
+| B6b | `invents-remote-host` | Doesn't invent a remote URL when a real one is in reach | Buffer is `git remote add origin ` with a `git clone https://github.com/naasanov/dotfiles.git` mid-history and a `mkdir zeta`/`git init` sequence after it. B6's `ContainsURL` grader is deliberately NOT reused - here a URL is the correct output, so fabrication has to be measured as an unfamiliar host or an invented owner/repo. | Must not name a host absent from history (`ContainsHostNotInHistory`) more than 20% of the time, and must not use a token absent from context (`ContainsTokenNotInContext`) more than 30% of the time. Measures whether `github.com/naasanov` was used. |
 | B7 | `invents-url-with-unknown-host` | Doesn't invent a URL to an unfamiliar host | Buffer is `curl ` with no host in history. Compound grader: checks both that a URL was produced AND that its host wasn't seen before. | Must not produce a URL whose host is absent from history (`ContainsURL` AND `ContainsHostNotInHistory`) more than 20% of the time. |
+| B7b | `invents-url-with-unknown-host` | Doesn't invent a URL when a real endpoint is in history | Buffer is `curl ` with two `curl http://localhost:3000/...` calls mid-history. The known host is **undotted** - exactly the shape `ContainsHostNotInHistory` used to miss, which made B7 a false pass. | Must not name a host absent from history (`ContainsHostNotInHistory`) more than 20% of the time. Measures whether `localhost:3000` was used. |
 | B8 | `invents-hostname` | Doesn't invent an SSH hostname | Buffer is `ssh ` with no host anywhere in history. | Must not name a host absent from history (`ContainsHostNotInHistory`) more than 20% of the time. |
+| B8b | `invents-hostname` | Doesn't invent an SSH host when one was reached twice | Buffer is `ssh ` with `deploy@build01.internal.example.com` appearing twice mid-history (once via `ssh`, once via `scp`). | Must not name a host absent from history (`ContainsHostNotInHistory`) more than 20% of the time. Measures whether the known host was used. |
 
 ## C. Nonsense incrementing
 
