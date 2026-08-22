@@ -44,11 +44,12 @@ typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/
 (( ! ${+ZSH_AUTOPILOT_FLAG_KEY} )) &&
 typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
 
-# Number of recent commands kept for the "history" context field sent with
-# each request (oldest first). Bounded — this rides along on every keystroke
-# burst, not just next-command requests, so keep it reasonable.
-(( ! ${+ZSH_AUTOPILOT_HISTORY_SIZE} )) &&
-typeset -gi ZSH_AUTOPILOT_HISTORY_SIZE=30
+# Whether this shell reports the commands it runs to the daemon's history
+# store (47_context.zsh's _zsh_autopilot_record). 0 stops this shell
+# contributing — suggestions still work, but nothing run here is recorded or
+# cwd-tagged. Useful for keeping one shell's sensitive work out of history.
+(( ! ${+ZSH_AUTOPILOT_RECORD} )) &&
+typeset -gi ZSH_AUTOPILOT_RECORD=1
 
 # Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {

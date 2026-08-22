@@ -9,12 +9,13 @@
 # fork/exec-per-request cost this whole daemon architecture exists to avoid
 # (design §7).
 
+zmodload zsh/datetime 2>/dev/null
+
 # Cached context globals. Empty/zero/false are the "nothing to report"
 # values that the socket transport uses to omit a field entirely.
 typeset -gi _ZSH_AUTOPILOT_LAST_EXIT=0
 typeset -g _ZSH_AUTOPILOT_GIT_BRANCH=
 typeset -g _ZSH_AUTOPILOT_GIT_DIRTY=false
-typeset -ga _ZSH_AUTOPILOT_HISTORY
 typeset -ga _ZSH_AUTOPILOT_DIR_ENTRIES
 
 # precmd hook: capture the previous command's exit status. This MUST be the
@@ -61,10 +62,11 @@ _zsh_autopilot_refresh_dir() {
   (( ${#e} >= 1 && ${#e} <= 50 )) && _ZSH_AUTOPILOT_DIR_ENTRIES=("${e[@]}")
 }
 
-# preexec hook: append the about-to-run command to the bounded recent-history
-# list. $1 is the raw command line as typed (preexec's first arg), oldest
-# entries fall off the front so the array stays oldest-first, newest-last.
-_zsh_autopilot_track_history() {
+# preexec hook: report the about-to-run command to the daemon's history store.
+# $1 is the raw line as typed, needed unexpanded for hist_ignore_space. $PWD
+# here is the dir the command runs IN, so `cd ..` is tagged with the pre-cd
+# directory.
+_zsh_autopilot_record() {
   emulate -L zsh
 
   local cmd="$1"
@@ -73,13 +75,14 @@ _zsh_autopilot_track_history() {
   # METRICS(§12): signal that a previously accepted suggestion actually ran.
   whence -w _zsh_autopilot_metric_executed &>/dev/null && _zsh_autopilot_metric_executed
 
-  _ZSH_AUTOPILOT_HISTORY+=("$cmd")
+  (( ZSH_AUTOPILOT_RECORD )) || return
 
-  local -i max=${ZSH_AUTOPILOT_HISTORY_SIZE:-10}
-  (( max < 1 )) && max=1
-  if (( ${#_ZSH_AUTOPILOT_HISTORY} > max )); then
-    _ZSH_AUTOPILOT_HISTORY=("${(@)_ZSH_AUTOPILOT_HISTORY[-max,-1]}")
-  fi
+  # A leading space under hist_ignore_space means "keep this out of history"
+  # (e.g. `  export TOKEN=...`) — recording it would leak it to a third-party
+  # LLM. Space only, not tab; `emulate -L zsh` does not reset this option.
+  [[ -o hist_ignore_space && $cmd == ' '* ]] && return
+
+  _zsh_autopilot_send_record "$cmd" "$PWD" "$EPOCHSECONDS"
 }
 
 autoload -Uz add-zsh-hook
@@ -93,7 +96,7 @@ add-zsh-hook precmd _zsh_autopilot_refresh_git
 add-zsh-hook chpwd _zsh_autopilot_refresh_git
 add-zsh-hook precmd _zsh_autopilot_refresh_dir
 add-zsh-hook chpwd _zsh_autopilot_refresh_dir
-add-zsh-hook preexec _zsh_autopilot_track_history
+add-zsh-hook preexec _zsh_autopilot_record
 
 # Seed the git cache immediately so context is sane even before the first
 # precmd runs (e.g. a suggestion request triggered while typing on the very
@@ -103,41 +106,3 @@ _zsh_autopilot_refresh_git
 # Seed the directory-listing cache immediately, same reasoning as the git
 # cache above.
 _zsh_autopilot_refresh_dir
-
-# One-shot: seed _ZSH_AUTOPILOT_HISTORY from zsh's own in-memory history (fc)
-# so a brand-new shell starts with recency context instead of an empty array,
-# waiting for commands to run before it has anything to send. `fc -ln` reads
-# the loaded history list — no file parsing, no fork.
-#
-# Deferred to the FIRST precmd, NOT run at source time: while .zshrc (and this
-# plugin) is still sourcing, zsh has not yet read $HISTFILE into the in-memory
-# list, so `fc` would see zero entries. By the first precmd it's fully loaded
-# (verified: 0 entries at source time, full history by first precmd). The hook
-# removes itself after one run. It's registered in this fragment (47), so it
-# runs before 60_start's _zsh_autopilot_precmd — the first next-command request
-# already has the seeded history.
-_zsh_autopilot_seed_history() {
-  emulate -L zsh -o extendedglob
-  add-zsh-hook -d precmd _zsh_autopilot_seed_history
-
-  (( ${#_ZSH_AUTOPILOT_HISTORY} > 0 )) && return
-
-  local -i max=${ZSH_AUTOPILOT_HISTORY_SIZE:-10}
-  (( max < 1 )) && return
-
-  local -a seeded
-  local line
-  # fc -ln -$max: last $max history entries, oldest first, no line numbers.
-  # Entries are left-padded with whitespace and may include blank lines, so
-  # trim each (the [[:space:]]# repetition needs extendedglob, set above)
-  # and skip empties.
-  while IFS= read -r line; do
-    line="${line##[[:space:]]#}"
-    line="${line%%[[:space:]]#}"
-    [[ -z $line ]] && continue
-    seeded+=("$line")
-  done < <(fc -ln -$max 2>/dev/null)
-
-  (( ${#seeded} > 0 )) && _ZSH_AUTOPILOT_HISTORY=("${seeded[@]}")
-}
-add-zsh-hook precmd _zsh_autopilot_seed_history

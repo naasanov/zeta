@@ -71,11 +71,12 @@ typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/
 (( ! ${+ZSH_AUTOPILOT_FLAG_KEY} )) &&
 typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
 
-# Number of recent commands kept for the "history" context field sent with
-# each request (oldest first). Bounded — this rides along on every keystroke
-# burst, not just next-command requests, so keep it reasonable.
-(( ! ${+ZSH_AUTOPILOT_HISTORY_SIZE} )) &&
-typeset -gi ZSH_AUTOPILOT_HISTORY_SIZE=30
+# Whether this shell reports the commands it runs to the daemon's history
+# store (47_context.zsh's _zsh_autopilot_record). 0 stops this shell
+# contributing — suggestions still work, but nothing run here is recorded or
+# cwd-tagged. Useful for keeping one shell's sensitive work out of history.
+(( ! ${+ZSH_AUTOPILOT_RECORD} )) &&
+typeset -gi ZSH_AUTOPILOT_RECORD=1
 
 # Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {
@@ -595,12 +596,13 @@ _zsh_autopilot_json_str_field() {
 # fork/exec-per-request cost this whole daemon architecture exists to avoid
 # (design §7).
 
+zmodload zsh/datetime 2>/dev/null
+
 # Cached context globals. Empty/zero/false are the "nothing to report"
 # values that the socket transport uses to omit a field entirely.
 typeset -gi _ZSH_AUTOPILOT_LAST_EXIT=0
 typeset -g _ZSH_AUTOPILOT_GIT_BRANCH=
 typeset -g _ZSH_AUTOPILOT_GIT_DIRTY=false
-typeset -ga _ZSH_AUTOPILOT_HISTORY
 typeset -ga _ZSH_AUTOPILOT_DIR_ENTRIES
 
 # precmd hook: capture the previous command's exit status. This MUST be the
@@ -647,10 +649,11 @@ _zsh_autopilot_refresh_dir() {
   (( ${#e} >= 1 && ${#e} <= 50 )) && _ZSH_AUTOPILOT_DIR_ENTRIES=("${e[@]}")
 }
 
-# preexec hook: append the about-to-run command to the bounded recent-history
-# list. $1 is the raw command line as typed (preexec's first arg), oldest
-# entries fall off the front so the array stays oldest-first, newest-last.
-_zsh_autopilot_track_history() {
+# preexec hook: report the about-to-run command to the daemon's history store.
+# $1 is the raw line as typed, needed unexpanded for hist_ignore_space. $PWD
+# here is the dir the command runs IN, so `cd ..` is tagged with the pre-cd
+# directory.
+_zsh_autopilot_record() {
   emulate -L zsh
 
   local cmd="$1"
@@ -659,13 +662,14 @@ _zsh_autopilot_track_history() {
   # METRICS(§12): signal that a previously accepted suggestion actually ran.
   whence -w _zsh_autopilot_metric_executed &>/dev/null && _zsh_autopilot_metric_executed
 
-  _ZSH_AUTOPILOT_HISTORY+=("$cmd")
+  (( ZSH_AUTOPILOT_RECORD )) || return
 
-  local -i max=${ZSH_AUTOPILOT_HISTORY_SIZE:-10}
-  (( max < 1 )) && max=1
-  if (( ${#_ZSH_AUTOPILOT_HISTORY} > max )); then
-    _ZSH_AUTOPILOT_HISTORY=("${(@)_ZSH_AUTOPILOT_HISTORY[-max,-1]}")
-  fi
+  # A leading space under hist_ignore_space means "keep this out of history"
+  # (e.g. `  export TOKEN=...`) — recording it would leak it to a third-party
+  # LLM. Space only, not tab; `emulate -L zsh` does not reset this option.
+  [[ -o hist_ignore_space && $cmd == ' '* ]] && return
+
+  _zsh_autopilot_send_record "$cmd" "$PWD" "$EPOCHSECONDS"
 }
 
 autoload -Uz add-zsh-hook
@@ -679,7 +683,7 @@ add-zsh-hook precmd _zsh_autopilot_refresh_git
 add-zsh-hook chpwd _zsh_autopilot_refresh_git
 add-zsh-hook precmd _zsh_autopilot_refresh_dir
 add-zsh-hook chpwd _zsh_autopilot_refresh_dir
-add-zsh-hook preexec _zsh_autopilot_track_history
+add-zsh-hook preexec _zsh_autopilot_record
 
 # Seed the git cache immediately so context is sane even before the first
 # precmd runs (e.g. a suggestion request triggered while typing on the very
@@ -689,44 +693,6 @@ _zsh_autopilot_refresh_git
 # Seed the directory-listing cache immediately, same reasoning as the git
 # cache above.
 _zsh_autopilot_refresh_dir
-
-# One-shot: seed _ZSH_AUTOPILOT_HISTORY from zsh's own in-memory history (fc)
-# so a brand-new shell starts with recency context instead of an empty array,
-# waiting for commands to run before it has anything to send. `fc -ln` reads
-# the loaded history list — no file parsing, no fork.
-#
-# Deferred to the FIRST precmd, NOT run at source time: while .zshrc (and this
-# plugin) is still sourcing, zsh has not yet read $HISTFILE into the in-memory
-# list, so `fc` would see zero entries. By the first precmd it's fully loaded
-# (verified: 0 entries at source time, full history by first precmd). The hook
-# removes itself after one run. It's registered in this fragment (47), so it
-# runs before 60_start's _zsh_autopilot_precmd — the first next-command request
-# already has the seeded history.
-_zsh_autopilot_seed_history() {
-  emulate -L zsh -o extendedglob
-  add-zsh-hook -d precmd _zsh_autopilot_seed_history
-
-  (( ${#_ZSH_AUTOPILOT_HISTORY} > 0 )) && return
-
-  local -i max=${ZSH_AUTOPILOT_HISTORY_SIZE:-10}
-  (( max < 1 )) && return
-
-  local -a seeded
-  local line
-  # fc -ln -$max: last $max history entries, oldest first, no line numbers.
-  # Entries are left-padded with whitespace and may include blank lines, so
-  # trim each (the [[:space:]]# repetition needs extendedglob, set above)
-  # and skip empties.
-  while IFS= read -r line; do
-    line="${line##[[:space:]]#}"
-    line="${line%%[[:space:]]#}"
-    [[ -z $line ]] && continue
-    seeded+=("$line")
-  done < <(fc -ln -$max 2>/dev/null)
-
-  (( ${#seeded} > 0 )) && _ZSH_AUTOPILOT_HISTORY=("${seeded[@]}")
-}
-add-zsh-hook precmd _zsh_autopilot_seed_history
 #--------------------------------------------------------------------#
 # Daemon Socket Transport                                            #
 #--------------------------------------------------------------------#
@@ -801,15 +767,24 @@ _zsh_autopilot_socket_alive() {
   [[ -n $ZSH_AUTOPILOT_SOCKET_FD ]] && { true <&$ZSH_AUTOPILOT_SOCKET_FD } 2>/dev/null
 }
 
+# Write one already-serialized JSON line to the daemon: connect lazily if
+# needed, and reconnect once on a write failure (half-open peer) before
+# giving up.
+_zsh_autopilot_write_line() {
+  local line="$1"
+
+  _zsh_autopilot_socket_alive || _zsh_autopilot_connect || return 1
+
+  if ! print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$line" 2>/dev/null; then
+    _zsh_autopilot_connect || return 1
+    print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$line" 2>/dev/null || return 1
+  fi
+}
+
 # Send a request to the daemon. $1 = buffer, $2 = kind (typing|next_command).
-# Mints a fresh request id, records it as current, and ships one JSON line.
-#
-# Optional context fields ride along on every request (cwd/git_branch/
-# git_dirty/last_exit/history), each included only when it has a meaningful
-# value to report. Git state and history are read from the caches maintained
-# by 47_context.zsh's precmd/chpwd/preexec hooks — nothing here forks git or
-# walks history; that would defeat the point of caching on the hot per-
-# keystroke path.
+# Mints a fresh request id, records it as current, ships one JSON line with
+# cwd/git_branch/git_dirty/last_exit when meaningful. Git state comes from
+# 47_context.zsh's cache — forking git on the keystroke path would defeat it.
 _zsh_autopilot_send() {
   local buffer="$1" kind="${2:-typing}"
 
@@ -822,7 +797,8 @@ _zsh_autopilot_send() {
 
   local REPLY
   _zsh_autopilot_json_escape "$buffer"
-  local line='{"v":1,"id":"'${_ZSH_AUTOPILOT_REQ_ID}'","kind":"'${kind}'","buf":"'${REPLY}'"'
+  # v:2 — `history` is daemon-filled (see protocol.Version), not sent here.
+  local line='{"v":2,"id":"'${_ZSH_AUTOPILOT_REQ_ID}'","kind":"'${kind}'","buf":"'${REPLY}'"'
 
   _zsh_autopilot_json_escape "$PWD"
   line+=',"cwd":"'${REPLY}'"'
@@ -834,18 +810,9 @@ _zsh_autopilot_send() {
 
   (( _ZSH_AUTOPILOT_LAST_EXIT != 0 )) && line+=',"last_exit":'${_ZSH_AUTOPILOT_LAST_EXIT}
 
-  if (( ${#_ZSH_AUTOPILOT_HISTORY} > 0 )); then
-    local hist_json='' item
-    for item in "${_ZSH_AUTOPILOT_HISTORY[@]}"; do
-      _zsh_autopilot_json_escape "$item"
-      hist_json+=${hist_json:+,}'"'${REPLY}'"'
-    done
-    line+=',"history":['${hist_json}']'
-  fi
-
-  # Distinct loop var (entry, not item): re-declaring the `item` already
-  # local-ised by the history block above would make zsh print `item=...` to
-  # stdout — garbage on the prompt on every send that carries dir entries.
+  # Distinct loop var (entry): re-declaring an already-`local` name across two
+  # loops (e.g. both doing `local ... item`) makes zsh print `item=...` to
+  # stdout — garbage on the prompt. Invisible to `zsh -n` and code review.
   if (( ${#_ZSH_AUTOPILOT_DIR_ENTRIES} > 0 )); then
     local de_json='' entry
     for entry in "${_ZSH_AUTOPILOT_DIR_ENTRIES[@]}"; do
@@ -857,11 +824,26 @@ _zsh_autopilot_send() {
 
   line+='}'
 
-  # Write; if the peer had gone away (half-open), reconnect once and retry.
-  if ! print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$line" 2>/dev/null; then
-    _zsh_autopilot_connect || return 1
-    print -r -u $ZSH_AUTOPILOT_SOCKET_FD -- "$line" 2>/dev/null || return 1
-  fi
+  _zsh_autopilot_write_line "$line"
+}
+
+# Fire-and-forget record: $1 = cmd, $2 = cwd, $3 = ts. Draws an id from the
+# shared _ZSH_AUTOPILOT_SEQ counter so the daemon can split out the session,
+# but must not set _ZSH_AUTOPILOT_REQ_ID — there is no reply to supersede.
+_zsh_autopilot_send_record() {
+  local cmd="$1" cwd="$2" ts="$3"
+
+  (( _ZSH_AUTOPILOT_SEQ++ ))
+  local id="${ZSH_AUTOPILOT_SESSION_ID}.${_ZSH_AUTOPILOT_SEQ}"
+
+  local REPLY
+  _zsh_autopilot_json_escape "$cwd"
+  local line='{"v":2,"id":"'${id}'","kind":"record","cwd":"'${REPLY}'"'
+
+  _zsh_autopilot_json_escape "$cmd"
+  line+=',"cmd":"'${REPLY}'","ts":'${ts}'}'
+
+  _zsh_autopilot_write_line "$line"
 }
 
 # precmd hook: at a fresh, empty prompt, ask the daemon what to run next. The
