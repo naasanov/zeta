@@ -60,17 +60,21 @@ func mustParse(name, text string) *template.Template {
 // all is the stable, ordered list of every registered prompt. A slice, not a
 // map, so All() and the error message in ByName have a fixed, reproducible
 // order rather than depending on map iteration.
+//
+// Order convention: the current ShippedFor defaults come first, then every
+// other prompt most-recently-added first. Add new prompts right after the
+// defaults, not at the end.
 var all = []Prompt{
 	chatAppend,
 	fimTranscriptMarker,
+	cwdFiltered,
+	cwdGrouped,
 	fimTranscriptMarker10,
 	fimTranscriptMarker20,
+	fimGuardComment,
 	fimCommentedHistory,
 	fimExitCodeAlways,
 	fimNoMarker,
-	fimGuardComment,
-	cwdFiltered,
-	cwdGrouped,
 }
 
 // All returns every registered prompt, in stable order.

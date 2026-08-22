@@ -9,14 +9,14 @@ func TestByNameAndAll(t *testing.T) {
 	wantNames := []string{
 		"chat-append",
 		"fim-transcript-marker",
+		"cwd-filtered",
+		"cwd-grouped",
 		"fim-transcript-marker-10",
 		"fim-transcript-marker-20",
+		"fim-guard-comment",
 		"fim-commented-history",
 		"fim-exit-code-always",
 		"fim-no-marker",
-		"fim-guard-comment",
-		"cwd-filtered",
-		"cwd-grouped",
 	}
 	all := All()
 	if len(all) != len(wantNames) {
