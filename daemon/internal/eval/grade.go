@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"path"
 	"regexp"
 	"strings"
 
@@ -549,6 +550,55 @@ func ContinuesLastHistoryCommand() Grader {
 			return false, nil
 		}
 		return !topLevelCommandAllowlist[suggestion[0]], nil
+	}}
+}
+
+// ---- cwd-aware graders (context, cwd-scoped prompts) --------------------
+
+// EchoesOtherCwdCommand reports whether out's leading tokens (first, plus
+// second when both sides have one) match a history entry tagged with a
+// DIFFERENT known cwd than in.Cwd. Inert when no entry has a known,
+// differing cwd, so it never fires on the untagged legacy corpus.
+func EchoesOtherCwdCommand() Grader {
+	return GraderFunc{N: "echoes-other-cwd-command", F: func(in protocol.Request, out string) (bool, error) {
+		outFields := strings.Fields(out)
+		if len(outFields) == 0 {
+			return false, nil
+		}
+		for _, e := range in.HistoryWithCwd() {
+			if e.Cwd == "" || e.Cwd == in.Cwd {
+				continue
+			}
+			histFields := strings.Fields(e.Cmd)
+			if len(histFields) == 0 || outFields[0] != histFields[0] {
+				continue
+			}
+			if len(outFields) > 1 && len(histFields) > 1 && outFields[1] != histFields[1] {
+				continue
+			}
+			return true, nil
+		}
+		return false, nil
+	}}
+}
+
+// OutputMentionsParentDirArtifact reports whether out mentions in.Cwd's
+// parent directory: its literal path, or a ".." token. Catches the leak a
+// cwd filter can produce when it drops the "cd" that actually separated
+// two interleaved same-dir runs.
+func OutputMentionsParentDirArtifact() Grader {
+	return GraderFunc{N: "output-mentions-parent-dir-artifact", F: func(in protocol.Request, out string) (bool, error) {
+		if in.Cwd == "" || out == "" {
+			return false, nil
+		}
+		parent := path.Dir(in.Cwd)
+		if parent == "." || parent == in.Cwd {
+			return false, nil
+		}
+		if strings.Contains(out, "..") {
+			return true, nil
+		}
+		return strings.Contains(out, parent), nil
 	}}
 }
 

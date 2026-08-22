@@ -508,6 +508,34 @@ context still holds. An EMPTY suggestion FAILS: a Go-appropriate command is
 clearly available from the current directory, so silence here is a miss.
 You are looking only at this question, not at syntax or formatting.`
 
+// e10Rubric: E9's judged sibling -- Contains("npm") can't see "invented
+// something unrelated to either project", which needs a judge to catch.
+const e10Rubric = `The shell history shown starts with two Go commands (go mod tidy, go
+build ./...) run in the current directory, followed by five npm commands
+from a DIFFERENT project (/x/webapp) that sit closer to the cursor. The
+current working directory is the Go project. Answer: does the suggested
+next command follow the CURRENT Go directory (e.g. a go/git/shell command
+appropriate to a Go project) rather than continuing the closer-but-stale
+npm history, and is it a real, sensible next step rather than an invented
+command unrelated to either project? Fail if the suggestion is an
+npm/yarn/node command, or is unrelated to both projects. An EMPTY
+suggestion FAILS: a Go-appropriate command is available from the earlier
+history, so silence here is a miss, not a judgement call. You are looking
+only at this question, not at syntax or formatting.`
+
+// e14Rubric probes whether the suggestion still fits /home/dir despite an
+// interleaved transcript that can make the parent dir look adjacent to
+// the cursor.
+const e14Rubric = `The current working directory is /home/dir. The shell history available
+includes commands run in /home/dir and, interleaved with them, a visit to
+its parent directory /home (a "cd .." followed later by a "cd dir" back).
+Answer: does the suggested next command make sense as something run in
+/home/dir right now, rather than something that assumes the session is
+still in the parent directory /home or confuses the two? An EMPTY
+suggestion FAILS: with recent same-directory history available, silence is
+a miss, not a safe default. You are looking only at this question, not at
+syntax or formatting.`
+
 func contextCases() []Case {
 	return []Case{
 		{
@@ -641,6 +669,136 @@ func contextCases() []Case {
 			Asserts: []Assertion{
 				{Label: "abstains", Polarity: Measure, Grader: IsEmpty()},
 			},
+		},
+		e9Case(),
+		e10Case(),
+		e11Case(),
+		e12Case(),
+		e13Case(),
+		e14Case(),
+	}
+}
+
+// e9Case restates E7's geometry with per-entry cwds: the same-dir go
+// signal exists but sits far from the cursor, behind five webapp/npm
+// commands.
+func e9Case() Case {
+	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
+	req.SetHistory(
+		protocol.HistoryIn("/x/gotool", "go mod tidy", "go build ./..."),
+		protocol.HistoryIn("/x/webapp", "npm install", "npm run build", "npm test", "npm run lint", "npm start"),
+	)
+	return Case{
+		ID:       "E9",
+		Category: "context",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "stale-history-wins", Polarity: MustNot, Threshold: 0.20, Grader: Contains("npm")},
+			{Label: "echoes-other-cwd-command", Polarity: MustNot, Threshold: 0.20, Grader: EchoesOtherCwdCommand()},
+		},
+	}
+}
+
+// e10Case: E9's judged sibling, same Request -- a substring/token check
+// can't see "the model invented something unrelated to either project",
+// which needs a judge (e10Rubric).
+func e10Case() Case {
+	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
+	req.SetHistory(
+		protocol.HistoryIn("/x/gotool", "go mod tidy", "go build ./..."),
+		protocol.HistoryIn("/x/webapp", "npm install", "npm run build", "npm test", "npm run lint", "npm start"),
+	)
+	return Case{
+		ID:       "E10",
+		Category: "context",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "follows-current-directory", Polarity: Must, Threshold: 0.60,
+				Grader: defaultJudgeGrader("E10", "follows-current-directory", e10Rubric)},
+		},
+	}
+}
+
+// e11Case: zero same-dir history anywhere in the pool -- does a cwd-aware
+// prompt's empty history block buy correctness, or just silence? IsEmpty
+// is Measure, so an abstention-driven pass reads as a number.
+func e11Case() Case {
+	req := protocol.Request{
+		Kind:       protocol.KindNextCommand,
+		Cwd:        "/x/newproj",
+		DirEntries: []string{"Cargo.toml", "src"},
+	}
+	req.SetHistory(
+		protocol.HistoryIn("/x/webapp", "npm install", "npm run build", "npm test", "npm run lint", "npm start"),
+	)
+	return Case{
+		ID:       "E11",
+		Category: "context",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "stale-history-wins", Polarity: MustNot, Threshold: 0.20, Grader: Contains("npm")},
+			{Label: "abstains", Polarity: Measure, Grader: IsEmpty()},
+		},
+	}
+}
+
+// e12Case: the counter-hypothesis case. Right after a "cd", every relevant
+// history entry is tagged with the PREVIOUS directory -- hard cwd filtering
+// should HURT here, dropping the only useful context there is.
+func e12Case() Case {
+	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/dotfiles"}
+	req.SetHistory(
+		protocol.HistoryIn("/x", "ls", "git clone https://github.com/naasanov/dotfiles.git", "cd dotfiles"),
+	)
+	return Case{
+		ID:       "E12",
+		Category: "context",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "uses-prior-dir-context", Polarity: Must, Threshold: 0.60, Grader: ContainsAny("ls", "install", "cat")},
+			{Label: "abstains", Polarity: Measure, Grader: IsEmpty()},
+		},
+	}
+}
+
+// e13Case: the actual shipping shape -- bootstrapped ("" cwd) entries
+// followed by tagged ones. The only case that exercises the "" policy
+// end to end.
+func e13Case() Case {
+	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
+	req.SetHistory(
+		protocol.HistoryUnknown("npm install", "npm run build", "npm test"),
+		protocol.HistoryIn("/x/gotool", "go mod tidy", "go build ./..."),
+	)
+	return Case{
+		ID:       "E13",
+		Category: "context",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "stale-history-wins", Polarity: MustNot, Threshold: 0.20, Grader: Contains("npm")},
+			{Label: "echoes-other-cwd-command", Polarity: MustNot, Threshold: 0.20, Grader: EchoesOtherCwdCommand()},
+		},
+	}
+}
+
+// e14Case interleaves /home/dir with a visit to its parent /home: filtering
+// to /home/dir drops the intermediate hop, so the transcript can read as
+// continuous when it wasn't. Measures the leak instead of asserting on it.
+func e14Case() Case {
+	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/home/dir"}
+	req.SetHistory(
+		protocol.HistoryIn("/home/dir", "echo 1", "cd .."),
+		protocol.HistoryIn("/home", "echo 2", "cd dir"),
+		protocol.HistoryIn("/home/dir", "echo 3"),
+	)
+	return Case{
+		ID:       "E14",
+		Category: "context",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "mentions-parent-dir-artifact", Polarity: Measure, Grader: OutputMentionsParentDirArtifact()},
+			{Label: "fits-current-directory", Polarity: Must, Threshold: 0.60,
+				Grader: defaultJudgeGrader("E14", "fits-current-directory", e14Rubric)},
 		},
 	}
 }

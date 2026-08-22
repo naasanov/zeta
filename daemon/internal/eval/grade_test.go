@@ -340,6 +340,52 @@ func TestNot(t *testing.T) {
 	})
 }
 
+func TestEchoesOtherCwdCommand(t *testing.T) {
+	g := EchoesOtherCwdCommand()
+	in := protocol.Request{Cwd: "/x/gotool"}
+	in.SetHistory(
+		protocol.HistoryIn("/x/gotool", "go mod tidy", "go build ./..."),
+		protocol.HistoryIn("/x/webapp", "npm install", "npm run build", "npm test"),
+	)
+	runGrader(t, g, []gcase{
+		{"first and second token both echo an other-cwd entry", in, "npm run build", true},
+		{"first token echoes, no second token on the entry side", in, "npm", true},
+		{"first token matches but second token diverges from every entry", in, "npm audit fix", false},
+		{"matches the same-cwd entry, not other-cwd", in, "go build ./...", false},
+		{"no match at all", in, "git status", false},
+		{"empty out never fires", in, "", false},
+	})
+
+	noKnownOtherCwd := protocol.Request{Cwd: "/x/gotool"}
+	noKnownOtherCwd.SetHistory(protocol.HistoryUnknown("npm install", "npm run build"))
+	runGrader(t, g, []gcase{
+		{"inert with only unknown-cwd entries", noKnownOtherCwd, "npm run build", false},
+	})
+
+	sameCwdOnly := protocol.Request{Cwd: "/x/gotool"}
+	sameCwdOnly.SetHistory(protocol.HistoryIn("/x/gotool", "go mod tidy"))
+	runGrader(t, g, []gcase{
+		{"inert when every known cwd matches in.Cwd", sameCwdOnly, "go mod tidy", false},
+	})
+
+	runGrader(t, g, []gcase{
+		{"inert on legacy case with no HistoryCwds at all", protocol.Request{Cwd: "/x/gotool", History: []string{"npm run build"}}, "npm run build", false},
+	})
+}
+
+func TestOutputMentionsParentDirArtifact(t *testing.T) {
+	g := OutputMentionsParentDirArtifact()
+	in := protocol.Request{Cwd: "/home/dir"}
+	runGrader(t, g, []gcase{
+		{"mentions dotdot navigation", in, "cd ..", true},
+		{"mentions the literal parent path", in, "ls /home", true},
+		{"no parent-dir artifact", in, "echo 3", false},
+		{"empty out", in, "", false},
+		{"empty cwd never fires", protocol.Request{}, "cd ..", false},
+		{"root cwd has no parent to leak", protocol.Request{Cwd: "/"}, "cd ..", false},
+	})
+}
+
 func TestFullCommand(t *testing.T) {
 	got := fullCommand(protocol.Request{Buf: "git add"}, " .")
 	if got != "git add ." {

@@ -16,7 +16,7 @@ var wantIDs = []string{
 	"B1", "B2", "B3", "B3b", "B4", "B5", "B6", "B6b", "B7", "B7b", "B8", "B8b",
 	"C1", "C2", "C3",
 	"D1", "D2", "D3", "D4",
-	"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8",
+	"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "E10", "E11", "E12", "E13", "E14",
 	"F1", "F2",
 }
 
@@ -38,16 +38,19 @@ func TestCases_ExactIDSet(t *testing.T) {
 }
 
 func TestCases_JudgedIDsUseJudgeGrader(t *testing.T) {
-	// C3, E3, E7, F2 are Part 3's judged cases: each of their assertions
-	// must be graded by a judge.go grader (name prefix "judge:"), never a
-	// deterministic one — otherwise the case looks judged in the plan doc's
-	// tables but silently isn't.
-	judged := map[string]bool{"C3": true, "E3": true, "E7": true, "F2": true}
+	// Every Must/MustNot/TripWire assertion of a judged case must use a
+	// judge.go grader (name prefix "judge:"), never deterministic -- else
+	// it looks judged in the plan tables but isn't. Measure is exempt: E14
+	// pairs a judged Must with a tracked-only Measure assertion by design.
+	judged := map[string]bool{"C3": true, "E3": true, "E7": true, "E10": true, "E14": true, "F2": true}
 	for _, c := range Cases() {
 		if !judged[c.ID] {
 			continue
 		}
 		for _, a := range c.Asserts {
+			if a.Polarity == Measure {
+				continue
+			}
 			if !strings.HasPrefix(a.Grader.Name(), "judge:") {
 				t.Errorf("case %s assertion %q uses grader %q, want a judge.go grader (name prefix \"judge:\")",
 					c.ID, a.Label, a.Grader.Name())
