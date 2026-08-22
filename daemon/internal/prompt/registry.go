@@ -11,6 +11,23 @@ import (
 
 var funcs = template.FuncMap{"join": strings.Join}
 
+// defaultHistoryN is the tail size the shipped prompts render. req.History
+// arrives as a candidate pool (up to ~100 entries); each prompt truncates
+// its own selection from the pool rather than trusting its size.
+const defaultHistoryN = 30
+
+// tailHistory returns req with History/HistoryCwds cut to the last n
+// entries, preserving Cmd/Cwd alignment. A pool of n or fewer entries is
+// returned unchanged, which is what keeps today's callers byte-identical.
+func tailHistory(req protocol.Request, n int) protocol.Request {
+	entries := req.HistoryWithCwd()
+	if len(entries) > n {
+		entries = entries[len(entries)-n:]
+	}
+	req.SetHistoryEntries(entries)
+	return req
+}
+
 // mustRender executes t into a string. Execute only fails on a template bug
 // (bad field name, wrong type), never on input data, so a failure here is
 // something to panic on, not propagate.
@@ -46,10 +63,14 @@ func mustParse(name, text string) *template.Template {
 var all = []Prompt{
 	chatAppend,
 	fimTranscriptMarker,
+	fimTranscriptMarker10,
+	fimTranscriptMarker20,
 	fimCommentedHistory,
 	fimExitCodeAlways,
 	fimNoMarker,
 	fimGuardComment,
+	cwdFiltered,
+	cwdGrouped,
 }
 
 // All returns every registered prompt, in stable order.
@@ -160,8 +181,11 @@ var chatUserTmpl = mustParse("chat-append/user",
 
 // RenderChat renders the system/user turn pair. The user turn is Context +
 // Instruction + Prefix (the buffer), with Prefix last so the completion
-// continues directly from the buffer.
+// continues directly from the buffer. req.History is truncated to the
+// rendered tail before Context is built (A.6b): the pool the daemon hands
+// in may hold far more than what actually gets sent.
 func (chatAppendPrompt) RenderChat(req protocol.Request) ChatPayload {
+	req = tailHistory(req, defaultHistoryN)
 	view := struct {
 		protocol.Request
 		Context       string
@@ -176,13 +200,26 @@ func (chatAppendPrompt) RenderChat(req protocol.Request) ChatPayload {
 
 // ======================== fim-transcript-marker ===========================
 
-// fimTranscriptMarkerPrompt is "fim-transcript-marker", the shipped FIM
-// default.
-type fimTranscriptMarkerPrompt struct{}
+// fimTranscriptMarkerPrompt is "fim-transcript-marker" at n=30 (the shipped
+// FIM default); n=10/n=20 register the history-count axis (A.6c) under the
+// same template. One template, three tail sizes: a shared shape, not a
+// shared shape helper.
+type fimTranscriptMarkerPrompt struct{ n int }
 
-var fimTranscriptMarker = fimTranscriptMarkerPrompt{}
+var (
+	fimTranscriptMarker   = fimTranscriptMarkerPrompt{n: defaultHistoryN}
+	fimTranscriptMarker10 = fimTranscriptMarkerPrompt{n: 10}
+	fimTranscriptMarker20 = fimTranscriptMarkerPrompt{n: 20}
+)
 
-func (fimTranscriptMarkerPrompt) Name() string { return "fim-transcript-marker" }
+// Name returns "fim-transcript-marker" unchanged at n=30 so every historical
+// eval report stays comparable; other n values get a "-N" suffix.
+func (p fimTranscriptMarkerPrompt) Name() string {
+	if p.n == defaultHistoryN {
+		return "fim-transcript-marker"
+	}
+	return fmt.Sprintf("fim-transcript-marker-%d", p.n)
+}
 
 var fimTranscriptMarkerTmpl = mustParse("fim-transcript-marker", `
 {{- if .Cwd}}# cwd: {{.Cwd}}
@@ -200,7 +237,8 @@ var fimTranscriptMarkerTmpl = mustParse("fim-transcript-marker", `
 // RenderFIM prefixes every command line, history and cursor alike, with a
 // "$ " transcript marker — without it the model completes the last history
 // line instead of predicting a new one.
-func (fimTranscriptMarkerPrompt) RenderFIM(req protocol.Request) FIMPayload {
+func (p fimTranscriptMarkerPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	req = tailHistory(req, p.n)
 	return FIMPayload{Prefix: mustRender(fimTranscriptMarkerTmpl, req)}
 }
 
@@ -230,6 +268,7 @@ var fimCommentedHistoryTmpl = mustParse("fim-commented-history", `
 {{- print "$ "}}{{.Buf}}`)
 
 func (fimCommentedHistoryPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	req = tailHistory(req, defaultHistoryN)
 	return FIMPayload{Prefix: mustRender(fimCommentedHistoryTmpl, req)}
 }
 
@@ -258,6 +297,7 @@ var fimExitCodeAlwaysTmpl = mustParse("fim-exit-code-always", `
 {{- print "\n$ "}}{{.Buf}}`)
 
 func (fimExitCodeAlwaysPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	req = tailHistory(req, defaultHistoryN)
 	return FIMPayload{Prefix: mustRender(fimExitCodeAlwaysTmpl, req)}
 }
 
@@ -285,6 +325,7 @@ var fimNoMarkerTmpl = mustParse("fim-no-marker", `
 {{- print ""}}{{.Buf}}`)
 
 func (fimNoMarkerPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	req = tailHistory(req, defaultHistoryN)
 	return FIMPayload{Prefix: mustRender(fimNoMarkerTmpl, req)}
 }
 
@@ -329,5 +370,211 @@ var fimGuardCommentTmpl = mustParse("fim-guard-comment", `# shell transcript - p
 {{- print "$ "}}{{.Buf}}`)
 
 func (fimGuardCommentPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	req = tailHistory(req, defaultHistoryN)
 	return FIMPayload{Prefix: mustRender(fimGuardCommentTmpl, req)}
+}
+
+// ============================= cwd-filtered ================================
+
+// cwdFilteredPrompt is "cwd-filtered": hard-filters history to entries that
+// ran in req.Cwd, then renders that filtered tail. It tests whether dropping
+// other-directory noise beats leaving it in.
+type cwdFilteredPrompt struct{}
+
+var cwdFiltered = cwdFilteredPrompt{}
+
+var _ interface {
+	ChatPrompt
+	FIMPrompt
+} = cwdFiltered
+
+func (cwdFilteredPrompt) Name() string { return "cwd-filtered" }
+
+// partition filters the pool to entries with Cwd == req.Cwd and takes the
+// tail-N most recent matches. active is false, and req is returned
+// untouched, when grouping cannot act: no req.Cwd, or no entry in the pool
+// carries a known cwd. Callers passthrough to the baseline in that case.
+func (cwdFilteredPrompt) partition(req protocol.Request) (filtered protocol.Request, active bool) {
+	if req.Cwd == "" || !req.HasHistoryCwd() {
+		return req, false
+	}
+	var matches []protocol.HistoryEntry
+	for _, e := range req.HistoryWithCwd() {
+		if e.Cwd == req.Cwd {
+			matches = append(matches, e)
+		}
+	}
+	if len(matches) > defaultHistoryN {
+		matches = matches[len(matches)-defaultHistoryN:]
+	}
+	req.SetHistoryEntries(matches)
+	return req, true
+}
+
+// RenderChat passes through to chat-append, byte-identically, when grouping
+// is not active. When active, it reuses chatSystemPrompt and chat-append's
+// context/user templates unchanged: the experiment varies which history
+// reaches the template, not the instruction contract around it.
+func (p cwdFilteredPrompt) RenderChat(req protocol.Request) ChatPayload {
+	filtered, active := p.partition(req)
+	if !active {
+		return chatAppend.RenderChat(req)
+	}
+	view := struct {
+		protocol.Request
+		Context       string
+		IsNextCommand bool
+	}{
+		Request:       filtered,
+		Context:       contextBlock(filtered),
+		IsNextCommand: filtered.Kind == protocol.KindNextCommand,
+	}
+	return ChatPayload{System: chatSystemPrompt, User: mustRender(chatUserTmpl, view)}
+}
+
+// RenderFIM passes through to fim-transcript-marker, byte-identically, when
+// grouping is not active; otherwise it renders the filtered history through
+// the same transcript-marker template.
+func (p cwdFilteredPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	filtered, active := p.partition(req)
+	if !active {
+		return fimTranscriptMarker.RenderFIM(req)
+	}
+	return FIMPayload{Prefix: mustRender(fimTranscriptMarkerTmpl, filtered)}
+}
+
+// ============================= cwd-grouped =================================
+
+// cwdGroupedPrompt is "cwd-grouped": keeps every history entry but reorders
+// them so same-directory commands sit last, immediately above the cursor.
+// Chronology inside the reorder is deliberately sacrificed; that is the
+// hypothesis under test, not an oversight.
+type cwdGroupedPrompt struct{}
+
+var cwdGrouped = cwdGroupedPrompt{}
+
+var _ interface {
+	ChatPrompt
+	FIMPrompt
+} = cwdGrouped
+
+func (cwdGroupedPrompt) Name() string { return "cwd-grouped" }
+
+// partition splits the pool into Same (Cwd == req.Cwd) and Other (everything
+// else, including unknown cwd), each capped to its own tail-N. active is
+// false when grouping cannot act, matching cwdFilteredPrompt.partition.
+func (cwdGroupedPrompt) partition(req protocol.Request) (same, other []protocol.HistoryEntry, active bool) {
+	if req.Cwd == "" || !req.HasHistoryCwd() {
+		return nil, nil, false
+	}
+	for _, e := range req.HistoryWithCwd() {
+		if e.Cwd == req.Cwd {
+			same = append(same, e)
+		} else {
+			other = append(other, e)
+		}
+	}
+	if len(same) > defaultHistoryN {
+		same = same[len(same)-defaultHistoryN:]
+	}
+	if len(other) > defaultHistoryN {
+		other = other[len(other)-defaultHistoryN:]
+	}
+	return same, other, true
+}
+
+func cmdsOf(es []protocol.HistoryEntry) []string {
+	out := make([]string, len(es))
+	for i, e := range es {
+		out[i] = e.Cmd
+	}
+	return out
+}
+
+var cwdGroupedChatContextTmpl = mustParse("cwd-grouped/context", `
+{{- if .HasContext}}Context:
+{{- if .Cwd}}
+- cwd: {{.Cwd}}{{end}}
+{{- if .DirEntries}}
+- files: {{join .DirEntries " "}}{{end}}
+{{- if .GitBranch}}
+- git: branch {{.GitBranch}}{{if .GitDirty}} (dirty){{end}}{{end}}
+{{- if .LastExit}}
+- last command failed (exit {{.LastExit}}){{end}}
+{{- if .OtherCmds}}
+- earlier commands: {{join .OtherCmds "; "}}{{end}}
+{{- if .SameCmds}}
+- commands run in {{.Cwd}}: {{join .SameCmds "; "}}{{end}}{{print "\n\n"}}{{end -}}`)
+
+// chatContext renders the labeled-group Context block: earlier commands
+// (Other), then same-directory commands (Same) last, mirroring the FIM
+// group order below.
+func (cwdGroupedPrompt) chatContext(req protocol.Request, same, other []protocol.HistoryEntry) string {
+	view := struct {
+		protocol.Request
+		OtherCmds, SameCmds []string
+		HasContext          bool
+	}{
+		Request:   req,
+		OtherCmds: cmdsOf(other),
+		SameCmds:  cmdsOf(same),
+		HasContext: req.Cwd != "" || len(req.DirEntries) > 0 || req.GitBranch != "" ||
+			req.LastExit != 0 || len(same) > 0 || len(other) > 0,
+	}
+	return mustRender(cwdGroupedChatContextTmpl, view)
+}
+
+// RenderChat passes through to chat-append, byte-identically, when grouping
+// is not active; otherwise reuses chatSystemPrompt and chat-append's user
+// template with a labeled two-group Context block.
+func (p cwdGroupedPrompt) RenderChat(req protocol.Request) ChatPayload {
+	same, other, active := p.partition(req)
+	if !active {
+		return chatAppend.RenderChat(req)
+	}
+	view := struct {
+		protocol.Request
+		Context       string
+		IsNextCommand bool
+	}{
+		Request:       req,
+		Context:       p.chatContext(req, same, other),
+		IsNextCommand: req.Kind == protocol.KindNextCommand,
+	}
+	return ChatPayload{System: chatSystemPrompt, User: mustRender(chatUserTmpl, view)}
+}
+
+var cwdGroupedFIMTmpl = mustParse("cwd-grouped/fim", `
+{{- if .Cwd}}# cwd: {{.Cwd}}
+{{end}}
+{{- if .DirEntries}}# files: {{join .DirEntries " "}}
+{{end}}
+{{- if .GitBranch}}# git: branch {{.GitBranch}}{{if .GitDirty}} (dirty){{end}}
+{{end}}
+{{- if .LastExit}}# last command failed (exit {{.LastExit}})
+{{end}}
+{{- if .Other}}# earlier commands:
+{{range .Other}}$ {{.Cmd}}
+{{end}}
+{{- end}}
+{{- if .Same}}# commands run in {{.Cwd}}:
+{{range .Same}}$ {{.Cmd}}
+{{end}}
+{{- end}}
+{{- print "$ "}}{{.Buf}}`)
+
+// RenderFIM passes through to fim-transcript-marker, byte-identically, when
+// grouping is not active. Otherwise a group header renders only when its
+// group is non-empty, so the line directly above the final "$ " is always a
+// command, never a header: contiguity by construction.
+func (p cwdGroupedPrompt) RenderFIM(req protocol.Request) FIMPayload {
+	same, other, active := p.partition(req)
+	if !active {
+		return fimTranscriptMarker.RenderFIM(req)
+	}
+	view := struct {
+		protocol.Request
+		Same, Other []protocol.HistoryEntry
+	}{Request: req, Same: same, Other: other}
+	return FIMPayload{Prefix: mustRender(cwdGroupedFIMTmpl, view)}
 }

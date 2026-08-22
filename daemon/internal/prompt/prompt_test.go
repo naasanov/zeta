@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -240,5 +241,243 @@ func TestFIMGuardCommentWithoutContext(t *testing.T) {
 	got := fimGuardComment.RenderFIM(req).Prefix
 	if !strings.HasSuffix(got, "guess\n$ ssh ") {
 		t.Errorf("rules block must end with a newline before the cursor line, got:\n%q", got)
+	}
+}
+
+// ============================================================
+// cwd-aware prompts: cwd-filtered, cwd-grouped (plan A.6b/A.6c/E)
+// ============================================================
+
+// TestCwdPromptsPassthroughWithoutCwdData is the control: whenever grouping
+// cannot act (no req.Cwd, or no pool entry carries a known cwd), both
+// cwd-filtered and cwd-grouped must render byte-identically to the
+// baseline prompt, in both chat and FIM shape.
+func TestCwdPromptsPassthroughWithoutCwdData(t *testing.T) {
+	base := protocol.Request{
+		Kind: protocol.KindTyping, Buf: "git com",
+		Cwd: "/x/project", GitBranch: "main", LastExit: 1,
+		DirEntries: []string{"README.md"},
+	}
+
+	noCwd := base
+	noCwd.Cwd = ""
+	noCwd.SetHistory(protocol.HistoryIn("/x/project", "git add .", "git status"))
+
+	allUnknown := base
+	allUnknown.SetHistory(protocol.HistoryUnknown("git add .", "git status"))
+
+	noHistory := base
+
+	cases := map[string]protocol.Request{
+		"no cwd at all":                noCwd,
+		"cwd set, history all unknown": allUnknown,
+		"cwd set, no history at all":   noHistory,
+	}
+
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			wantChat := chatAppend.RenderChat(req)
+			wantFIM := fimTranscriptMarker.RenderFIM(req)
+
+			prompts := []interface {
+				ChatPrompt
+				FIMPrompt
+			}{cwdFiltered, cwdGrouped}
+			for _, p := range prompts {
+				if got := p.RenderChat(req); got != wantChat {
+					t.Errorf("%s.RenderChat passthrough mismatch:\ngot:  %+v\nwant: %+v", p.Name(), got, wantChat)
+				}
+				if got := p.RenderFIM(req); got != wantFIM {
+					t.Errorf("%s.RenderFIM passthrough mismatch:\ngot:  %+v\nwant: %+v", p.Name(), got, wantFIM)
+				}
+			}
+		})
+	}
+}
+
+// TestBaselineTruncatesPoolIdenticallyToToday is the other control (A.6b): a
+// pool larger than the rendered tail must render exactly what a pool that
+// already IS that tail renders, for every prompt that truncates to
+// defaultHistoryN.
+func TestBaselineTruncatesPoolIdenticallyToToday(t *testing.T) {
+	all100 := make([]string, 100)
+	for i := range all100 {
+		all100[i] = fmt.Sprintf("cmd-%02d", i)
+	}
+	tail30 := append([]string(nil), all100[len(all100)-defaultHistoryN:]...)
+
+	pool := protocol.Request{Kind: protocol.KindTyping, Buf: "git com", Cwd: "/x/project", History: all100}
+	short := protocol.Request{Kind: protocol.KindTyping, Buf: "git com", Cwd: "/x/project", History: tail30}
+
+	if got, want := chatAppend.RenderChat(pool), chatAppend.RenderChat(short); got != want {
+		t.Errorf("chat-append pool truncation mismatch:\ngot:  %+v\nwant: %+v", got, want)
+	}
+
+	fimPrompts := []FIMPrompt{fimTranscriptMarker, fimCommentedHistory, fimExitCodeAlways, fimNoMarker, fimGuardComment}
+	for _, p := range fimPrompts {
+		if got, want := p.RenderFIM(pool), p.RenderFIM(short); got != want {
+			t.Errorf("%s pool truncation mismatch:\ngot:  %+v\nwant: %+v", p.Name(), got, want)
+		}
+	}
+}
+
+// TestCwdFilteredDropsOtherDirs checks that entries from a different
+// directory never reach either rendering.
+func TestCwdFilteredDropsOtherDirs(t *testing.T) {
+	req := protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj"}
+	req.SetHistory(
+		protocol.HistoryIn("/proj", "proj-cmd-1", "proj-cmd-2"),
+		protocol.HistoryIn("/other", "other-cmd-1", "other-cmd-2"),
+	)
+
+	fim := cwdFiltered.RenderFIM(req).Prefix
+	for _, want := range []string{"$ proj-cmd-1", "$ proj-cmd-2"} {
+		if !strings.Contains(fim, want) {
+			t.Errorf("expected FIM prefix to contain %q, got:\n%s", want, fim)
+		}
+	}
+	for _, notWant := range []string{"other-cmd-1", "other-cmd-2"} {
+		if strings.Contains(fim, notWant) {
+			t.Errorf("expected FIM prefix NOT to contain %q, got:\n%s", notWant, fim)
+		}
+	}
+
+	chatUser := cwdFiltered.RenderChat(req).User
+	if !strings.Contains(chatUser, "proj-cmd-1; proj-cmd-2") {
+		t.Errorf("expected chat user to contain filtered history, got:\n%s", chatUser)
+	}
+	if strings.Contains(chatUser, "other-cmd") {
+		t.Errorf("expected chat user NOT to contain other-dir commands, got:\n%s", chatUser)
+	}
+}
+
+// TestCwdFilteredReachesRecalledSameDirEntries checks that cwd-filtered
+// filters the full pool before truncating, so same-dir entries buried
+// behind a large window of unrelated commands still surface (scenario 3,
+// "cold / long absence", in the plan's coverage table).
+func TestCwdFilteredReachesRecalledSameDirEntries(t *testing.T) {
+	noise := make([]string, 40)
+	for i := range noise {
+		noise[i] = fmt.Sprintf("noise-%02d", i)
+	}
+	req := protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj"}
+	req.SetHistory(
+		protocol.HistoryIn("/proj", "old-proj-1", "old-proj-2"),
+		protocol.HistoryUnknown(noise...),
+	)
+
+	fim := cwdFiltered.RenderFIM(req).Prefix
+	for _, want := range []string{"$ old-proj-1", "$ old-proj-2"} {
+		if !strings.Contains(fim, want) {
+			t.Errorf("expected FIM prefix to contain recalled entry %q, got:\n%s", want, fim)
+		}
+	}
+	if strings.Contains(fim, "noise-") {
+		t.Errorf("expected FIM prefix NOT to contain unknown-cwd noise, got:\n%s", fim)
+	}
+}
+
+// TestCwdGroupedRecallsSameDirEntriesBehindBootstrapWindow is the A.6b edge
+// case: the pool's recent window is entirely cwd-unknown (bootstrap), with
+// tagged same-dir entries only further back. cwd-grouped must still pull
+// them forward, adjacent to the cursor, despite being oldest in the pool.
+func TestCwdGroupedRecallsSameDirEntriesBehindBootstrapWindow(t *testing.T) {
+	noise := make([]string, 40)
+	for i := range noise {
+		noise[i] = fmt.Sprintf("noise-%02d", i)
+	}
+	req := protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj"}
+	req.SetHistory(
+		protocol.HistoryIn("/proj", "old-proj-1", "old-proj-2"),
+		protocol.HistoryUnknown(noise...),
+	)
+
+	fim := cwdGrouped.RenderFIM(req).Prefix
+	if !strings.HasSuffix(fim, "$ old-proj-1\n$ old-proj-2\n$ go bui") {
+		t.Errorf("expected recalled same-dir entries adjacent to cursor despite being oldest in the pool, got:\n%s", fim)
+	}
+}
+
+// TestCwdGroupedPutsSameDirLast checks that same-dir entries render as a
+// block immediately above the cursor, after any other-dir entries, and
+// that the pool's chronological order is preserved within each group.
+func TestCwdGroupedPutsSameDirLast(t *testing.T) {
+	req := protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj"}
+	req.SetHistory(
+		protocol.HistoryIn("/proj", "proj-old"),
+		protocol.HistoryIn("/other", "other-cmd"),
+		protocol.HistoryIn("/proj", "proj-new"),
+	)
+
+	fim := cwdGrouped.RenderFIM(req).Prefix
+	if !strings.HasSuffix(fim, "$ proj-old\n$ proj-new\n$ go bui") {
+		t.Errorf("expected same-dir entries grouped last, adjacent to cursor, got:\n%s", fim)
+	}
+	otherIdx := strings.Index(fim, "other-cmd")
+	sameIdx := strings.Index(fim, "proj-old")
+	if otherIdx < 0 || sameIdx < 0 || otherIdx > sameIdx {
+		t.Errorf("expected other-dir entries to render before the same-dir group, got:\n%s", fim)
+	}
+
+	chatUser := cwdGrouped.RenderChat(req).User
+	earlierIdx := strings.Index(chatUser, "- earlier commands: other-cmd")
+	sameDirIdx := strings.Index(chatUser, "- commands run in /proj: proj-old; proj-new")
+	if earlierIdx < 0 || sameDirIdx < 0 || earlierIdx > sameDirIdx {
+		t.Errorf("expected chat context to list earlier commands before the same-dir group, got:\n%s", chatUser)
+	}
+}
+
+// TestCwdGroupedHeaderNeverAdjacentToCursor is the contiguity invariant: a
+// group header renders only when its group is non-empty, so the line
+// directly above the cursor is always a command, never a header.
+func TestCwdGroupedHeaderNeverAdjacentToCursor(t *testing.T) {
+	cases := []struct {
+		name string
+		segs []protocol.HistorySegment
+	}{
+		{"only other-dir", []protocol.HistorySegment{protocol.HistoryIn("/other", "o1", "o2")}},
+		{"only same-dir", []protocol.HistorySegment{protocol.HistoryIn("/proj", "s1", "s2")}},
+		{"both", []protocol.HistorySegment{protocol.HistoryIn("/other", "o1"), protocol.HistoryIn("/proj", "s1")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj"}
+			req.SetHistory(tc.segs...)
+
+			fim := cwdGrouped.RenderFIM(req).Prefix
+			lines := strings.Split(fim, "\n")
+			cursorLine := lines[len(lines)-1]
+			if !strings.HasPrefix(cursorLine, "$ go bui") {
+				t.Fatalf("expected last line to be the cursor line, got %q in:\n%s", cursorLine, fim)
+			}
+			prev := lines[len(lines)-2]
+			if !strings.HasPrefix(prev, "$ ") {
+				t.Errorf("expected line above cursor to be a command, not a header, got %q in:\n%s", prev, fim)
+			}
+		})
+	}
+}
+
+// TestCwdPromptsToleratesMisalignedCwds checks that HistoryCwds shorter,
+// longer, or absent relative to History never panics either cwd-aware
+// prompt, mirroring protocol.HistoryWithCwd's own tolerance.
+func TestCwdPromptsToleratesMisalignedCwds(t *testing.T) {
+	mk := func(history, cwds []string) protocol.Request {
+		return protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj", History: history, HistoryCwds: cwds}
+	}
+
+	cases := []protocol.Request{
+		mk([]string{"c0", "c1", "c2", "c3", "c4"}, []string{"/proj", "/proj"}),
+		mk([]string{"c0", "c1", "c2", "c3", "c4"}, []string{"/proj", "/other", "/proj", "/other", "/x", "/y"}),
+		mk([]string{"c0", "c1"}, nil),
+	}
+
+	for i, req := range cases {
+		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
+			cwdFiltered.RenderFIM(req)
+			cwdFiltered.RenderChat(req)
+			cwdGrouped.RenderFIM(req)
+			cwdGrouped.RenderChat(req)
+		})
 	}
 }
