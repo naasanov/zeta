@@ -17,10 +17,12 @@ type modelPrice struct {
 
 // priceTable maps "provider/model" -> pricing. Unknown keys cost 0 rather
 // than erroring — this is a dev-only advisory number, not billing. Prices
-// last verified 2026-07-15; re-check against each provider's pricing page
+// last verified 2026-08-22; re-check against each provider's pricing page
 // before citing these numbers if the table is more than a few months old.
 // Only Groq's GPT-OSS family and Anthropic/Codestral support cached-token
 // discounts; llama-3.3-70b-versatile legitimately always reports 0 cached.
+// llama-3.3-70b-versatile is retired (Groq shut it down 2026-08-16) but stays
+// priced so old events.jsonl rows can still be re-derived.
 var priceTable = map[string]modelPrice{
 	"openai/llama-3.3-70b-versatile": {
 		InPerM:     0.59,
@@ -31,6 +33,14 @@ var priceTable = map[string]modelPrice{
 		InPerM:     0.15,
 		OutPerM:    0.60,
 		CachedPerM: 0.15 * 0.5,
+	},
+	// qwen3.6-27b: current groq preset default. Cached-token discount support
+	// is unconfirmed on Groq for this model, so CachedPerM is left at InPerM
+	// (no assumed discount) rather than guessed.
+	"openai/qwen/qwen3.6-27b": {
+		InPerM:     0.60,
+		OutPerM:    3.00,
+		CachedPerM: 0.60,
 	},
 	"anthropic/claude-haiku-4-5": {
 		InPerM:     1.00,

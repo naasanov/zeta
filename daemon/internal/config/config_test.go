@@ -177,8 +177,8 @@ func TestConfigResolve(t *testing.T) {
 		if r.BaseURL != "https://api.groq.com/openai/v1" {
 			t.Errorf("BaseURL = %v, want groq base url", r.BaseURL)
 		}
-		if r.Model != "llama-3.3-70b-versatile" {
-			t.Errorf("Model = %v, want llama-3.3-70b-versatile", r.Model)
+		if r.Model != "qwen/qwen3.6-27b" {
+			t.Errorf("Model = %v, want qwen/qwen3.6-27b", r.Model)
 		}
 		if r.APIKeyEnv != "ZSH_AUTOPILOT_GROQ_KEY" {
 			t.Errorf("APIKeyEnv = %v, want ZSH_AUTOPILOT_GROQ_KEY", r.APIKeyEnv)

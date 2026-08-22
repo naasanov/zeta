@@ -17,6 +17,11 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
 
+// qwenReasoningModel is the one Groq model this adapter special-cases (see
+// Complete): the shipped groq preset, whose reasoning can actually be
+// disabled via reasoning_effort:"none".
+const qwenReasoningModel = "qwen/qwen3.6-27b"
+
 // openAIClient talks to a single OpenAI-compatible /chat/completions
 // endpoint via the openai-go SDK client, holding a shared *http.Client
 // (design §4 warm connections) — construct via NewOpenAI at startup and
@@ -103,7 +108,15 @@ func (c *openAIClient) Complete(ctx context.Context, req Request) (Completion, e
 	// to the first chunk carrying non-empty delta content (accumulator.Push).
 	acc := newAccumulator(time.Now())
 
-	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
+	opts := []option.RequestOption{}
+	if c.model == qwenReasoningModel {
+		// Without this, qwen3.6-27b spends its whole token budget on a
+		// hidden <think> block before any visible output (unlike gpt-oss,
+		// which has no way to fully disable reasoning at all).
+		opts = append(opts, option.WithJSONSet("reasoning_effort", "none"))
+	}
+
+	stream := c.client.Chat.Completions.NewStreaming(ctx, params, opts...)
 	// Closing the stream (a) releases the underlying response body/connection
 	// on every return path below, including the early "first newline seen"
 	// cutoff, and (b) is what actually aborts the in-progress read on a

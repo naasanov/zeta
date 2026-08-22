@@ -3,12 +3,12 @@ package metrics
 import "testing"
 
 // TestCostUSD_KnownModel checks a known token count against a hand-computed
-// expected cost for the default model, pinning the current priceTable
-// numbers (llama-3.3-70b-versatile: $0.59/M in, $0.79/M out).
+// expected cost for the default groq model, pinning the current priceTable
+// numbers (qwen/qwen3.6-27b: $0.60/M in, $3.00/M out).
 func TestCostUSD_KnownModel(t *testing.T) {
 	// 1,000,000 input tokens, 500,000 output tokens, no cached tokens.
-	got := CostUSD("openai", "llama-3.3-70b-versatile", 1_000_000, 500_000, 0)
-	want := 1.0*0.59 + 0.5*0.79 // $0.59 + $0.395 = $0.985
+	got := CostUSD("openai", "qwen/qwen3.6-27b", 1_000_000, 500_000, 0)
+	want := 1.0*0.60 + 0.5*3.00 // $0.60 + $1.50 = $2.10
 	if !floatsClose(got, want) {
 		t.Errorf("CostUSD() = %v, want %v", got, want)
 	}

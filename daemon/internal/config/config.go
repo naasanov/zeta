@@ -58,10 +58,15 @@ var presets = map[string]Preset{
 		Model:   "claude-haiku-4-5",
 		KeyEnv:  "ZSH_AUTOPILOT_ANTHROPIC_KEY",
 	},
+	// Every other Groq chat model left is a reasoning model that can't be
+	// silenced: openai/gpt-oss-* only accepts reasoning_effort low/medium/high
+	// (no "none"), and low alone burns ~50 of our 48 max_tokens on hidden
+	// chain-of-thought before any visible output. qwen3.6-27b is the one
+	// exception — reasoning_effort:"none" (set in openai.go) fully disables it.
 	"groq": {
 		Adapter: "openai",
 		BaseURL: "https://api.groq.com/openai/v1",
-		Model:   "llama-3.3-70b-versatile",
+		Model:   "qwen/qwen3.6-27b",
 		KeyEnv:  "ZSH_AUTOPILOT_GROQ_KEY",
 	},
 	"ollama": {
