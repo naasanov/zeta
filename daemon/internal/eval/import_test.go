@@ -314,6 +314,58 @@ func TestImportEvents_SecretSkip_CanBeDisabled(t *testing.T) {
 	}
 }
 
+// ---- historySegments ------------------------------------------------------
+
+func TestHistorySegments_MixedSequence(t *testing.T) {
+	// unknown, then dir A, then dir B, then unknown again -- must produce
+	// four segments in order, not collapse or reorder them.
+	req := protocol.Request{
+		History:     []string{"ls", "go build", "go test", "npm start", "echo done"},
+		HistoryCwds: []string{"", "/x/gotool", "/x/gotool", "/x/webapp", ""},
+	}
+	segs := historySegments(req)
+	want := []protocol.HistorySegment{
+		{Cwd: "", Cmds: []string{"ls"}},
+		{Cwd: "/x/gotool", Cmds: []string{"go build", "go test"}},
+		{Cwd: "/x/webapp", Cmds: []string{"npm start"}},
+		{Cwd: "", Cmds: []string{"echo done"}},
+	}
+	if !reflect.DeepEqual(segs, want) {
+		t.Fatalf("segments mismatch:\n got %+v\nwant %+v", segs, want)
+	}
+}
+
+func TestHistorySegments_HistoryCwdsAbsent(t *testing.T) {
+	req := protocol.Request{History: []string{"git add .", "git status"}}
+	segs := historySegments(req)
+	want := []protocol.HistorySegment{{Cwd: "", Cmds: []string{"git add .", "git status"}}}
+	if !reflect.DeepEqual(segs, want) {
+		t.Fatalf("segments mismatch:\n got %+v\nwant %+v", segs, want)
+	}
+}
+
+func TestHistorySegments_HistoryCwdsShorterThanHistory(t *testing.T) {
+	// HistoryWithCwd treats any unpaired tail position as unknown ("").
+	req := protocol.Request{
+		History:     []string{"go build", "go test", "npm start"},
+		HistoryCwds: []string{"/x/gotool"},
+	}
+	segs := historySegments(req)
+	want := []protocol.HistorySegment{
+		{Cwd: "/x/gotool", Cmds: []string{"go build"}},
+		{Cwd: "", Cmds: []string{"go test", "npm start"}},
+	}
+	if !reflect.DeepEqual(segs, want) {
+		t.Fatalf("segments mismatch:\n got %+v\nwant %+v", segs, want)
+	}
+}
+
+func TestHistorySegments_AllEmpty(t *testing.T) {
+	if segs := historySegments(protocol.Request{}); len(segs) != 0 {
+		t.Fatalf("want no segments for empty history, got %+v", segs)
+	}
+}
+
 // ---- RenderCaseStub -----------------------------------------------------
 
 // wrapAsFile wraps a rendered stub fragment in a minimal but complete Go
@@ -361,14 +413,18 @@ func TestRenderCaseStub_ProducesValidGo(t *testing.T) {
 	out := b.String()
 	for _, want := range []string{
 		`ID:       "IMPORT-1"`,
+		`func() protocol.Request {`,
+		`r := protocol.Request{`,
 		`Kind: protocol.KindTyping`,
 		`Buf: "git sta"`,
 		`Cwd: "/x/proj"`,
 		`GitBranch: "main"`,
 		`GitDirty: true`,
 		`LastExit: 1`,
-		`"git add ."`,
-		`"git status"`,
+		`r.SetHistory(`,
+		`protocol.HistoryUnknown("git add .", "git status")`,
+		`return r`,
+		`}(),`,
 		`"README.md"`,
 		`"main.go"`,
 		`s1.42`,
@@ -377,6 +433,54 @@ func TestRenderCaseStub_ProducesValidGo(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("rendered stub missing %q in:\n%s", want, out)
 		}
+	}
+	// History is rendered via SetHistory, not as a raw array literal.
+	if strings.Contains(out, "History: []string{") {
+		t.Fatalf("rendered stub still uses raw History array literal:\n%s", out)
+	}
+}
+
+func TestRenderCaseStub_HistoryWithCwds_EmitsHistoryInSegments(t *testing.T) {
+	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
+	req.SetHistory(
+		protocol.HistoryUnknown("npm install"),
+		protocol.HistoryIn("/x/gotool", "go mod tidy", "go build ./..."),
+		protocol.HistoryIn("/x/webapp", "npm test"),
+		protocol.HistoryUnknown("echo done"),
+	)
+	ic := ImportedCase{
+		Case:       Case{Req: req},
+		Suggestion: "git status",
+		Provider:   "codestral",
+		Model:      "codestral-latest",
+		RequestID:  "s1.9",
+	}
+
+	var b strings.Builder
+	if err := RenderCaseStub(&b, ic, "IMPORT-4"); err != nil {
+		t.Fatalf("RenderCaseStub: %v", err)
+	}
+
+	src := wrapAsFile(b.String())
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "stub.go", src, parser.AllErrors); err != nil {
+		t.Fatalf("rendered stub is not valid Go: %v\n---\n%s", err, src)
+	}
+	if err := verifyFormats(src); err != nil {
+		t.Fatalf("rendered stub does not gofmt cleanly: %v\n---\n%s", err, src)
+	}
+
+	out := b.String()
+	// Segments must appear in order, each grouped by contiguous cwd.
+	idxUnknown1 := strings.Index(out, `protocol.HistoryUnknown("npm install")`)
+	idxGotool := strings.Index(out, `protocol.HistoryIn("/x/gotool", "go mod tidy", "go build ./...")`)
+	idxWebapp := strings.Index(out, `protocol.HistoryIn("/x/webapp", "npm test")`)
+	idxUnknown2 := strings.Index(out, `protocol.HistoryUnknown("echo done")`)
+	if idxUnknown1 < 0 || idxGotool < 0 || idxWebapp < 0 || idxUnknown2 < 0 {
+		t.Fatalf("rendered stub missing expected segment calls:\n%s", out)
+	}
+	if !(idxUnknown1 < idxGotool && idxGotool < idxWebapp && idxWebapp < idxUnknown2) {
+		t.Fatalf("rendered segments out of order:\n%s", out)
 	}
 }
 

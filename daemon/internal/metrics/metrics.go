@@ -207,18 +207,19 @@ type RequestEvent struct {
 
 	// METRICS(§12): opt-in raw-text capture (see EnvRawText/Config.RawText),
 	// populated only when enabled; otherwise zero/absent (all omitempty).
-	// Buf+Cwd+GitBranch+GitDirty+LastExit+History+DirEntries reconstruct the
-	// originating protocol.Request verbatim. Suggestion is the FULL
+	// Buf+Cwd+GitBranch+GitDirty+LastExit+History+HistoryCwds+DirEntries reconstruct
+	// the originating protocol.Request verbatim. Suggestion is the FULL
 	// reply.Suggestion text and already starts with req.Buf — don't
 	// double-prepend Buf when replaying it as a case.
-	Buf        string   `json:"buf,omitempty"`
-	Suggestion string   `json:"suggestion,omitempty"`
-	Cwd        string   `json:"cwd,omitempty"`
-	GitBranch  string   `json:"git_branch,omitempty"`
-	GitDirty   bool     `json:"git_dirty,omitempty"`
-	LastExit   int      `json:"last_exit,omitempty"`
-	History    []string `json:"history,omitempty"`
-	DirEntries []string `json:"dir_entries,omitempty"`
+	Buf         string   `json:"buf,omitempty"`
+	Suggestion  string   `json:"suggestion,omitempty"`
+	Cwd         string   `json:"cwd,omitempty"`
+	GitBranch   string   `json:"git_branch,omitempty"`
+	GitDirty    bool     `json:"git_dirty,omitempty"`
+	LastExit    int      `json:"last_exit,omitempty"`
+	History     []string `json:"history,omitempty"`
+	HistoryCwds []string `json:"history_cwds,omitempty"` // index-aligned with History; "" = unknown dir
+	DirEntries  []string `json:"dir_entries,omitempty"`
 }
 
 // SessionID derives the session portion of a request id: everything before

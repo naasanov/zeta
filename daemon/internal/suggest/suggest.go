@@ -73,6 +73,7 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 					ev.GitDirty = req.GitDirty
 					ev.LastExit = req.LastExit
 					ev.History = req.History
+					ev.HistoryCwds = req.HistoryCwds
 					ev.DirEntries = req.DirEntries
 				}
 				emit(ev)
@@ -124,6 +125,7 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 				ev.GitDirty = req.GitDirty
 				ev.LastExit = req.LastExit
 				ev.History = req.History
+				ev.HistoryCwds = req.HistoryCwds
 				ev.DirEntries = req.DirEntries
 			}
 			emit(ev)

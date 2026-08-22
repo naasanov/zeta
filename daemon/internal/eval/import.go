@@ -39,14 +39,15 @@ type rawRequestEvent struct {
 	// Raw-text fields, present only when raw-text capture is on (all
 	// omitempty on the writer side, so a row missing all of them was
 	// captured without raw text and carries nothing to import).
-	Buf        string   `json:"buf,omitempty"`
-	Suggestion string   `json:"suggestion,omitempty"`
-	Cwd        string   `json:"cwd,omitempty"`
-	GitBranch  string   `json:"git_branch,omitempty"`
-	GitDirty   bool     `json:"git_dirty,omitempty"`
-	LastExit   int      `json:"last_exit,omitempty"`
-	History    []string `json:"history,omitempty"`
-	DirEntries []string `json:"dir_entries,omitempty"`
+	Buf         string   `json:"buf,omitempty"`
+	Suggestion  string   `json:"suggestion,omitempty"`
+	Cwd         string   `json:"cwd,omitempty"`
+	GitBranch   string   `json:"git_branch,omitempty"`
+	GitDirty    bool     `json:"git_dirty,omitempty"`
+	LastExit    int      `json:"last_exit,omitempty"`
+	History     []string `json:"history,omitempty"`
+	HistoryCwds []string `json:"history_cwds,omitempty"` // index-aligned with History; "" = unknown dir
+	DirEntries  []string `json:"dir_entries,omitempty"`
 }
 
 // ImportedCase is one harvested request plus what the model actually said.
@@ -172,7 +173,7 @@ func ImportEvents(r io.Reader, opts ImportOptions) ([]ImportedCase, ImportStats,
 
 		hasRawText := ev.Buf != "" || ev.Suggestion != "" || ev.Cwd != "" ||
 			ev.GitBranch != "" || ev.GitDirty || ev.LastExit != 0 ||
-			len(ev.History) > 0 || len(ev.DirEntries) > 0
+			len(ev.History) > 0 || len(ev.HistoryCwds) > 0 || len(ev.DirEntries) > 0
 		if !hasRawText {
 			stats.SkippedNoRawText++
 			continue
@@ -197,14 +198,15 @@ func ImportEvents(r io.Reader, opts ImportOptions) ([]ImportedCase, ImportStats,
 		}
 
 		req := protocol.Request{
-			Kind:       ev.Trigger,
-			Buf:        ev.Buf,
-			Cwd:        ev.Cwd,
-			GitBranch:  ev.GitBranch,
-			GitDirty:   ev.GitDirty,
-			LastExit:   ev.LastExit,
-			History:    ev.History,
-			DirEntries: ev.DirEntries,
+			Kind:        ev.Trigger,
+			Buf:         ev.Buf,
+			Cwd:         ev.Cwd,
+			GitBranch:   ev.GitBranch,
+			GitDirty:    ev.GitDirty,
+			LastExit:    ev.LastExit,
+			History:     ev.History,
+			HistoryCwds: ev.HistoryCwds,
+			DirEntries:  ev.DirEntries,
 		}
 
 		key := dedupKey(req, suffix)
@@ -249,10 +251,77 @@ func dedupKey(req protocol.Request, suggestion string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// historySegments groups req's aligned History/HistoryCwds entries (via
+// HistoryWithCwd, which already tolerates absent/short HistoryCwds) into
+// runs sharing one cwd, in order -- the shape SetHistory's segments expect.
+func historySegments(req protocol.Request) []protocol.HistorySegment {
+	var segs []protocol.HistorySegment
+	for _, e := range req.HistoryWithCwd() {
+		if n := len(segs); n > 0 && segs[n-1].Cwd == e.Cwd {
+			segs[n-1].Cmds = append(segs[n-1].Cmds, e.Cmd)
+			continue
+		}
+		segs = append(segs, protocol.HistorySegment{Cwd: e.Cwd, Cmds: []string{e.Cmd}})
+	}
+	return segs
+}
+
+// writeReqFields renders req's scalar and DirEntries fields at indent.
+// History/HistoryCwds are excluded here -- see writeHistorySegments, which
+// renders them as protocol.HistoryIn/HistoryUnknown calls instead.
+func writeReqFields(b *strings.Builder, req protocol.Request, indent string) {
+	if req.Kind != "" {
+		fmt.Fprintf(b, "%sKind: %s,\n", indent, kindConstant(req.Kind))
+	}
+	if req.Buf != "" {
+		fmt.Fprintf(b, "%sBuf: %q,\n", indent, req.Buf)
+	}
+	if req.Cwd != "" {
+		fmt.Fprintf(b, "%sCwd: %q,\n", indent, req.Cwd)
+	}
+	if req.GitBranch != "" {
+		fmt.Fprintf(b, "%sGitBranch: %q,\n", indent, req.GitBranch)
+	}
+	if req.GitDirty {
+		fmt.Fprintf(b, "%sGitDirty: true,\n", indent)
+	}
+	if req.LastExit != 0 {
+		fmt.Fprintf(b, "%sLastExit: %d,\n", indent, req.LastExit)
+	}
+	if len(req.DirEntries) > 0 {
+		fmt.Fprintf(b, "%sDirEntries: []string{\n", indent)
+		for _, d := range req.DirEntries {
+			fmt.Fprintf(b, "%s\t%q,\n", indent, d)
+		}
+		fmt.Fprintf(b, "%s},\n", indent)
+	}
+}
+
+// writeHistorySegments renders segs as chained protocol.HistoryIn/
+// HistoryUnknown calls feeding r.SetHistory(...), matching the hand-written
+// E9-E14 shape in cases.go rather than raw parallel array literals.
+func writeHistorySegments(b *strings.Builder, segs []protocol.HistorySegment, indent string) {
+	fmt.Fprintf(b, "%sr.SetHistory(\n", indent)
+	for _, seg := range segs {
+		fn := "protocol.HistoryIn"
+		var args []string
+		if seg.Cwd == "" {
+			fn = "protocol.HistoryUnknown"
+		} else {
+			args = append(args, fmt.Sprintf("%q", seg.Cwd))
+		}
+		for _, c := range seg.Cmds {
+			args = append(args, fmt.Sprintf("%q", c))
+		}
+		fmt.Fprintf(b, "%s\t%s(%s),\n", indent, fn, strings.Join(args, ", "))
+	}
+	fmt.Fprintf(b, "%s)\n", indent)
+}
+
 // RenderCaseStub emits one Go composite-literal Case entry (not a full
-// source file) meant to be pasted into a []Case{...} slice in cases.go,
-// with the reconstructed Req, the observed suggestion in a comment, and a
-// TODO for the assertions.
+// source file) meant to be pasted into a []Case{...} slice in cases.go:
+// Req (an IIFE when history is present, since SetHistory is a method),
+// the observed suggestion in a comment, and a TODO for the assertions.
 func RenderCaseStub(w io.Writer, ic ImportedCase, id string) error {
 	var b strings.Builder
 
@@ -262,43 +331,22 @@ func RenderCaseStub(w io.Writer, ic ImportedCase, id string) error {
 	b.WriteString("// SkipLikelySecrets is a heuristic filter, not redaction.\n")
 	fmt.Fprintf(&b, "{\n\tID:       %q,\n", id)
 	b.WriteString("\tCategory: \"TODO\",\n")
-	b.WriteString("\tReq: protocol.Request{\n")
 
 	req := ic.Case.Req
-	if req.Kind != "" {
-		fmt.Fprintf(&b, "\t\tKind: %s,\n", kindConstant(req.Kind))
-	}
-	if req.Buf != "" {
-		fmt.Fprintf(&b, "\t\tBuf: %q,\n", req.Buf)
-	}
-	if req.Cwd != "" {
-		fmt.Fprintf(&b, "\t\tCwd: %q,\n", req.Cwd)
-	}
-	if req.GitBranch != "" {
-		fmt.Fprintf(&b, "\t\tGitBranch: %q,\n", req.GitBranch)
-	}
-	if req.GitDirty {
-		b.WriteString("\t\tGitDirty: true,\n")
-	}
-	if req.LastExit != 0 {
-		fmt.Fprintf(&b, "\t\tLastExit: %d,\n", req.LastExit)
-	}
-	if len(req.History) > 0 {
-		b.WriteString("\t\tHistory: []string{\n")
-		for _, h := range req.History {
-			fmt.Fprintf(&b, "\t\t\t%q,\n", h)
-		}
-		b.WriteString("\t\t},\n")
-	}
-	if len(req.DirEntries) > 0 {
-		b.WriteString("\t\tDirEntries: []string{\n")
-		for _, d := range req.DirEntries {
-			fmt.Fprintf(&b, "\t\t\t%q,\n", d)
-		}
-		b.WriteString("\t\t},\n")
+	if segs := historySegments(req); len(segs) > 0 {
+		b.WriteString("\tReq: func() protocol.Request {\n")
+		b.WriteString("\t\tr := protocol.Request{\n")
+		writeReqFields(&b, req, "\t\t\t")
+		b.WriteString("\t\t}\n")
+		writeHistorySegments(&b, segs, "\t\t")
+		b.WriteString("\t\treturn r\n")
+		b.WriteString("\t}(),\n")
+	} else {
+		b.WriteString("\tReq: protocol.Request{\n")
+		writeReqFields(&b, req, "\t\t")
+		b.WriteString("\t},\n")
 	}
 
-	b.WriteString("\t},\n")
 	b.WriteString("\tAsserts: []Assertion{\n")
 	b.WriteString("\t\t// TODO: pick graders based on the observed suggestion above.\n")
 	b.WriteString("\t\t// Candidates: fabrication graders (ContainsTokenNotInContext,\n")
