@@ -47,6 +47,7 @@ changelog:
       - "^chore:"
 
 release:
+  name_template: "Release {{ .Tag }}"
   github:
     owner: naasanov
     name: zeta
