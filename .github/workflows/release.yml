@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (ignored if version is set)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "Explicit version override, e.g. v1.2.3 (optional)"
+        type: string
 
 permissions:
   contents: write
@@ -15,6 +25,36 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # workflow_dispatch has no tag yet: compute the next vX.Y.Z (or take the
+      # override) and push it. GITHUB_TOKEN pushes don't retrigger the
+      # tag-push job, so tag and release happen in this one run.
+      - name: Compute and push next tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch --tags
+          latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          latest=${latest:-v0.0.0}
+
+          if [ -n "${{ inputs.version }}" ]; then
+            new="${{ inputs.version }}"
+            [[ "$new" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version: $new" >&2; exit 1; }
+          else
+            IFS='.' read -r major minor patch <<< "${latest#v}"
+            case "${{ inputs.bump }}" in
+              major) new="v$((major + 1)).0.0" ;;
+              minor) new="v$major.$((minor + 1)).0" ;;
+              *)     new="v$major.$minor.$((patch + 1))" ;;
+            esac
+          fi
+
+          git rev-parse "$new" >/dev/null 2>&1 && { echo "tag $new already exists" >&2; exit 1; }
+
+          git tag -a "$new" -m "$new"
+          git push origin "$new"
 
       - uses: actions/setup-go@v5
         with:
