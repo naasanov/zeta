@@ -728,7 +728,10 @@ _zsh_autopilot_spawn_daemon() {
   local log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/autopilot"
   mkdir -p "$log_dir" 2>/dev/null
 
-  ( nohup "$ZSH_AUTOPILOT_DAEMON_BIN" -socket "$ZSH_AUTOPILOT_SOCKET" >>"$log_dir/daemon.log" 2>&1 & )
+  # zsh does not export $HISTFILE, so it is passed explicitly. The assignment
+  # prefix scopes it to this child alone; empty is fine, the daemon then falls
+  # back to its own default.
+  ( ZSH_AUTOPILOT_HISTFILE=$HISTFILE nohup "$ZSH_AUTOPILOT_DAEMON_BIN" -socket "$ZSH_AUTOPILOT_SOCKET" >>"$log_dir/daemon.log" 2>&1 & )
 }
 
 _zsh_autopilot_connect() {

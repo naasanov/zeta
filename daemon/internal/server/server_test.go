@@ -514,3 +514,233 @@ func TestNoGoroutineLeak(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestRecordRequestInvokesRecordFn asserts a KindRecord request is delivered
+// to the registered record func with its Cmd/Cwd intact.
+func TestRecordRequestInvokesRecordFn(t *testing.T) {
+	path := testSocketPath(t)
+
+	recorded := make(chan protocol.Request, 1)
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(path, log)
+	srv.Debounce = testDebounce
+	srv.SetRecord(func(req protocol.Request) {
+		recorded <- req
+	})
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+	go func() { srv.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := protocol.Encode(conn, protocol.Request{
+		V:    protocol.Version,
+		ID:   "1.1",
+		Kind: protocol.KindRecord,
+		Cwd:  "/home/u/p",
+		Cmd:  "git status",
+	}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	select {
+	case req := <-recorded:
+		if req.Cmd != "git status" {
+			t.Errorf("req.Cmd = %q, want %q", req.Cmd, "git status")
+		}
+		if req.Cwd != "/home/u/p" {
+			t.Errorf("req.Cwd = %q, want %q", req.Cwd, "/home/u/p")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("record fn was not invoked in time")
+	}
+}
+
+// TestRecordRequestProducesNoReplyAndSkipsSuggest asserts a KindRecord
+// request never reaches suggest and never gets a Reply on the wire: only the
+// typing request sent afterward should produce one.
+func TestRecordRequestProducesNoReplyAndSkipsSuggest(t *testing.T) {
+	path := testSocketPath(t)
+
+	var mu sync.Mutex
+	var suggestCalls int
+	suggest := func(_ context.Context, req protocol.Request) (protocol.Reply, error) {
+		mu.Lock()
+		suggestCalls++
+		mu.Unlock()
+		return protocol.Reply{V: protocol.Version, ID: req.ID, Source: protocol.SourceLLM, Suggestion: "reply"}, nil
+	}
+
+	recorded := make(chan protocol.Request, 1)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(path, log)
+	srv.Debounce = testDebounce
+	srv.suggest = suggest
+	srv.SetRecord(func(req protocol.Request) { recorded <- req })
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+	go func() { srv.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := protocol.Encode(conn, protocol.Request{
+		V: protocol.Version, ID: "1.1", Kind: protocol.KindRecord, Cmd: "ls",
+	}); err != nil {
+		t.Fatalf("encode record: %v", err)
+	}
+
+	select {
+	case <-recorded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("record fn was not invoked in time")
+	}
+
+	// Nothing should have been written to the wire for the record request.
+	// A subsequent typing request is used to prove the connection is still
+	// alive and that its reply is the only one that arrives.
+	if err := protocol.Encode(conn, protocol.Request{
+		V: protocol.Version, ID: "1.2", Kind: protocol.KindTyping, Buf: "git",
+	}); err != nil {
+		t.Fatalf("encode typing: %v", err)
+	}
+
+	var reply protocol.Reply
+	if err := protocol.NewDecoder(conn).Decode(&reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if reply.ID != "1.2" {
+		t.Errorf("reply.ID = %q, want %q (record request must not reply)", reply.ID, "1.2")
+	}
+
+	mu.Lock()
+	got := suggestCalls
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("suggest called %d times, want exactly 1 (record request must never reach suggest)", got)
+	}
+}
+
+// TestRecordBetweenTypingRequestsDoesNotSupersede sends typing(A), record,
+// typing(B) back to back and asserts the record neither cancels A nor
+// resets B's debounce window: A must still complete and only B's reply
+// (the winner of normal supersede) reaches the wire.
+func TestRecordBetweenTypingRequestsDoesNotSupersede(t *testing.T) {
+	path := testSocketPath(t)
+
+	started := make(chan string, 2)
+	cancelled := make(chan string, 2)
+	recorded := make(chan protocol.Request, 1)
+
+	suggest := func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
+		if req.ID == "A" {
+			started <- req.ID
+			<-ctx.Done()
+			cancelled <- req.ID
+			return protocol.Reply{}, ctx.Err()
+		}
+		return protocol.Reply{V: protocol.Version, ID: req.ID, Source: protocol.SourceLLM, Suggestion: "b-reply"}, nil
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(path, log)
+	srv.Debounce = testDebounce
+	srv.suggest = suggest
+	srv.SetRecord(func(req protocol.Request) { recorded <- req })
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+	go func() { srv.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	dec := protocol.NewDecoder(conn)
+
+	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "A", Kind: protocol.KindTyping, Buf: "gi"}); err != nil {
+		t.Fatalf("encode A: %v", err)
+	}
+
+	select {
+	case id := <-started:
+		if id != "A" {
+			t.Fatalf("started id = %q, want A", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request A did not start in time")
+	}
+
+	// A record request while A is in flight must not touch supersede state.
+	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "rec.1", Kind: protocol.KindRecord, Cmd: "ls"}); err != nil {
+		t.Fatalf("encode record: %v", err)
+	}
+	select {
+	case <-recorded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("record fn was not invoked in time")
+	}
+
+	// A must still be in flight (not cancelled by the record).
+	select {
+	case <-cancelled:
+		t.Fatal("request A was cancelled by an intervening record request")
+	case <-time.After(testDebounce * 2):
+	}
+
+	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "B", Kind: protocol.KindTyping, Buf: "git"}); err != nil {
+		t.Fatalf("encode B: %v", err)
+	}
+
+	select {
+	case id := <-cancelled:
+		if id != "A" {
+			t.Fatalf("cancelled id = %q, want A", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request A was not cancelled by superseding request B")
+	}
+
+	var reply protocol.Reply
+	if err := dec.Decode(&reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if reply.ID != "B" {
+		t.Fatalf("reply.ID = %q, want B", reply.ID)
+	}
+}

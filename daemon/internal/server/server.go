@@ -53,6 +53,11 @@ type Server struct {
 	// when ctx is done so a superseded/cancelled request's goroutine doesn't
 	// leak.
 	suggest func(ctx context.Context, req protocol.Request) (protocol.Reply, error)
+
+	// record handles a KindRecord request; defaults to a no-op, overridden
+	// via SetRecord. It runs synchronously on the reader goroutine, so it
+	// must not block, and it never produces a Reply.
+	record func(req protocol.Request)
 }
 
 // New returns a Server configured to listen on path, logging via log. If log
@@ -67,6 +72,7 @@ func New(path string, log *slog.Logger) *Server {
 		Debounce:   DefaultDebounce,
 		conns:      make(map[net.Conn]struct{}),
 		suggest:    suggestInstantEcho,
+		record:     func(protocol.Request) {},
 	}
 }
 
@@ -76,6 +82,13 @@ func New(path string, log *slog.Logger) *Server {
 // Tests within this package may still set the unexported field directly.
 func (s *Server) SetSuggest(fn func(ctx context.Context, req protocol.Request) (protocol.Reply, error)) {
 	s.suggest = fn
+}
+
+// SetRecord overrides the record func invoked for KindRecord requests,
+// replacing the default no-op. main installs the history store's Record
+// method here (see cmd/autopilotd). Call it before Run.
+func (s *Server) SetRecord(fn func(req protocol.Request)) {
+	s.record = fn
 }
 
 // suggestInstantEcho is the default suggest func: an instant (non-blocking)
@@ -267,6 +280,10 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				return
 			}
 			s.Log.Debug("request", "id", shortID(req.ID), "kind", req.Kind, "buf", req.Buf)
+			if req.Kind == protocol.KindRecord {
+				s.record(req)
+				continue
+			}
 			select {
 			case reqCh <- req:
 			case <-connCtx.Done():

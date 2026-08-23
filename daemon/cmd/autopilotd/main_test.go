@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/naasanov/zsh-autopilot/daemon/internal/history"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
@@ -98,4 +99,140 @@ func TestEchoMissingKey(t *testing.T) {
 			t.Errorf("Suggestion = %q, want %q (no suffix appended)", reply.Suggestion, "git status")
 		}
 	})
+}
+
+// newTestHistoryStore returns a *history.Store backed by a fresh temp
+// journal, with no $HISTFILE bootstrap.
+func newTestHistoryStore(t *testing.T) *history.Store {
+	t.Helper()
+	h, err := history.New(history.Config{
+		JournalPath: filepath.Join(t.TempDir(), "history.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("history.New: %v", err)
+	}
+	t.Cleanup(func() { h.Close() })
+	return h
+}
+
+// TestEnrich_FillsHistoryInOrderWithAlignedCwds confirms enrich populates
+// req.History/HistoryCwds from the store's pool, index-aligned, before
+// calling next.
+func TestEnrich_FillsHistoryInOrderWithAlignedCwds(t *testing.T) {
+	h := newTestHistoryStore(t)
+	h.Record(history.Entry{Cmd: "git status", Cwd: "/x/proj", Session: "s"})
+	h.Record(history.Entry{Cmd: "npm install", Cwd: "/x/proj", Session: "s"})
+	h.Record(history.Entry{Cmd: "go build ./...", Cwd: "/x/gotool", Session: "s"})
+
+	var gotReq protocol.Request
+	next := func(_ context.Context, req protocol.Request) (protocol.Reply, error) {
+		gotReq = req
+		return protocol.Reply{ID: req.ID}, nil
+	}
+
+	fn := enrich(h, history.DefaultPoolN, next)
+	if _, err := fn(context.Background(), protocol.Request{ID: "1", Cwd: "/x/proj"}); err != nil {
+		t.Fatalf("enrich fn err = %v", err)
+	}
+
+	wantHistory := []string{"git status", "npm install", "go build ./..."}
+	if len(gotReq.History) != len(wantHistory) {
+		t.Fatalf("History = %v, want %v", gotReq.History, wantHistory)
+	}
+	for i, cmd := range wantHistory {
+		if gotReq.History[i] != cmd {
+			t.Errorf("History[%d] = %q, want %q", i, gotReq.History[i], cmd)
+		}
+	}
+	wantCwds := []string{"/x/proj", "/x/proj", "/x/gotool"}
+	if len(gotReq.HistoryCwds) != len(wantCwds) {
+		t.Fatalf("HistoryCwds = %v, want %v", gotReq.HistoryCwds, wantCwds)
+	}
+	for i, cwd := range wantCwds {
+		if gotReq.HistoryCwds[i] != cwd {
+			t.Errorf("HistoryCwds[%d] = %q, want %q", i, gotReq.HistoryCwds[i], cwd)
+		}
+	}
+}
+
+// TestEnrich_NilStoreIsPassthrough confirms a nil store leaves the request
+// untouched and still delegates to next.
+func TestEnrich_NilStoreIsPassthrough(t *testing.T) {
+	var calledWith protocol.Request
+	called := false
+	next := func(_ context.Context, req protocol.Request) (protocol.Reply, error) {
+		called = true
+		calledWith = req
+		return protocol.Reply{ID: req.ID}, nil
+	}
+
+	fn := enrich(nil, history.DefaultPoolN, next)
+	req := protocol.Request{ID: "1", Cwd: "/x/proj", Buf: "git st"}
+	if _, err := fn(context.Background(), req); err != nil {
+		t.Fatalf("enrich fn err = %v", err)
+	}
+
+	if !called {
+		t.Fatal("next was not called")
+	}
+	if calledWith.History != nil || calledWith.HistoryCwds != nil {
+		t.Errorf("History/HistoryCwds = %v/%v, want nil/nil (untouched)", calledWith.History, calledWith.HistoryCwds)
+	}
+	if calledWith.Buf != req.Buf || calledWith.Cwd != req.Cwd || calledWith.ID != req.ID {
+		t.Errorf("request fields altered: got %+v, want %+v", calledWith, req)
+	}
+}
+
+// TestSessionOf covers the "<session>.<seq>" split and the no-'.' fallback.
+func TestSessionOf(t *testing.T) {
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"abc123.5", "abc123"},
+		{"sess.with.dots.9", "sess.with.dots"},
+		{"noseparator", "noseparator"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := sessionOf(c.id); got != c.want {
+			t.Errorf("sessionOf(%q) = %q, want %q", c.id, got, c.want)
+		}
+	}
+}
+
+// TestResolveHistfilePath_AppScopedWinsOverAmbient confirms the app-scoped
+// var is preferred over the ambient $HISTFILE, matching this repo's
+// convention of not borrowing an ambient var when an app-scoped one exists.
+func TestResolveHistfilePath_AppScopedWinsOverAmbient(t *testing.T) {
+	t.Setenv("ZSH_AUTOPILOT_HISTFILE", "/app/histfile")
+	t.Setenv("HISTFILE", "/ambient/histfile")
+
+	if got := resolveHistfilePath(); got != "/app/histfile" {
+		t.Errorf("resolveHistfilePath() = %q, want %q", got, "/app/histfile")
+	}
+}
+
+// TestResolveHistfilePath_AmbientWinsOverFallback confirms $HISTFILE is used
+// when the app-scoped var is unset.
+func TestResolveHistfilePath_AmbientWinsOverFallback(t *testing.T) {
+	t.Setenv("ZSH_AUTOPILOT_HISTFILE", "")
+	t.Setenv("HISTFILE", "/ambient/histfile")
+
+	if got := resolveHistfilePath(); got != "/ambient/histfile" {
+		t.Errorf("resolveHistfilePath() = %q, want %q", got, "/ambient/histfile")
+	}
+}
+
+// TestResolveHistfilePath_FallsBackToHome confirms ~/.zsh_history is used
+// when neither the app-scoped var nor $HISTFILE is set.
+func TestResolveHistfilePath_FallsBackToHome(t *testing.T) {
+	t.Setenv("ZSH_AUTOPILOT_HISTFILE", "")
+	t.Setenv("HISTFILE", "")
+	t.Setenv("HOME", "/home/testuser")
+
+	want := filepath.Join("/home/testuser", ".zsh_history")
+	if got := resolveHistfilePath(); got != want {
+		t.Errorf("resolveHistfilePath() = %q, want %q", got, want)
+	}
 }

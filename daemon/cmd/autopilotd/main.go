@@ -17,10 +17,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/config"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/history"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/logging"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/metrics"
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
@@ -39,6 +41,8 @@ func main() {
 	// client reads, so the two agree from one place — e.g. the sandbox's .env),
 	// falling back to the built-in default; an explicit -socket flag still wins.
 	socket := flag.String("socket", envOr("ZSH_AUTOPILOT_SOCKET", server.DefaultSocket), "unix socket path to listen on (default $ZSH_AUTOPILOT_SOCKET)")
+	histfile := flag.String("histfile", resolveHistfilePath(), "shell HISTFILE to bootstrap history from (default $ZSH_AUTOPILOT_HISTFILE, $HISTFILE, or ~/.zsh_history)")
+	historyJournal := flag.String("history-journal", envOr("ZSH_AUTOPILOT_HISTORY_JOURNAL", historyJournalPath()), "path to the daemon-owned history journal (default $ZSH_AUTOPILOT_HISTORY_JOURNAL)")
 	verbose := flag.Bool("v", false, "enable debug logging")
 	flag.Parse()
 
@@ -93,6 +97,26 @@ func main() {
 		}
 	}
 
+	// history: the daemon-owned command corpus. A failure here degrades to a
+	// nil store rather than exiting, since suggestions still work without
+	// history and an unwritable state dir should not take the daemon down.
+	store, err := history.New(history.Config{
+		JournalPath:  *historyJournal,
+		HistfilePath: *histfile,
+		Log:          log,
+	})
+	if err != nil {
+		log.Warn("history: failed to open store, continuing without history", "err", err)
+		store = nil
+	}
+	if store != nil {
+		defer store.Close()
+		srv.SetRecord(recordHistory(store))
+		// Without this, a "" histfile (or a journal that already exists)
+		// silently skips bootstrap and there is no other signal of that.
+		log.Info("history: store opened", "journal", *historyJournal, "histfile", *histfile, "entries", store.Len())
+	}
+
 	selected := envOr("ZSH_AUTOPILOT_PROVIDER", cfg.DefaultProfile)
 	if selected == "" {
 		log.Error("config: no provider selected; set ZSH_AUTOPILOT_PROVIDER or default_profile in config.toml", "providers", knownProviders)
@@ -139,7 +163,7 @@ func main() {
 			log.Error("provider: failed to construct, falling back to echo mode", "provider", selected, "err", err)
 			srv.SetSuggest(echoMissingKey(resolved.APIKeyEnv))
 		} else {
-			srv.SetSuggest(suggest.LLM(p, log, emit, rawText))
+			srv.SetSuggest(enrich(store, history.DefaultPoolN, suggest.LLM(p, log, emit, rawText)))
 			// Never log the key itself.
 			log.Info("llm mode", "provider", selected, "adapter", resolved.Adapter, "model", resolved.Model)
 		}
@@ -202,6 +226,24 @@ func configPath() (path string, explicit bool) {
 	return filepath.Join(configHome, "autopilot", "config.toml"), false
 }
 
+func historyJournalPath() string {
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	if stateHome == "" {
+		stateHome = filepath.Join(envOr("HOME", "."), ".local", "state")
+	}
+	return filepath.Join(stateHome, "autopilot", "history.jsonl")
+}
+
+func resolveHistfilePath() string {
+	if v := os.Getenv("ZSH_AUTOPILOT_HISTFILE"); v != "" {
+		return v
+	}
+	if v := os.Getenv("HISTFILE"); v != "" {
+		return v
+	}
+	return filepath.Join(envOr("HOME", "."), ".zsh_history")
+}
+
 // envOr returns the environment variable named key, or fallback if unset or
 // empty.
 func envOr(key, fallback string) string {
@@ -226,4 +268,52 @@ func debounceFromEnv(log *slog.Logger, cfg config.Config) time.Duration {
 		return time.Duration(cfg.DebounceMS) * time.Millisecond
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// recordHistory adapts a *history.Store into the server.SetRecord seam:
+// a KindRecord Request becomes one history.Entry. Session is the part of
+// req.ID before the last '.' (see sessionOf); an empty Cmd is skipped.
+func recordHistory(h *history.Store) func(protocol.Request) {
+	return func(req protocol.Request) {
+		if req.Cmd == "" {
+			return
+		}
+		h.Record(history.Entry{
+			Cmd:     req.Cmd,
+			Cwd:     req.Cwd,
+			Session: sessionOf(req.ID),
+			Ts:      req.Ts,
+		})
+	}
+}
+
+// sessionOf returns the part of a "<session>.<seq>" request id before the
+// last '.'. An id carrying no '.' has no seq suffix, so the id itself is the
+// session.
+func sessionOf(id string) string {
+	if i := strings.LastIndexByte(id, '.'); i >= 0 {
+		return id[:i]
+	}
+	return id
+}
+
+// suggestFn matches the signature server.SetSuggest expects.
+type suggestFn func(context.Context, protocol.Request) (protocol.Reply, error)
+
+// enrich fills req.History/HistoryCwds from h's candidate pool before
+// delegating to next. h nil (history unavailable) passes req through
+// untouched; the pool depth n truncates independently in each prompt.
+func enrich(h *history.Store, n int, next suggestFn) suggestFn {
+	if h == nil {
+		return next
+	}
+	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
+		pool := h.Select(history.Query{Cwd: req.Cwd, N: n})
+		entries := make([]protocol.HistoryEntry, len(pool))
+		for i, e := range pool {
+			entries[i] = protocol.HistoryEntry{Cmd: e.Cmd, Cwd: e.Cwd}
+		}
+		req.SetHistoryEntries(entries)
+		return next(ctx, req)
+	}
 }
