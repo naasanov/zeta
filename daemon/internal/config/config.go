@@ -30,11 +30,16 @@ const (
 
 // Preset is a brand's tested defaults: which internal adapter it speaks,
 // where it lives, which model to use, and which env var carries its key.
+// MaxTokens is 0 for every brand except groq: gpt-oss-20b burns ~50 tokens on
+// hidden reasoning (see the groq preset comment) before any visible output,
+// so it needs a larger budget than DefaultMaxTokens. 0 means "use the
+// configured/default max_tokens" (see Resolve and NewFromProfile).
 type Preset struct {
-	Adapter string
-	BaseURL string
-	Model   string
-	KeyEnv  string
+	Adapter   string
+	BaseURL   string
+	Model     string
+	KeyEnv    string
+	MaxTokens int
 }
 
 // presets is the brand table (T2.5). "openai" is deliberately absent — it's
@@ -58,16 +63,18 @@ var presets = map[string]Preset{
 		Model:   "claude-haiku-4-5",
 		KeyEnv:  "ZSH_AUTOPILOT_ANTHROPIC_KEY",
 	},
-	// Every other Groq chat model left is a reasoning model that can't be
-	// silenced: openai/gpt-oss-* only accepts reasoning_effort low/medium/high
-	// (no "none"), and low alone burns ~50 of our 48 max_tokens on hidden
-	// chain-of-thought before any visible output. qwen3.6-27b is the one
-	// exception — reasoning_effort:"none" (set in openai.go) fully disables it.
+	// gpt-oss-20b is Groq's production-tier small model (qwen3.6-27b, the
+	// prior stopgap, is preview-tier and scored lower in eval: 30/38 vs
+	// 33/38). Its reasoning can't be fully silenced — openai/gpt-oss-* only
+	// accepts reasoning_effort low/medium/high, no "none" — and even "low"
+	// burns ~50 tokens on hidden chain-of-thought before any visible output
+	// (set in openai.go), hence the MaxTokens override below.
 	"groq": {
-		Adapter: "openai",
-		BaseURL: "https://api.groq.com/openai/v1",
-		Model:   "qwen/qwen3.6-27b",
-		KeyEnv:  "ZSH_AUTOPILOT_GROQ_KEY",
+		Adapter:   "openai",
+		BaseURL:   "https://api.groq.com/openai/v1",
+		Model:     "openai/gpt-oss-20b",
+		KeyEnv:    "ZSH_AUTOPILOT_GROQ_KEY",
+		MaxTokens: 150,
 	},
 	"ollama": {
 		Adapter: "openai",
@@ -117,6 +124,7 @@ type Profile struct {
 	Model     string `toml:"model"`       // override
 	APIKeyEnv string `toml:"api_key_env"` // override; read first
 	APIKeyCmd string `toml:"api_key_cmd"` // override; fallback: shell command whose stdout is the key
+	MaxTokens int    `toml:"max_tokens"`  // override; 0 means "use the preset/global default"
 }
 
 // ResolvedProfile is the fully-resolved result of Config.Resolve: a brand's
@@ -129,6 +137,9 @@ type ResolvedProfile struct {
 	Model     string
 	APIKeyEnv string
 	APIKeyCmd string
+	// MaxTokens is 0 unless the preset or profile set an override; 0 means
+	// "the caller's own maxTokens param wins" (see provider.NewFromProfile).
+	MaxTokens int
 }
 
 // Parse decodes TOML bytes into a Config, applies defaults for absent
@@ -200,6 +211,7 @@ func (c Config) Resolve(name string) (ResolvedProfile, error) {
 			Model:     preset.Model,
 			APIKeyEnv: preset.KeyEnv,
 			APIKeyCmd: profile.APIKeyCmd,
+			MaxTokens: preset.MaxTokens,
 		}
 		if profile.BaseURL != "" {
 			r.BaseURL = profile.BaseURL
@@ -209,6 +221,9 @@ func (c Config) Resolve(name string) (ResolvedProfile, error) {
 		}
 		if profile.APIKeyEnv != "" {
 			r.APIKeyEnv = profile.APIKeyEnv
+		}
+		if profile.MaxTokens != 0 {
+			r.MaxTokens = profile.MaxTokens
 		}
 		return r, nil
 	}
@@ -234,6 +249,7 @@ func (c Config) Resolve(name string) (ResolvedProfile, error) {
 			Model:     profile.Model,
 			APIKeyEnv: profile.APIKeyEnv,
 			APIKeyCmd: profile.APIKeyCmd,
+			MaxTokens: profile.MaxTokens,
 		}, nil
 	}
 

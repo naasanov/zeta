@@ -3,7 +3,7 @@ package metrics
 // PriceTableVersion is stamped onto every "request" event as
 // price_table_version, so rows computed under an older table can be told
 // apart when re-deriving cost_usd. Bump it whenever priceTable changes.
-const PriceTableVersion = 4
+const PriceTableVersion = 5
 
 // modelPrice holds per-million-token USD pricing for one provider+model.
 type modelPrice struct {
@@ -34,13 +34,22 @@ var priceTable = map[string]modelPrice{
 		OutPerM:    0.60,
 		CachedPerM: 0.15 * 0.5,
 	},
-	// qwen3.6-27b: current groq preset default. Cached-token discount support
-	// is unconfirmed on Groq for this model, so CachedPerM is left at InPerM
-	// (no assumed discount) rather than guessed.
+	// qwen3.6-27b: the interim groq preset before gpt-oss-20b (see below).
+	// Cached-token discount support is unconfirmed on Groq for this model,
+	// so CachedPerM is left at InPerM (no assumed discount) rather than
+	// guessed.
 	"openai/qwen/qwen3.6-27b": {
 		InPerM:     0.60,
 		OutPerM:    3.00,
 		CachedPerM: 0.60,
+	},
+	// gpt-oss-20b: current groq preset default (console.groq.com/docs/models,
+	// verified 2026-08-22). Supports the same 0.5x cached-input discount as
+	// gpt-oss-120b.
+	"openai/openai/gpt-oss-20b": {
+		InPerM:     0.075,
+		OutPerM:    0.30,
+		CachedPerM: 0.075 * 0.5,
 	},
 	"anthropic/claude-haiku-4-5": {
 		InPerM:     1.00,

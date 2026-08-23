@@ -177,11 +177,14 @@ func TestConfigResolve(t *testing.T) {
 		if r.BaseURL != "https://api.groq.com/openai/v1" {
 			t.Errorf("BaseURL = %v, want groq base url", r.BaseURL)
 		}
-		if r.Model != "qwen/qwen3.6-27b" {
-			t.Errorf("Model = %v, want qwen/qwen3.6-27b", r.Model)
+		if r.Model != "openai/gpt-oss-20b" {
+			t.Errorf("Model = %v, want openai/gpt-oss-20b", r.Model)
 		}
 		if r.APIKeyEnv != "ZSH_AUTOPILOT_GROQ_KEY" {
 			t.Errorf("APIKeyEnv = %v, want ZSH_AUTOPILOT_GROQ_KEY", r.APIKeyEnv)
+		}
+		if r.MaxTokens != 150 {
+			t.Errorf("MaxTokens = %v, want 150 (gpt-oss-20b's reasoning-budget override)", r.MaxTokens)
 		}
 	})
 
@@ -224,6 +227,21 @@ func TestConfigResolve(t *testing.T) {
 		}
 		if r.APIKeyEnv != "MY_CUSTOM_KEY" {
 			t.Errorf("APIKeyEnv = %v, want override MY_CUSTOM_KEY", r.APIKeyEnv)
+		}
+	})
+
+	t.Run("profile max_tokens overrides the preset's", func(t *testing.T) {
+		cfg := Config{
+			Profiles: map[string]Profile{
+				"fast-groq": {Provider: "groq", MaxTokens: 64},
+			},
+		}
+		r, err := cfg.Resolve("fast-groq")
+		if err != nil {
+			t.Fatalf("Resolve() err = %v, want nil", err)
+		}
+		if r.MaxTokens != 64 {
+			t.Errorf("MaxTokens = %v, want profile override 64, not the preset's 150", r.MaxTokens)
 		}
 	})
 

@@ -4,11 +4,11 @@ import "testing"
 
 // TestCostUSD_KnownModel checks a known token count against a hand-computed
 // expected cost for the default groq model, pinning the current priceTable
-// numbers (qwen/qwen3.6-27b: $0.60/M in, $3.00/M out).
+// numbers (openai/gpt-oss-20b: $0.075/M in, $0.30/M out).
 func TestCostUSD_KnownModel(t *testing.T) {
 	// 1,000,000 input tokens, 500,000 output tokens, no cached tokens.
-	got := CostUSD("openai", "qwen/qwen3.6-27b", 1_000_000, 500_000, 0)
-	want := 1.0*0.60 + 0.5*3.00 // $0.60 + $1.50 = $2.10
+	got := CostUSD("openai", "openai/gpt-oss-20b", 1_000_000, 500_000, 0)
+	want := 1.0*0.075 + 0.5*0.30 // $0.075 + $0.15 = $0.225
 	if !floatsClose(got, want) {
 		t.Errorf("CostUSD() = %v, want %v", got, want)
 	}
