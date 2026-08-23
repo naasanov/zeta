@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -17,10 +18,14 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/prompt"
 )
 
-// qwenReasoningModel is the one Groq model this adapter special-cases (see
-// Complete): the shipped groq preset, whose reasoning can actually be
-// disabled via reasoning_effort:"none".
-const qwenReasoningModel = "qwen/qwen3.6-27b"
+// Reasoning models this adapter special-cases in Complete: qwen3.6-27b can
+// fully disable its <think> block via reasoning_effort:"none"; gpt-oss-20b
+// (the shipped groq preset) cannot — "low" is its quietest setting and still
+// costs tokens, hence the MaxTokens override on the groq preset.
+const (
+	qwenReasoningModel = "qwen/qwen3.6-27b"
+	gptOSS20BModel     = "openai/gpt-oss-20b"
+)
 
 // openAIClient talks to a single OpenAI-compatible /chat/completions
 // endpoint via the openai-go SDK client, holding a shared *http.Client
@@ -41,6 +46,9 @@ func NewOpenAI(baseURL, model, apiKey string, maxTokens int, p prompt.ChatPrompt
 		option.WithBaseURL(baseURL),
 		option.WithAPIKey(apiKey),
 		option.WithHTTPClient(keepAliveHTTPClient()),
+		option.WithMiddleware(rateLimitMiddleware),
+		// Retries disabled: a single attempt's timing is what TTFT measures.
+		option.WithMaxRetries(0),
 	)
 
 	return &openAIClient{
@@ -77,6 +85,109 @@ func (c *openAIClient) PromptName() string {
 	return c.prompt.Name()
 }
 
+// rateLimitCtxKey is the unexported key Complete uses to stash a
+// rateLimitHolder on a per-call context; distinct types keep it collision-free
+// with any other package's context values.
+type rateLimitCtxKey struct{}
+
+// rateLimitHolder carries one Complete call's observed RateLimit across HTTP
+// attempts (retries are disabled by NewOpenAI, but a redirect or a future
+// re-enable could still produce more than one). It is reached via
+// context.WithValue rather than a client field because one openAIClient is
+// shared across concurrent Complete calls.
+type rateLimitHolder struct {
+	rl *RateLimit
+}
+
+// merge folds one response's observation into the accumulated RateLimit:
+// token fields are replaced only when this response actually carried them,
+// RetryAfter is kept as the max seen across every attempt. A nil rl is a
+// no-op, safe on a holder with no prior observation either.
+func (h *rateLimitHolder) merge(rl *RateLimit, hasTokens bool) {
+	if rl == nil {
+		return
+	}
+	if h.rl == nil {
+		h.rl = &RateLimit{}
+	}
+	if hasTokens {
+		h.rl.LimitTokens = rl.LimitTokens
+		h.rl.RemainingTokens = rl.RemainingTokens
+		h.rl.ResetTokens = rl.ResetTokens
+	}
+	if rl.RetryAfter > h.rl.RetryAfter {
+		h.rl.RetryAfter = rl.RetryAfter
+	}
+}
+
+// tokenHeaderKeys are checked directly against the response (not through
+// parseRateLimit's output) so merge can tell "this response carried token
+// headers" apart from "it carried them with value zero".
+var tokenHeaderKeys = []string{
+	"x-ratelimit-limit-tokens",
+	"x-ratelimit-remaining-tokens",
+	"x-ratelimit-reset-tokens",
+}
+
+func hasTokenHeaders(h http.Header) bool {
+	for _, k := range tokenHeaderKeys {
+		if h.Get(k) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// rateLimitMiddleware merges each HTTP response's rate-limit headers into
+// the holder Complete placed on the request context (a no-op if absent).
+func rateLimitMiddleware(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	resp, err := next(req)
+	if resp != nil {
+		if h, ok := req.Context().Value(rateLimitCtxKey{}).(*rateLimitHolder); ok {
+			h.merge(parseRateLimit(resp.Header), hasTokenHeaders(resp.Header))
+		}
+	}
+	return resp, err
+}
+
+// parseRateLimit reads Groq/OpenAI-style rate-limit headers, populating only
+// fields whose header was present (a 429 sends retry-after with no
+// x-ratelimit-* headers; that must not read as "0 tokens remaining").
+func parseRateLimit(h http.Header) *RateLimit {
+	var rl RateLimit
+	var seen bool
+
+	if v := h.Get("x-ratelimit-limit-tokens"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			rl.LimitTokens = n
+			seen = true
+		}
+	}
+	if v := h.Get("x-ratelimit-remaining-tokens"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			rl.RemainingTokens = n
+			seen = true
+		}
+	}
+	if v := h.Get("x-ratelimit-reset-tokens"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			rl.ResetTokens = d
+			seen = true
+		}
+	}
+	if v := h.Get("retry-after"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil {
+			rl.RetryAfter = time.Duration(secs) * time.Second
+			seen = true
+		}
+	}
+
+	if !seen {
+		return nil
+	}
+	return &rl
+}
+
 // Complete issues a streaming chat-completions request via the SDK and
 // returns the model's first line of output (design §4), driving the shared
 // accumulator for TTFT stamping and the cutoff. ctx is passed straight into
@@ -108,12 +219,20 @@ func (c *openAIClient) Complete(ctx context.Context, req Request) (Completion, e
 	// to the first chunk carrying non-empty delta content (accumulator.Push).
 	acc := newAccumulator(time.Now())
 
+	holder := &rateLimitHolder{}
+	ctx = context.WithValue(ctx, rateLimitCtxKey{}, holder)
+
 	opts := []option.RequestOption{}
-	if c.model == qwenReasoningModel {
+	switch c.model {
+	case qwenReasoningModel:
 		// Without this, qwen3.6-27b spends its whole token budget on a
-		// hidden <think> block before any visible output (unlike gpt-oss,
-		// which has no way to fully disable reasoning at all).
+		// hidden <think> block before any visible output.
 		opts = append(opts, option.WithJSONSet("reasoning_effort", "none"))
+	case gptOSS20BModel:
+		// gpt-oss rejects reasoning_effort:"none" outright (400); "low" is
+		// the quietest setting the API accepts, and still costs tokens —
+		// covered by the groq preset's MaxTokens override.
+		opts = append(opts, option.WithJSONSet("reasoning_effort", "low"))
 	}
 
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params, opts...)
@@ -158,6 +277,7 @@ func (c *openAIClient) Complete(ctx context.Context, req Request) (Completion, e
 				CachedTokens: cachedTokens,
 				HTTPStatus:   http.StatusOK,
 				StopReason:   stopReason,
+				RateLimit:    holder.rl,
 			}, nil
 		}
 	}
@@ -175,7 +295,7 @@ func (c *openAIClient) Complete(ctx context.Context, req Request) (Completion, e
 		// carries the HTTP status code.
 		var apiErr *openai.Error
 		if errors.As(err, &apiErr) {
-			return Completion{HTTPStatus: apiErr.StatusCode}, &Error{
+			return Completion{HTTPStatus: apiErr.StatusCode, RateLimit: holder.rl}, &Error{
 				Kind:       ClassifyHTTP(apiErr.StatusCode),
 				HTTPStatus: apiErr.StatusCode,
 				Provider:   c.Name(),
@@ -198,5 +318,6 @@ func (c *openAIClient) Complete(ctx context.Context, req Request) (Completion, e
 		CachedTokens: cachedTokens,
 		HTTPStatus:   http.StatusOK,
 		StopReason:   stopReason,
+		RateLimit:    holder.rl,
 	}, nil
 }

@@ -502,11 +502,11 @@ func newLiveProvider(brand string, modelOverride string, maxTokens int, p prompt
 }
 
 // concurrencyFor returns the Runner.Concurrency to use for a cell's limiter:
-// 1 for a real *eval.RateLimiter (spreading a shared per-minute budget across
+// 1 for a real *eval.AdaptiveLimiter (spreading a shared token budget across
 // workers only adds queuing latency, never throughput), 0 (Runner's default)
 // otherwise.
 func concurrencyFor(limiter eval.Limiter) int {
-	if _, ok := limiter.(*eval.RateLimiter); ok {
+	if _, ok := limiter.(*eval.AdaptiveLimiter); ok {
 		return 1
 	}
 	return 0

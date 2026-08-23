@@ -247,3 +247,222 @@ func TestOpenAI_PromptName(t *testing.T) {
 		t.Errorf("PromptName() = %q, want %q", got, want)
 	}
 }
+
+func TestParseRateLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		hdr  http.Header
+		want *RateLimit
+	}{
+		{
+			name: "full headers, sub-second reset",
+			hdr: http.Header{
+				"X-Ratelimit-Limit-Tokens":     {"6000"},
+				"X-Ratelimit-Remaining-Tokens": {"5990"},
+				"X-Ratelimit-Reset-Tokens":     {"615ms"},
+			},
+			want: &RateLimit{LimitTokens: 6000, RemainingTokens: 5990, ResetTokens: 615 * time.Millisecond},
+		},
+		{
+			name: "seconds reset",
+			hdr: http.Header{
+				"X-Ratelimit-Limit-Tokens":     {"6000"},
+				"X-Ratelimit-Remaining-Tokens": {"120"},
+				"X-Ratelimit-Reset-Tokens":     {"8.684s"},
+			},
+			want: &RateLimit{LimitTokens: 6000, RemainingTokens: 120, ResetTokens: 8684 * time.Millisecond},
+		},
+		{
+			name: "hours-minutes-seconds reset",
+			hdr: http.Header{
+				"X-Ratelimit-Limit-Tokens":     {"6000"},
+				"X-Ratelimit-Remaining-Tokens": {"0"},
+				"X-Ratelimit-Reset-Tokens":     {"6h1m26.4s"},
+			},
+			want: &RateLimit{LimitTokens: 6000, RemainingTokens: 0, ResetTokens: 6*time.Hour + 1*time.Minute + 26400*time.Millisecond},
+		},
+		{
+			name: "429 carries only retry-after, no ratelimit headers",
+			hdr:  http.Header{"Retry-After": {"2"}},
+			want: &RateLimit{RetryAfter: 2 * time.Second},
+		},
+		{
+			name: "no rate-limit headers at all",
+			hdr:  http.Header{"Content-Type": {"application/json"}},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseRateLimit(tt.hdr)
+			if (got == nil) != (tt.want == nil) {
+				t.Fatalf("parseRateLimit() = %+v, want %+v", got, tt.want)
+			}
+			if got == nil {
+				return
+			}
+			if *got != *tt.want {
+				t.Errorf("parseRateLimit() = %+v, want %+v", *got, *tt.want)
+			}
+		})
+	}
+}
+
+// TestComplete_RateLimitHeaders_HappyPath exercises the common case: the
+// early-return cutoff path (a newline in the first chunk) must still carry
+// the rate-limit headers observed on the response.
+func TestComplete_RateLimitHeaders_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-ratelimit-limit-tokens", "6000")
+		w.Header().Set("x-ratelimit-remaining-tokens", "5990")
+		w.Header().Set("x-ratelimit-reset-tokens", "615ms")
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, sseChunk(t, "git status\n"))
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), testReq("user"))
+	if err != nil {
+		t.Fatalf("Complete() err = %v, want nil", err)
+	}
+	want := &RateLimit{LimitTokens: 6000, RemainingTokens: 5990, ResetTokens: 615 * time.Millisecond}
+	if got.RateLimit == nil || *got.RateLimit != *want {
+		t.Errorf("Complete().RateLimit = %+v, want %+v", got.RateLimit, want)
+	}
+}
+
+// TestComplete_RateLimitHeaders_Absent asserts a response with no
+// rate-limit headers yields a nil RateLimit, not a zero-valued one.
+func TestComplete_RateLimitHeaders_Absent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, sseChunk(t, "git status\n"))
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), testReq("user"))
+	if err != nil {
+		t.Fatalf("Complete() err = %v, want nil", err)
+	}
+	if got.RateLimit != nil {
+		t.Errorf("Complete().RateLimit = %+v, want nil", got.RateLimit)
+	}
+}
+
+// TestComplete_RateLimitHeaders_429 asserts a 429's retry-after reaches the
+// caller through the error path, with no token fields fabricated.
+func TestComplete_RateLimitHeaders_429(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// retry-after:0 keeps the test fast; TestParseRateLimit already
+		// covers the "2" seconds-integer parse.
+		w.Header().Set("retry-after", "0")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"rate limited","type":"rate_limit_error","code":"429","param":""}}`)
+	}))
+	defer srv.Close()
+
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), testReq("user"))
+	if err == nil {
+		t.Fatalf("Complete() err = nil, want non-nil for a 429")
+	}
+	want := &RateLimit{RetryAfter: 0}
+	if got.RateLimit == nil || *got.RateLimit != *want {
+		t.Errorf("Complete().RateLimit = %+v, want %+v", got.RateLimit, want)
+	}
+}
+
+// TestRateLimitHolder_Merge drives rateLimitHolder.merge directly with
+// synthetic observations (SDK retries are disabled, so Complete itself never
+// produces more than one attempt) to assert the new merge semantics: token
+// fields come from the most recent observation that carried them, and
+// RetryAfter is kept as the max seen across every merge.
+func TestRateLimitHolder_Merge(t *testing.T) {
+	t.Run("later token fields replace earlier ones", func(t *testing.T) {
+		h := &rateLimitHolder{}
+		h.merge(&RateLimit{LimitTokens: 6000, RemainingTokens: 5990, ResetTokens: 615 * time.Millisecond}, true)
+		h.merge(&RateLimit{LimitTokens: 6000, RemainingTokens: 5500, ResetTokens: 1200 * time.Millisecond}, true)
+
+		want := &RateLimit{LimitTokens: 6000, RemainingTokens: 5500, ResetTokens: 1200 * time.Millisecond}
+		if h.rl == nil || *h.rl != *want {
+			t.Errorf("merge() = %+v, want %+v", h.rl, want)
+		}
+	})
+
+	t.Run("a retry-after-only observation does not erase prior token fields", func(t *testing.T) {
+		h := &rateLimitHolder{}
+		h.merge(&RateLimit{LimitTokens: 6000, RemainingTokens: 5990, ResetTokens: 615 * time.Millisecond}, true)
+		h.merge(&RateLimit{RetryAfter: 2 * time.Second}, false)
+
+		want := &RateLimit{LimitTokens: 6000, RemainingTokens: 5990, ResetTokens: 615 * time.Millisecond, RetryAfter: 2 * time.Second}
+		if h.rl == nil || *h.rl != *want {
+			t.Errorf("merge() = %+v, want %+v", h.rl, want)
+		}
+	})
+
+	t.Run("RetryAfter is kept as the max across attempts", func(t *testing.T) {
+		h := &rateLimitHolder{}
+		h.merge(&RateLimit{RetryAfter: 5 * time.Second}, false)
+		h.merge(&RateLimit{RetryAfter: 2 * time.Second}, false)
+
+		if h.rl == nil || h.rl.RetryAfter != 5*time.Second {
+			t.Errorf("merge().RetryAfter = %v, want %v (the max)", h.rl, 5*time.Second)
+		}
+	})
+
+	t.Run("a nil observation is a no-op", func(t *testing.T) {
+		h := &rateLimitHolder{}
+		h.merge(nil, false)
+		if h.rl != nil {
+			t.Errorf("merge(nil) = %+v, want nil", h.rl)
+		}
+
+		h.merge(&RateLimit{LimitTokens: 100}, true)
+		h.merge(nil, false)
+		want := &RateLimit{LimitTokens: 100}
+		if h.rl == nil || *h.rl != *want {
+			t.Errorf("merge(nil) after a real observation = %+v, want %+v (unchanged)", h.rl, want)
+		}
+	})
+}
+
+// TestComplete_NoRetryOnRateLimit asserts retries are disabled: a server
+// that always 429s must see exactly one HTTP attempt, and the returned error
+// still carries RateLimit.RetryAfter from that one attempt.
+func TestComplete_NoRetryOnRateLimit(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("retry-after", "3")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"message":"rate limited","type":"rate_limit_error","code":"429","param":""}}`)
+	}))
+	defer srv.Close()
+
+	client := newOpenAI(t, srv.URL, "test-model", "test-key", 48)
+	got, err := client.Complete(context.Background(), testReq("user"))
+	if err == nil {
+		t.Fatalf("Complete() err = nil, want non-nil for a 429")
+	}
+	if attempts != 1 {
+		t.Errorf("server saw %d attempt(s), want exactly 1 (retries must be disabled)", attempts)
+	}
+	// METRICS(§12): HTTPStatus and RateLimit must both be populated on the
+	// HTTP-error return path.
+	if got.HTTPStatus != http.StatusTooManyRequests {
+		t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, http.StatusTooManyRequests)
+	}
+	want := &RateLimit{RetryAfter: 3 * time.Second}
+	if got.RateLimit == nil || *got.RateLimit != *want {
+		t.Errorf("Complete().RateLimit = %+v, want %+v", got.RateLimit, want)
+	}
+}

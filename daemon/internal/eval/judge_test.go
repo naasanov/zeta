@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
 // ---- fakeJudge: a Judge test double, no network -----------------------------
@@ -629,6 +630,8 @@ func (f *fakeLimiter) Wait(ctx context.Context) error {
 	return ctx.Err()
 }
 
+func (f *fakeLimiter) Observe(*provider.RateLimit) {}
+
 func (f *fakeLimiter) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -799,7 +802,7 @@ func TestRubrics_StateEmptySuggestionHandling(t *testing.T) {
 	}{
 		{"c3", c3Rubric, "EMPTY suggestion PASSES"},
 		{"e3", e3Rubric, "EMPTY suggestion FAILS"},
-		{"e7", e7Rubric, "EMPTY suggestion FAILS"},
+		{"e11", e11Rubric, "EMPTY suggestion FAILS"},
 		{"f2", f2Rubric, "EMPTY suggestion is a GOOD"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

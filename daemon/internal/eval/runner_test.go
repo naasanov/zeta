@@ -10,16 +10,293 @@ import (
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
 func TestLimiterForBrand(t *testing.T) {
-	if _, ok := LimiterForBrand("groq").(*RateLimiter); !ok {
-		t.Errorf("LimiterForBrand(%q) = %T, want *RateLimiter", "groq", LimiterForBrand("groq"))
+	if _, ok := LimiterForBrand("groq").(*AdaptiveLimiter); !ok {
+		t.Errorf("LimiterForBrand(%q) = %T, want *AdaptiveLimiter", "groq", LimiterForBrand("groq"))
 	}
 	for _, brand := range []string{"codestral", "anthropic", "ollama", "unknown-brand"} {
 		if _, ok := LimiterForBrand(brand).(NoopLimiter); !ok {
 			t.Errorf("LimiterForBrand(%q) = %T, want NoopLimiter", brand, LimiterForBrand(brand))
 		}
+	}
+}
+
+// ---- AdaptiveLimiter --------------------------------------------------
+
+func TestAdaptiveLimiter_UnthrottledBeforeAnyObservation(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	start := time.Now()
+	for range 5 {
+		if err := l.Wait(context.Background()); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("Wait blocked before any observation: elapsed=%v", elapsed)
+	}
+}
+
+func TestAdaptiveLimiter_NilObservationIsSafe(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	l.Observe(nil)
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait after nil Observe: %v", err)
+	}
+}
+
+func TestAdaptiveLimiter_LearnsCostAndThrottles(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	// Refill rate: 8000 tokens over 60s = ~133.3 tokens/sec.
+	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 8000, ResetTokens: 60 * time.Second})
+	// Second observation, 245 tokens consumed with negligible elapsed time
+	// between the two calls: the running-max cost estimate should land near 245.
+	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 7755, ResetTokens: time.Second})
+
+	l.mu.Lock()
+	cost := l.cost
+	l.mu.Unlock()
+	if cost < 200 || cost > 300 {
+		t.Fatalf("learned cost estimate = %v, want roughly 245", cost)
+	}
+
+	// Drain the projected budget down near the cost estimate so the next
+	// Wait must actually throttle.
+	l.mu.Lock()
+	l.remaining = cost - 1
+	l.mu.Unlock()
+
+	start := time.Now()
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed <= 0 {
+		t.Fatalf("want Wait to block once projected remaining is below the cost estimate, elapsed=%v", elapsed)
+	}
+}
+
+func TestAdaptiveLimiter_RefillBetweenObservationsDoesNotUnderestimateCost(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 1000, ResetTokens: 60 * time.Second})
+
+	l.mu.Lock()
+	l.lastUpdate = time.Now().Add(-time.Second) // pretend a full second refilled since then
+	l.mu.Unlock()
+
+	// Naively, remaining barely dropped (1000 -> 900), but ~117 tokens/sec
+	// refilled in that second, so the real cost was closer to 217, not 100.
+	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 900, ResetTokens: 60 * time.Second})
+
+	l.mu.Lock()
+	cost := l.cost
+	l.mu.Unlock()
+	if cost <= 100 {
+		t.Fatalf("cost estimate = %v, want it corrected upward past the naive 100-token delta", cost)
+	}
+}
+
+func TestAdaptiveLimiter_RetryAfterForcesWait(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	l.Observe(&provider.RateLimit{RetryAfter: 40 * time.Millisecond})
+
+	start := time.Now()
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Fatalf("want Wait to honor RetryAfter, elapsed=%v", elapsed)
+	}
+}
+
+func TestAdaptiveLimiter_RetryAfterZeroesRemainingBudget(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 5000, ResetTokens: 60 * time.Second})
+
+	l.Observe(&provider.RateLimit{RetryAfter: 30 * time.Millisecond})
+
+	l.mu.Lock()
+	remaining := l.remaining
+	l.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("remaining after a 429 = %v, want 0", remaining)
+	}
+
+	start := time.Now()
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 20*time.Millisecond {
+		t.Fatalf("want Wait to block on the zeroed budget, elapsed=%v", elapsed)
+	}
+}
+
+// TestAdaptiveLimiter_CostSafetyFactorThrottlesEarlierThanRawCost sets
+// remaining exactly to the learned raw cost: the raw cost alone would leave
+// a zero deficit, but costSafetyFactor inflates the reserve past it.
+func TestAdaptiveLimiter_CostSafetyFactorThrottlesEarlierThanRawCost(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 8000, ResetTokens: 60 * time.Second})
+	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 7755, ResetTokens: time.Second})
+
+	l.mu.Lock()
+	l.remaining = l.cost
+	l.mu.Unlock()
+
+	start := time.Now()
+	if err := l.Wait(context.Background()); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed <= 0 {
+		t.Fatalf("want costSafetyFactor to block Wait even though remaining == raw cost, elapsed=%v", elapsed)
+	}
+}
+
+func TestAdaptiveLimiter_WaitRespectsCtxCancellation(t *testing.T) {
+	l := NewAdaptiveLimiter()
+	l.Observe(&provider.RateLimit{RetryAfter: time.Hour})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := l.Wait(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+// rlScriptEntry is one scripted Complete outcome for rlScriptProvider: unlike
+// StubResult, it can attach a RateLimit to an ERRORED completion the way a
+// real 429 response does.
+type rlScriptEntry struct {
+	completion provider.Completion
+	err        error
+}
+
+// rlScriptProvider replays rlScriptEntry values in order (cycling once
+// exhausted) and counts calls, for exercising runOne's rate-limit retry loop.
+type rlScriptProvider struct {
+	mu     sync.Mutex
+	idx    int
+	calls  int
+	script []rlScriptEntry
+}
+
+func (p *rlScriptProvider) Complete(_ context.Context, _ provider.Request) (provider.Completion, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.script[p.idx%len(p.script)]
+	p.idx++
+	p.calls++
+	return e.completion, e.err
+}
+
+func (p *rlScriptProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func (p *rlScriptProvider) Name() string                         { return "stub" }
+func (p *rlScriptProvider) Model() string                        { return "stub-1" }
+func (p *rlScriptProvider) PromptName() string                   { return "stub" }
+func (p *rlScriptProvider) RenderPrompt(provider.Request) string { return "" }
+
+// rateLimitedErr is a *provider.Error classified the way a real 429 is, so
+// errors.As(err, &perr) with perr.Kind == provider.ErrRateLimited matches it.
+func rateLimitedErr() error {
+	return &provider.Error{Kind: provider.ErrRateLimited, Provider: "groq", Err: errBoom}
+}
+
+// spyLimiter is a Limiter test double that counts Wait calls and records
+// every Observe argument, so a test can assert the retry loop actually
+// re-consults the limiter and feeds it what each attempt learned.
+type spyLimiter struct {
+	mu       sync.Mutex
+	waits    int
+	observed []*provider.RateLimit
+}
+
+func (l *spyLimiter) Wait(ctx context.Context) error {
+	l.mu.Lock()
+	l.waits++
+	l.mu.Unlock()
+	return ctx.Err()
+}
+
+func (l *spyLimiter) Observe(rl *provider.RateLimit) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.observed = append(l.observed, rl)
+}
+
+func (l *spyLimiter) snapshot() (waits int, observed []*provider.RateLimit) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.waits, append([]*provider.RateLimit(nil), l.observed...)
+}
+
+// TestRunCase_RateLimitedAttemptRetriedNotRecorded guards runOne's contract
+// that a throttled attempt never becomes a Sample: only the eventual
+// success does, carrying its own TTFT rather than the throttled attempt's.
+func TestRunCase_RateLimitedAttemptRetriedNotRecorded(t *testing.T) {
+	p := &rlScriptProvider{script: []rlScriptEntry{
+		{err: rateLimitedErr()},
+		{completion: provider.Completion{Text: "ok", TTFT: 42 * time.Millisecond}},
+	}}
+	r := &Runner{Provider: p, FixedN: 1}
+	c := basicCase(Assertion{Label: "x", Polarity: Measure, Grader: containsGrader("o")})
+
+	results := r.Run(context.Background(), []Case{c})
+	res := results[0]
+	if len(res.Samples) != 1 {
+		t.Fatalf("want 1 sample, got %d", len(res.Samples))
+	}
+	if res.Samples[0].Err != nil {
+		t.Fatalf("want the successful attempt's sample, got error %v", res.Samples[0].Err)
+	}
+	if res.Samples[0].TTFT != 42*time.Millisecond {
+		t.Errorf("want TTFT = 42ms from the successful attempt, got %v", res.Samples[0].TTFT)
+	}
+	if got := p.callCount(); got != 2 {
+		t.Errorf("want Complete called twice (throttled then success), got %d", got)
+	}
+}
+
+// TestRunCase_RateLimitRetriesBounded guards maxRateLimitAttempts: a
+// provider that is always rate-limited must not retry forever, and the
+// eventual give-up records exactly one error sample.
+func TestRunCase_RateLimitRetriesBounded(t *testing.T) {
+	p := &rlScriptProvider{script: []rlScriptEntry{{err: rateLimitedErr()}}}
+	r := &Runner{Provider: p, FixedN: 1}
+	c := basicCase(Assertion{Label: "x", Polarity: Measure, Grader: containsGrader("o")})
+
+	results := r.Run(context.Background(), []Case{c})
+	res := results[0]
+	if len(res.Samples) != 1 || res.Samples[0].Err == nil {
+		t.Fatalf("want exactly 1 error sample, got %+v", res.Samples)
+	}
+	if got := p.callCount(); got != maxRateLimitAttempts {
+		t.Errorf("want Complete called exactly %d times, got %d", maxRateLimitAttempts, got)
+	}
+}
+
+// TestRunCase_NonRateLimitErrorNotRetried guards that the retry loop is
+// specific to ErrRateLimited: any other error records immediately, with no
+// wasted retry against a call that isn't going to succeed on its own.
+func TestRunCase_NonRateLimitErrorNotRetried(t *testing.T) {
+	p := &rlScriptProvider{script: []rlScriptEntry{{err: errBoom}}}
+	r := &Runner{Provider: p, FixedN: 1}
+	c := basicCase(Assertion{Label: "x", Polarity: Measure, Grader: containsGrader("o")})
+
+	results := r.Run(context.Background(), []Case{c})
+	res := results[0]
+	if len(res.Samples) != 1 || res.Samples[0].Err == nil {
+		t.Fatalf("want exactly 1 error sample, got %+v", res.Samples)
+	}
+	if got := p.callCount(); got != 1 {
+		t.Errorf("want Complete called exactly once (no retry on a non-rate-limit error), got %d", got)
 	}
 }
 

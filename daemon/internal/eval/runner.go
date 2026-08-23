@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -10,10 +11,11 @@ import (
 )
 
 // Limiter paces provider calls. Wait blocks until the caller is allowed to
-// make its next call, or ctx is done. It's a seam so Part 4 can add
-// per-provider token buckets without touching Runner.
+// make its next call, or ctx is done. Observe feeds back what a completed
+// call learned about the remote budget (nil when the call carried nothing).
 type Limiter interface {
 	Wait(ctx context.Context) error
+	Observe(rl *provider.RateLimit)
 }
 
 // NoopLimiter never waits. It's the Runner default and what the stub
@@ -22,11 +24,12 @@ type Limiter interface {
 type NoopLimiter struct{}
 
 func (NoopLimiter) Wait(ctx context.Context) error { return ctx.Err() }
+func (NoopLimiter) Observe(*provider.RateLimit)    {}
 
 // RateLimiter paces calls to at most N per minute via a simple leaky-bucket:
 // each Wait call is allowed to return only `interval` after the previous one
-// did. It does not itself cap concurrency — see Runner's doc comment on
-// worker-pool concurrency, which is the knob for that.
+// did. Used for the judge model's own independent per-call cap, which is a
+// real requests/minute limit unlike groq's (see AdaptiveLimiter).
 type RateLimiter struct {
 	mu       sync.Mutex
 	interval time.Duration
@@ -41,25 +44,6 @@ func NewRateLimiter(perMinute int) *RateLimiter {
 		perMinute = 1
 	}
 	return &RateLimiter{interval: time.Minute / time.Duration(perMinute)}
-}
-
-// groqPerMinute is kept a hair under groq's advertised 30/min free tier —
-// field data showed 19% 429s even before the eval harness's own concurrent
-// worker pool adds load.
-const groqPerMinute = 90
-
-// LimiterForBrand returns the rate limiter an eval run should use for calls
-// to brand: groq is capped at groqPerMinute/min; codestral/anthropic and
-// unknown brands get NoopLimiter (concurrency-bounded by the Runner's worker
-// pool instead — an unrecognized brand will already have failed to resolve
-// into a provider before a limiter matters).
-func LimiterForBrand(brand string) Limiter {
-	switch brand {
-	case "groq":
-		return NewRateLimiter(groqPerMinute)
-	default:
-		return NoopLimiter{}
-	}
 }
 
 func (l *RateLimiter) Wait(ctx context.Context) error {
@@ -89,11 +73,153 @@ func (l *RateLimiter) Wait(ctx context.Context) error {
 	}
 }
 
+// Observe is a no-op: RateLimiter paces by a fixed per-minute rate and has
+// no budget to learn from response headers.
+func (l *RateLimiter) Observe(*provider.RateLimit) {}
+
+// AdaptiveLimiter paces calls against a remote token bucket learned from
+// response headers. Groq bills max_tokens against a per-minute token budget,
+// so a fixed requests/minute rate is blind to per-call cost.
+type AdaptiveLimiter struct {
+	mu sync.Mutex
+
+	started    bool
+	limit      float64
+	remaining  float64
+	refillRate float64 // tokens/sec
+	cost       float64 // conservative (running-max) tokens per call
+	lastUpdate time.Time
+
+	retryAfter time.Time // absolute deadline from the most recent 429
+}
+
+// costSafetyFactor inflates the learned cost before Wait reserves it. The
+// bucket isn't exclusively ours, so the projected remaining is always
+// somewhat stale.
+const costSafetyFactor = 1.5
+
+// NewAdaptiveLimiter returns an AdaptiveLimiter with no learned budget yet;
+// it will not throttle until Observe sees a response carrying rate-limit
+// headers.
+func NewAdaptiveLimiter() *AdaptiveLimiter {
+	return &AdaptiveLimiter{}
+}
+
+// LimiterForBrand returns the rate limiter an eval run should use for calls
+// to brand: groq gets the adaptive token-bucket AdaptiveLimiter;
+// codestral/anthropic and unknown brands get NoopLimiter
+// (concurrency-bounded by the Runner's worker pool instead — an
+// unrecognized brand will already have failed to resolve into a provider
+// before a limiter matters).
+func LimiterForBrand(brand string) Limiter {
+	switch brand {
+	case "groq":
+		return NewAdaptiveLimiter()
+	default:
+		return NoopLimiter{}
+	}
+}
+
+// Wait blocks until the projected token budget can cover one more call at
+// the current cost estimate, or until an observed RetryAfter deadline has
+// passed, whichever is later; it reserves the estimated cost against the
+// projected remaining budget before returning so back-to-back calls pace
+// correctly between header refreshes.
+func (l *AdaptiveLimiter) Wait(ctx context.Context) error {
+	l.mu.Lock()
+	now := time.Now()
+
+	var wait time.Duration
+	if l.retryAfter.After(now) {
+		wait = l.retryAfter.Sub(now)
+	}
+
+	if l.started && l.refillRate > 0 {
+		if elapsed := now.Sub(l.lastUpdate).Seconds(); elapsed > 0 {
+			l.remaining = min(l.remaining+elapsed*l.refillRate, l.limit)
+		}
+		reserve := l.cost * costSafetyFactor
+		if deficit := reserve - l.remaining; deficit > 0 {
+			if refillWait := time.Duration(deficit / l.refillRate * float64(time.Second)); refillWait > wait {
+				wait = refillWait
+			}
+		}
+		l.remaining -= reserve
+		l.lastUpdate = now
+	}
+	l.mu.Unlock()
+
+	if wait <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Observe learns from one completed call. RetryAfter (a 429) raises the
+// floor Wait must block until. A valid LimitTokens/ResetTokens pair derives
+// the refill rate; the drop in RemainingTokens since the last observation,
+// corrected for refill that happened in between, updates the running-max
+// cost estimate. rl == nil (no headers on this call) is a no-op.
+func (l *AdaptiveLimiter) Observe(rl *provider.RateLimit) {
+	if rl == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	if rl.RetryAfter > 0 {
+		if until := now.Add(rl.RetryAfter); until.After(l.retryAfter) {
+			l.retryAfter = until
+		}
+		// A 429 means the bucket is exhausted now, not whatever stale
+		// positive value the last successful observation left behind.
+		l.remaining = 0
+		l.lastUpdate = now
+	}
+
+	if rl.LimitTokens <= 0 || rl.ResetTokens <= 0 || rl.RemainingTokens < 0 {
+		return
+	}
+	limit := float64(rl.LimitTokens)
+	remaining := float64(rl.RemainingTokens)
+	if refillNeeded := limit - remaining; refillNeeded > 0 {
+		if rate := refillNeeded / rl.ResetTokens.Seconds(); rate > 0 {
+			l.refillRate = rate
+		}
+	}
+	l.limit = limit
+
+	if l.started && l.refillRate > 0 {
+		if elapsed := now.Sub(l.lastUpdate).Seconds(); elapsed > 0 {
+			projected := l.remaining + elapsed*l.refillRate
+			if cost := projected - remaining; cost > l.cost {
+				l.cost = cost
+			}
+		}
+	}
+
+	l.remaining = remaining
+	l.lastUpdate = now
+	l.started = true
+}
+
 // defaultMinRuns, defaultMaxRuns: adaptive sampling runs 3, escalates to 10
 // on any disagreement (see Runner.FixedN to opt out).
 const (
 	defaultMinRuns = 3
 	defaultMaxRuns = 10
+
+	// maxRateLimitAttempts bounds how many times runOne retries a single
+	// sample after a 429 before giving up and recording the error.
+	maxRateLimitAttempts = 4
 
 	// defaultConcurrency bounds how many Cases run at once; runs within one
 	// case stay sequential. Only sensible without a shared Limiter — a cell
@@ -110,7 +236,7 @@ type Runner struct {
 	FixedN   int // 0 = adaptive; otherwise exactly N, hard-capped at MaxRuns
 
 	// Concurrency overrides defaultConcurrency (0 = default). With a shared
-	// Limiter (e.g. groq's RateLimiter) extra workers only add queuing
+	// Limiter (e.g. groq's AdaptiveLimiter) extra workers only add queuing
 	// latency, not throughput, and since Progress reports in case order,
 	// spreading limited slots across concurrent cases delays the first
 	// result for no gain — rate-limited cells should pass Concurrency: 1.
@@ -207,21 +333,10 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 	}
 	close(jobs)
 
-	// Progress reporting turns the pool's out-of-order completions back into
-	// in-order emissions: `done` marks which indices have finished, `cursor`
-	// is the next index not yet reported. A worker that finishes index 7
-	// while 5 is still running reports nothing; whoever finishes 5 then
-	// drains 5, 6, 7 in one go.
-	//
-	// The Progress callback is invoked WHILE HOLDING progressMu, and that is
-	// load-bearing rather than lazy. Handing out disjoint [start,end) spans
-	// under the lock and emitting outside it looks safe and is not: a worker
-	// holding span [8,12) can finish its writes before the worker holding
-	// [5,8) does, so the symbols still land out of order. Serializing the
-	// emission itself is what actually orders the output. progressMu is
-	// unexported and local to this call, so a callback cannot reach it — the
-	// only way to deadlock here is a callback that re-enters this same Run,
-	// which is why the field's doc says to keep it to formatting and a write.
+	// The pool's out-of-order completions are re-emitted in index order:
+	// `done` marks finished indices, `cursor` is the next unreported one.
+	// Progress is called while holding progressMu, which is what orders the
+	// output; emitting outside the lock reorders it.
 	var (
 		progressMu sync.Mutex
 		done       []bool
@@ -274,11 +389,27 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 	escalated := false
 
 	runOne := func() {
-		if err := limiter.Wait(ctx); err != nil {
-			samples = append(samples, Sample{Err: err})
-			return
+		var (
+			completion provider.Completion
+			err        error
+		)
+		// A throttled attempt is retried rather than recorded, so latency
+		// only ever reflects clean attempts. Bounded so a persistent outage
+		// still surfaces as an error sample instead of looping forever.
+		for range maxRateLimitAttempts {
+			if err = limiter.Wait(ctx); err != nil {
+				break
+			}
+			completion, err = r.Provider.Complete(ctx, provider.Request{Req: c.Req})
+			limiter.Observe(completion.RateLimit)
+			if err == nil {
+				break
+			}
+			var perr *provider.Error
+			if !errors.As(err, &perr) || perr.Kind != provider.ErrRateLimited {
+				break
+			}
 		}
-		completion, err := r.Provider.Complete(ctx, provider.Request{Req: c.Req})
 		if err != nil {
 			samples = append(samples, Sample{Err: err})
 			return

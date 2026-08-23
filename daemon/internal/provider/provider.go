@@ -40,6 +40,16 @@ type Completion struct {
 	CachedTokens int
 	HTTPStatus   int
 	StopReason   string
+	RateLimit    *RateLimit // nil if the endpoint sent no rate-limit headers
+}
+
+// RateLimit reports a provider's token-bucket rate-limit state as observed
+// from response headers, with no pacing policy applied by this package.
+type RateLimit struct {
+	LimitTokens     int
+	RemainingTokens int
+	ResetTokens     time.Duration
+	RetryAfter      time.Duration
 }
 
 // Provider is the only seam the rest of the daemon programs against. A
@@ -74,6 +84,10 @@ func RenderChatPrompt(pl prompt.ChatPayload) string {
 // codestral); a mismatch is a config/wiring error, reported clearly rather
 // than panicking.
 func NewFromProfile(r config.ResolvedProfile, apiKey string, maxTokens int, p prompt.Prompt) (Provider, error) {
+	if r.MaxTokens != 0 {
+		maxTokens = r.MaxTokens
+	}
+
 	switch r.Adapter {
 	case "openai":
 		cp, ok := p.(prompt.ChatPrompt)

@@ -56,3 +56,49 @@ func TestNewFromProfile_UnknownAdapter(t *testing.T) {
 		t.Fatal("NewFromProfile() err = nil, want non-nil for an unknown adapter")
 	}
 }
+
+// TestNewFromProfile_MaxTokensOverride asserts a non-zero ResolvedProfile.MaxTokens
+// (e.g. the groq preset's gpt-oss-20b override) wins over the caller's global
+// maxTokens param — see the doc comment on NewFromProfile.
+func TestNewFromProfile_MaxTokensOverride(t *testing.T) {
+	chatOnly, err := prompt.ByName("chat-append")
+	if err != nil {
+		t.Fatalf("prompt.ByName(chat-append): %v", err)
+	}
+
+	r := config.ResolvedProfile{Adapter: "openai", Model: "openai/gpt-oss-20b", MaxTokens: 150}
+	p, err := NewFromProfile(r, "test-key", 48, chatOnly)
+	if err != nil {
+		t.Fatalf("NewFromProfile() err = %v, want nil", err)
+	}
+	c, ok := p.(*openAIClient)
+	if !ok {
+		t.Fatalf("NewFromProfile() returned %T, want *openAIClient", p)
+	}
+	if c.maxTokens != 150 {
+		t.Errorf("maxTokens = %v, want override 150, not the caller's 48", c.maxTokens)
+	}
+}
+
+// TestNewFromProfile_MaxTokensFallsBackToParam asserts a zero
+// ResolvedProfile.MaxTokens (the common case) leaves the caller's own
+// maxTokens param untouched.
+func TestNewFromProfile_MaxTokensFallsBackToParam(t *testing.T) {
+	chatOnly, err := prompt.ByName("chat-append")
+	if err != nil {
+		t.Fatalf("prompt.ByName(chat-append): %v", err)
+	}
+
+	r := config.ResolvedProfile{Adapter: "openai", Model: "codestral-latest"}
+	p, err := NewFromProfile(r, "test-key", 48, chatOnly)
+	if err != nil {
+		t.Fatalf("NewFromProfile() err = %v, want nil", err)
+	}
+	c, ok := p.(*openAIClient)
+	if !ok {
+		t.Fatalf("NewFromProfile() returned %T, want *openAIClient", p)
+	}
+	if c.maxTokens != 48 {
+		t.Errorf("maxTokens = %v, want the caller's param 48", c.maxTokens)
+	}
+}
