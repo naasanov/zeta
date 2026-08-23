@@ -8,9 +8,9 @@ import (
 func TestByNameAndAll(t *testing.T) {
 	wantNames := []string{
 		"chat-append",
+		"cwd-grouped",
 		"fim-transcript-marker",
 		"cwd-filtered",
-		"cwd-grouped",
 		"fim-transcript-marker-10",
 		"fim-transcript-marker-20",
 		"fim-guard-comment",
@@ -53,7 +53,7 @@ func TestShippedFor(t *testing.T) {
 	cases := map[string]string{
 		"openai":    "chat-append",
 		"anthropic": "chat-append",
-		"codestral": "fim-transcript-marker",
+		"codestral": "cwd-grouped",
 	}
 	for adapter, want := range cases {
 		if got := ShippedFor(adapter).Name(); got != want {

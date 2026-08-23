@@ -43,18 +43,18 @@ func TestGoldenRenderings(t *testing.T) {
 			wantMarkerPrefix: "# cwd: /Users/x/project\n" +
 				"# files: README.md src tests\n" +
 				"# git: branch main (dirty)\n" +
-				"# last command failed (exit 1)\n" +
 				"$ git add .\n" +
 				"$ git commit -m \"wip\"\n" +
 				"$ git status\n" +
+				"# last command failed (exit 1)\n" +
 				"$ git com",
 			wantNoMarkerPrefix: "# cwd: /Users/x/project\n" +
 				"# files: README.md src tests\n" +
 				"# git: branch main (dirty)\n" +
-				"# last command failed (exit 1)\n" +
 				"git add .\n" +
 				"git commit -m \"wip\"\n" +
 				"git status\n" +
+				"# last command failed (exit 1)\n" +
 				"git com",
 			wantExitAlwaysPfx: "# cwd: /Users/x/project\n" +
 				"# files: README.md src tests\n" +

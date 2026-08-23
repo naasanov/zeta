@@ -66,9 +66,9 @@ func mustParse(name, text string) *template.Template {
 // defaults, not at the end.
 var all = []Prompt{
 	chatAppend,
+	cwdGrouped,
 	fimTranscriptMarker,
 	cwdFiltered,
-	cwdGrouped,
 	fimTranscriptMarker10,
 	fimTranscriptMarker20,
 	fimGuardComment,
@@ -109,7 +109,7 @@ func ShippedFor(adapter string) Prompt {
 	case "openai", "anthropic":
 		return chatAppend
 	case "codestral":
-		return fimTranscriptMarker
+		return cwdGrouped
 	default:
 		panic(fmt.Sprintf("prompt: ShippedFor: unknown adapter %q", adapter))
 	}
@@ -232,9 +232,9 @@ var fimTranscriptMarkerTmpl = mustParse("fim-transcript-marker", `
 {{end}}
 {{- if .GitBranch}}# git: branch {{.GitBranch}}{{if .GitDirty}} (dirty){{end}}
 {{end}}
-{{- if .LastExit}}# last command failed (exit {{.LastExit}})
-{{end}}
 {{- range .History}}$ {{.}}
+{{end}}
+{{- if .LastExit}}# last command failed (exit {{.LastExit}})
 {{end}}
 {{- print "$ "}}{{.Buf}}`)
 
@@ -322,9 +322,9 @@ var fimNoMarkerTmpl = mustParse("fim-no-marker", `
 {{end}}
 {{- if .GitBranch}}# git: branch {{.GitBranch}}{{if .GitDirty}} (dirty){{end}}
 {{end}}
-{{- if .LastExit}}# last command failed (exit {{.LastExit}})
-{{end}}
 {{- range .History}}{{.}}
+{{end}}
+{{- if .LastExit}}# last command failed (exit {{.LastExit}})
 {{end}}
 {{- print ""}}{{.Buf}}`)
 
@@ -555,8 +555,6 @@ var cwdGroupedFIMTmpl = mustParse("cwd-grouped/fim", `
 {{end}}
 {{- if .GitBranch}}# git: branch {{.GitBranch}}{{if .GitDirty}} (dirty){{end}}
 {{end}}
-{{- if .LastExit}}# last command failed (exit {{.LastExit}})
-{{end}}
 {{- if .Other}}# earlier commands:
 {{range .Other}}$ {{.Cmd}}
 {{end}}
@@ -565,6 +563,8 @@ var cwdGroupedFIMTmpl = mustParse("cwd-grouped/fim", `
 {{range .Same}}$ {{.Cmd}}
 {{end}}
 {{- end}}
+{{- if .LastExit}}# last command failed (exit {{.LastExit}})
+{{end}}
 {{- print "$ "}}{{.Buf}}`)
 
 // RenderFIM passes through to fim-transcript-marker, byte-identically, when
