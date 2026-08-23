@@ -13,9 +13,9 @@ import (
 // (C3, E3, F2).
 var wantIDs = []string{
 	"A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9",
-	"B1", "B2", "B3", "B3b", "B4", "B5", "B6", "B6b", "B7", "B7b", "B8", "B8b",
-	"C1", "C2", "C3",
-	"D1", "D2", "D3", "D4",
+	"B1", "B2", "B3", "B3b", "B4", "B5", "B6", "B6b", "B7", "B7b", "B8", "B8b", "B9",
+	"C1", "C1b", "C2", "C3",
+	"D1", "D2", "D3", "D4", "D5", "D6",
 	"E1", "E2", "E3", "E4", "E5", "E6", "E8", "E9", "E10", "E11", "E12", "E13", "E14",
 	"F1", "F2",
 }
@@ -42,7 +42,7 @@ func TestCases_JudgedIDsUseJudgeGrader(t *testing.T) {
 	// actual judge-graded cases can't silently drift apart. A judged case
 	// may also pair the judge assertion with deterministic ones (E11 keeps
 	// its deterministic "stale-history-wins" MustNot alongside the judged leg).
-	judged := map[string]bool{"C3": true, "E3": true, "E10": true, "E11": true, "E14": true, "F2": true}
+	judged := map[string]bool{"C1b": true, "C3": true, "E3": true, "E10": true, "E11": true, "E14": true, "F2": true}
 	for _, c := range Cases() {
 		hasJudgeGrader := false
 		for _, a := range c.Asserts {
@@ -182,8 +182,8 @@ func TestCases_SelectableByCategoryAndGlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Select(B*): %v", err)
 	}
-	if len(byGlob) != 12 {
-		t.Errorf("Select(B*) matched %d cases, want 12 (B1..B8 plus the four paired \"b\" cases)", len(byGlob))
+	if len(byGlob) != 13 {
+		t.Errorf("Select(B*) matched %d cases, want 13 (B1..B9 plus the four paired \"b\" cases)", len(byGlob))
 	}
 
 	// "B6" must select the bare case ALONE — a selector that silently swept

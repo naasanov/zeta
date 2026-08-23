@@ -190,6 +190,13 @@ func TestContainsTokenNotInContext(t *testing.T) {
 		{"known-from-branch token does not fire", in, "main", false},
 		{"pure numbers do not fire", protocol.Request{}, "42", false},
 	})
+
+	repoIn := protocol.Request{History: []string{"mkdir zeta", "git clone https://github.com/naasanov/dotfiles.git"}}
+	runGrader(t, g, []gcase{
+		{"known host+org with a .git-suffixed known leaf does not fire", repoIn, " https://github.com/naasanov/zeta.git", false},
+		{"same, scp-style", repoIn, " git@github.com:naasanov/zeta.git", false},
+		{"known host but genuinely invented org/leaf still fires", repoIn, " https://github.com/otheruser/randomrepo.git", true},
+	})
 }
 
 func TestContainsURL(t *testing.T) {
@@ -221,6 +228,11 @@ func TestContainsHostNotInHistory(t *testing.T) {
 		// A clock time must not read as host 12 on port 30.
 		{"pure-number token is not a host", protocol.Request{}, ` --since "12:30"`, false},
 		{"header value is not a host", protocol.Request{}, ` -H "Content-Type: application/json"`, false},
+		// A git remote's ".git" leaf must not read as a second, unknown host
+		// once the URL's real host is already known.
+		{"known host, .git path leaf is not a second host", protocol.Request{History: []string{"git clone https://github.com/naasanov/dotfiles.git"}}, " https://github.com/naasanov/zeta.git", false},
+		{"same, scp-style", protocol.Request{History: []string{"git clone https://github.com/naasanov/dotfiles.git"}}, " git@github.com:naasanov/zeta.git", false},
+		{"unknown host is still caught even with a .git leaf", protocol.Request{}, " https://gitlab.example.com/naasanov/zeta.git", true},
 	})
 }
 
@@ -370,6 +382,39 @@ func TestEchoesOtherCwdCommand(t *testing.T) {
 
 	runGrader(t, g, []gcase{
 		{"inert on legacy case with no HistoryCwds at all", protocol.Request{Cwd: "/x/gotool", History: []string{"npm run build"}}, "npm run build", false},
+	})
+}
+
+func TestContainsOtherCwdOnlyToken(t *testing.T) {
+	g := ContainsOtherCwdOnlyToken()
+	in := protocol.Request{Cwd: "/x/aws-services", GitBranch: "VAPI-3675"}
+	in.SetHistory(
+		protocol.HistoryIn("/x/billing-service", "git switch -c billing-prod-VAPI-3673", "git push"),
+		protocol.HistoryIn("/x/aws-services", "git switch VAPI-3675", "terraform plan"),
+	)
+	runGrader(t, g, []gcase{
+		{"foreign-cwd-only branch name fires", in, "git checkout billing-prod-VAPI-3673", true},
+		{"same-cwd token does not fire", in, "terraform apply", false},
+		{"current branch from GitBranch does not fire", in, "git push origin VAPI-3675", false},
+		{"common command words do not fire", in, "git switch VAPI-3675", false},
+		{"no match at all", in, "ls -la", false},
+		{"empty out never fires", in, "", false},
+	})
+
+	noKnownOtherCwd := protocol.Request{Cwd: "/x/aws-services"}
+	noKnownOtherCwd.SetHistory(protocol.HistoryUnknown("git switch -c billing-prod-VAPI-3673"))
+	runGrader(t, g, []gcase{
+		{"inert with only unknown-cwd entries", noKnownOtherCwd, "git checkout billing-prod-VAPI-3673", false},
+	})
+
+	sameCwdOnly := protocol.Request{Cwd: "/x/aws-services"}
+	sameCwdOnly.SetHistory(protocol.HistoryIn("/x/aws-services", "git switch -c billing-prod-VAPI-3673"))
+	runGrader(t, g, []gcase{
+		{"inert when every known cwd matches in.Cwd", sameCwdOnly, "git checkout billing-prod-VAPI-3673", false},
+	})
+
+	runGrader(t, g, []gcase{
+		{"inert on legacy case with no HistoryCwds at all", protocol.Request{Cwd: "/x/aws-services", History: []string{"git switch -c billing-prod-VAPI-3673"}}, "git checkout billing-prod-VAPI-3673", false},
 	})
 }
 

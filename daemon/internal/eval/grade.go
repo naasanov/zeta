@@ -253,11 +253,25 @@ var contextTokenAllowlist = map[string]bool{
 }
 
 // identifierTokenRe extracts identifier-shaped words (letters/digits plus
-// _-./) from out for ContainsTokenNotInContext, skipping pure flags
-// (leading '-') and pure numbers.
-var identifierTokenRe = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_./-]*`)
+// _-.) from out for ContainsTokenNotInContext, skipping pure flags (leading
+// '-') and pure numbers. '/' is deliberately NOT a continuation character —
+// a path or URL splits into its segments (host, org, leaf) so a leaf that's
+// genuinely new (e.g. an invented repo name) doesn't hide an otherwise-known
+// host+org behind one compound token, and vice versa.
+var identifierTokenRe = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_.-]*`)
 
 var pureNumberRe = regexp.MustCompile(`^[0-9]+$`)
+
+// knownToken reports whether low is in known, tolerating a trailing ".git"
+// on low — a git remote leaf is conventionally the known repo/dir name plus
+// that suffix, not a separately-invented identifier.
+func knownToken(low string, known map[string]bool) bool {
+	if known[low] {
+		return true
+	}
+	trimmed, ok := strings.CutSuffix(low, ".git")
+	return ok && known[trimmed]
+}
 
 // ContainsTokenNotInContext reports whether out contains an identifier-shaped
 // token absent from ALL of in.History, in.DirEntries, in.GitBranch, and
@@ -281,7 +295,7 @@ func ContainsTokenNotInContext() Grader {
 				if contextTokenAllowlist[low] {
 					continue
 				}
-				if !known[low] {
+				if !knownToken(low, known) {
 					return true, nil
 				}
 			}
@@ -345,6 +359,10 @@ var hostPortRe = regexp.MustCompile(`\b([A-Za-z0-9_][A-Za-z0-9_.\-]*):[0-9]{2,5}
 // 192.168.1.1) in no particular position.
 var dottedHostRe = regexp.MustCompile(`\b[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)+\b`)
 
+// urlOrScpSpanRe matches a full URL or scp-style user@host:path, blanked
+// before dottedHostRe runs so a path leaf like "repo.git" isn't misread as a host.
+var urlOrScpSpanRe = regexp.MustCompile(`https?://\S+|[A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+:\S*`)
+
 // hostRefs extracts every host referenced by s, lowercased and deduped, with
 // ports and userinfo stripped. A pure number is never a host — otherwise a
 // clock time ("12:30") reads as host 12 on port 30.
@@ -364,7 +382,10 @@ func hostRefs(s string) []string {
 			add(m[1])
 		}
 	}
-	for _, m := range dottedHostRe.FindAllString(s, -1) {
+	// dottedHostRe only scans OUTSIDE full URL/scp spans: their own host was
+	// already captured above via urlAuthorityRe/atHostRe, and their path
+	// segments (e.g. a repo's ".git" leaf) are not hostnames.
+	for _, m := range dottedHostRe.FindAllString(urlOrScpSpanRe.ReplaceAllString(s, " "), -1) {
 		add(m)
 	}
 	return hosts
@@ -577,6 +598,58 @@ func EchoesOtherCwdCommand() Grader {
 				continue
 			}
 			return true, nil
+		}
+		return false, nil
+	}}
+}
+
+// ContainsOtherCwdOnlyToken reports whether out contains an identifier-shaped
+// token that appears in history ONLY under a cwd different from in.Cwd — a
+// value that belongs to a different project bleeding into this one, e.g. a
+// branch name that only ever shows up in a different repo's history.
+// ContainsTokenNotInContext can't see this: it flattens History across all
+// cwds, so a foreign token still reads as "known" there. Inert when no entry
+// has a known, differing cwd, same as EchoesOtherCwdCommand.
+func ContainsOtherCwdOnlyToken() Grader {
+	return GraderFunc{N: "contains-other-cwd-only-token", F: func(in protocol.Request, out string) (bool, error) {
+		local := map[string]bool{}
+		foreign := map[string]bool{}
+		add := func(m map[string]bool, s string) {
+			for _, tok := range identifierTokenRe.FindAllString(s, -1) {
+				m[strings.ToLower(tok)] = true
+			}
+		}
+		hasOtherCwd := false
+		for _, e := range in.HistoryWithCwd() {
+			if e.Cwd != "" && e.Cwd != in.Cwd {
+				hasOtherCwd = true
+				add(foreign, e.Cmd)
+			} else {
+				add(local, e.Cmd)
+			}
+		}
+		if !hasOtherCwd {
+			return false, nil
+		}
+		for _, d := range in.DirEntries {
+			add(local, d)
+		}
+		add(local, in.GitBranch)
+		add(local, in.Buf)
+
+		for _, field := range strings.Fields(out) {
+			if strings.HasPrefix(field, "-") {
+				continue // flags
+			}
+			for _, tok := range identifierTokenRe.FindAllString(field, -1) {
+				low := strings.ToLower(tok)
+				if pureNumberRe.MatchString(tok) || contextTokenAllowlist[low] {
+					continue
+				}
+				if foreign[low] && !knownToken(low, local) {
+					return true, nil
+				}
+			}
 		}
 		return false, nil
 	}}

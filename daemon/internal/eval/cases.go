@@ -250,6 +250,7 @@ func fabricationCases() []Case {
 			},
 		},
 		b8bCase(),
+		b9Case(),
 	}
 }
 
@@ -376,12 +377,47 @@ func b8bCase() Case {
 	}
 }
 
+// b9Case: a real branch name exists in history, but only under a
+// DIFFERENT repo's Cwd -- ContainsTokenNotInContext can't see this, since
+// it flattens History across all cwds and reads the foreign branch as
+// known vocabulary. ContainsOtherCwdOnlyToken is scoped to Cwd instead.
+func b9Case() Case {
+	req := protocol.Request{
+		Kind:      protocol.KindNextCommand,
+		Cwd:       "/Users/dev/projects/infra",
+		GitBranch: "infra-fix",
+	}
+	req.SetHistory(
+		protocol.HistoryIn("/Users/dev/projects/billing-service",
+			"git switch -c billing-fix",
+			"git add .",
+			`git commit -m "billing 400 fix"`,
+			"git push",
+		),
+		protocol.HistoryIn("/Users/dev/projects/infra",
+			"git switch infra-fix",
+			"terraform plan",
+			"git add .",
+			`git commit -m "billing config"`,
+			"git push",
+		),
+	)
+	return Case{
+		ID:       "B9",
+		Category: "fabrication",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "names-branch-from-other-repo", Polarity: MustNot, Threshold: 0.20, Grader: ContainsOtherCwdOnlyToken()},
+		},
+	}
+}
+
 // ---- C. Nonsense incrementing ---------------------------------------------
 //
 // C1/C2 are narrow deterministic graders (normalize + diff, flag a
-// numeric-only delta). C3 is the general case they can't catch — a
-// mechanically-plausible next command that isn't actually useful — so it's
-// judged instead.
+// numeric-only delta). C3 and C1b are the general case they can't catch —
+// a mechanically-plausible next command that isn't actually useful, e.g. a
+// bump wrapped in extra flags — so they're judged instead.
 
 // c3Rubric names the specific failure mode (mechanical version-bump) as the
 // fail example rather than leaving "plausible" as a vague, judge-noising
@@ -399,6 +435,23 @@ only a mechanical version bump available as a pattern-continuation, abstaining
 is the correct call, not a missed one. You are looking only at this
 question, not at syntax or formatting.`
 
+// c1bRubric mirrors c3Rubric for C1's own history/shape, explicitly naming
+// the wrapped-in-extra-flags case as still mechanical — the shape
+// EqualsHistoryModuloNumber can't see.
+const c1bRubric = `The context is a shell history ending in a git tag-and-push sequence. You
+are shown a suggested next command. Answer: is this suggestion a plausible
+next command a developer would actually run in this situation (e.g.
+verifying the release, checking CI, opening a PR, bumping a changelog),
+rather than mechanical pattern-continuation with no real justification (e.g.
+bumping the version number again to tag ANOTHER release immediately, or
+repeating the same tag/push with a trivial numeric change — even if wrapped
+in extra flags or a commit-style message)? Pass if it is a plausible,
+purposeful next step; fail if it is mechanical continuation of the
+version-bump pattern for its own sake. An EMPTY suggestion PASSES: with only
+a mechanical version bump available as a pattern-continuation, abstaining is
+the correct call, not a missed one. You are looking only at this question,
+not at syntax or formatting.`
+
 func incrementingCases() []Case {
 	return []Case{
 		{
@@ -410,6 +463,18 @@ func incrementingCases() []Case {
 			},
 			Asserts: []Assertion{
 				{Label: "mechanical-version-bump", Polarity: MustNot, Threshold: 0.20, Grader: EqualsHistoryModuloNumber()},
+			},
+		},
+		{
+			ID:       "C1b",
+			Category: "incrementing",
+			Req: protocol.Request{
+				Kind:    protocol.KindNextCommand,
+				History: []string{"git tag v1.1.0", "git push --tags"},
+			},
+			Asserts: []Assertion{
+				{Label: "plausible-next-command", Polarity: Must, Threshold: 0.70,
+					Grader: defaultJudgeGrader("C1b", "plausible-next-command", c1bRubric)},
 			},
 		},
 		{
@@ -438,7 +503,12 @@ func incrementingCases() []Case {
 	}
 }
 
-// ---- D. Useless / looping — measured, not asserted -----------------------
+// ---- D. Useless / looping --------------------------------------------------
+//
+// D1/D3/D4 measure without asserting: suppression risks eating a
+// legitimately-repeated command, so these track the rate rather than fail on
+// it. D5/D6 assert MustNot on the two narrower shapes where a repeat has no
+// possible justification (D2 stays the "correct repeat" control either way).
 
 func loopingCases() []Case {
 	return []Case{
@@ -492,6 +562,35 @@ func loopingCases() []Case {
 			},
 			Asserts: []Assertion{
 				{Label: "in-history", Polarity: Measure, Grader: InHistory()},
+			},
+		},
+		{
+			// D5 asserts the shape D1/D3 only measure: history ends on a
+			// just-finished one-off command, not D2's build-retry shape, so
+			// a verbatim repeat has no justification here.
+			ID:       "D5",
+			Category: "looping",
+			Req: protocol.Request{
+				Kind:    protocol.KindNextCommand,
+				History: []string{"vim main.go", "go install golang.org/x/tools/cmd/goimports@latest"},
+			},
+			Asserts: []Assertion{
+				{Label: "repeats-last-command", Polarity: MustNot, Threshold: 0.20, Grader: EqualsRecentHistory(1)},
+			},
+		},
+		{
+			// D6: history shows a prior switch onto the current branch --
+			// suggesting that switch again is a no-op.
+			ID:       "D6",
+			Category: "looping",
+			Req: protocol.Request{
+				Kind:      protocol.KindNextCommand,
+				GitBranch: "main",
+				History:   []string{"git switch main", "git pull", "npm install"},
+			},
+			Asserts: []Assertion{
+				{Label: "switches-to-current-branch", Polarity: MustNot, Threshold: 0.20,
+					Grader: AllOf("switch-or-checkout-main", ContainsAny("switch", "checkout"), Contains("main"))},
 			},
 		},
 	}
@@ -633,12 +732,13 @@ func contextCases() []Case {
 		e6Case(),
 		{
 			// E8: with no context at all, abstaining (empty output) is
-			// correct. Tracked, not asserted — no established target yet.
+			// correct. Threshold set from a manual review (20260823) where
+			// every sample hallucinated instead of abstaining.
 			ID:       "E8",
 			Category: "context",
 			Req:      protocol.Request{Kind: protocol.KindNextCommand},
 			Asserts: []Assertion{
-				{Label: "abstains", Polarity: Measure, Grader: IsEmpty()},
+				{Label: "abstains", Polarity: Must, Threshold: 0.70, Grader: IsEmpty()},
 			},
 		},
 		e9Case(),
