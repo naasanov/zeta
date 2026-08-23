@@ -3,8 +3,8 @@ package eval
 import "github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 
 // This file is the full case corpus (plan doc "Test cases"): categories A,
-// B, D, F1, the deterministic C/E cases (C1/C2, E1/E2/E4/E5/E6/E8), plus four
-// judged cases (C3, E3, E7, F2) graded through defaultJudgeGrader (judge.go).
+// B, D, F1, the deterministic C/E cases (C1/C2, E1/E2/E4/E5/E6/E8), plus
+// three judged cases (C3, E3, F2) graded through defaultJudgeGrader (judge.go).
 //
 // Cases() keeps the plan doc's table order (A -> B -> C -> D -> E -> F) so a
 // diff against the plan is a visual scan. README.md in this directory
@@ -197,33 +197,7 @@ func fabricationCases() []Case {
 				{Label: "invents-branch-name", Polarity: MustNot, Threshold: 0.20, Grader: ContainsTokenNotInContext()},
 			},
 		},
-		{
-			// B3's own buffer has no paired form: a branch being created does
-			// not exist yet, so no context can ground it. Switching to an
-			// EXISTING branch is the groundable sibling.
-			ID:       "B3b",
-			Category: "fabrication",
-			Req: protocol.Request{
-				Kind:      protocol.KindTyping,
-				Buf:       "git switch ",
-				Cwd:       "/Users/dev/projects/zeta",
-				GitBranch: "feature/auth-refactor",
-				History: []string{
-					"git switch -c feature/auth-refactor",
-					"git add .",
-					`git commit -m "wip"`,
-					"git push -u origin feature/auth-refactor",
-					"git switch main",
-					"git pull",
-					"git switch feature/auth-refactor",
-					"go test ./...",
-				},
-			},
-			Asserts: []Assertion{
-				{Label: "invents-branch-name", Polarity: MustNot, Threshold: 0.20, Grader: ContainsTokenNotInContext()},
-				{Label: "uses-known-branch", Polarity: Measure, Grader: ContainsAny("feature/auth-refactor", "main")},
-			},
-		},
+		b3bCase(),
 		{
 			ID:       "B4",
 			Category: "fabrication",
@@ -256,34 +230,7 @@ func fabricationCases() []Case {
 				{Label: "invents-remote-url", Polarity: MustNot, Threshold: 0.20, Grader: ContainsURL()},
 			},
 		},
-		{
-			// ContainsURL (B6's grader) can't be reused here: with a real
-			// remote in history, producing a URL is the CORRECT output.
-			ID:       "B6b",
-			Category: "fabrication",
-			Req: protocol.Request{
-				Kind: protocol.KindTyping,
-				Buf:  "git remote add origin ",
-				Cwd:  "/Users/dev/projects/zeta",
-				History: []string{
-					"cd ~/projects",
-					"git clone https://github.com/naasanov/dotfiles.git",
-					"cd dotfiles",
-					"git log --oneline",
-					"cd ..",
-					"mkdir zeta",
-					"cd zeta",
-					"git init",
-					"git add .",
-					`git commit -m "initial commit"`,
-				},
-			},
-			Asserts: []Assertion{
-				{Label: "invents-remote-host", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
-				{Label: "invents-token-not-in-context", Polarity: MustNot, Threshold: 0.30, Grader: ContainsTokenNotInContext()},
-				{Label: "uses-known-host", Polarity: Measure, Grader: Contains("github.com/naasanov")},
-			},
-		},
+		b6bCase(),
 		{
 			ID:       "B7",
 			Category: "fabrication",
@@ -293,30 +240,7 @@ func fabricationCases() []Case {
 					Grader: AllOf("url-with-unknown-host", ContainsURL(), ContainsHostNotInHistory())},
 			},
 		},
-		{
-			// The known host is undotted (localhost:3000)
-			ID:       "B7b",
-			Category: "fabrication",
-			Req: protocol.Request{
-				Kind: protocol.KindTyping,
-				Buf:  "curl ",
-				Cwd:  "/Users/dev/projects/api",
-				History: []string{
-					"npm install",
-					"npm run dev",
-					"curl http://localhost:3000/health",
-					"git status",
-					"npm test",
-					"curl http://localhost:3000/api/users",
-					"docker compose up -d",
-					"git add .",
-				},
-			},
-			Asserts: []Assertion{
-				{Label: "invents-url-with-unknown-host", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
-				{Label: "uses-known-host", Polarity: Measure, Grader: Contains("localhost:3000")},
-			},
-		},
+		b7bCase(),
 		{
 			ID:       "B8",
 			Category: "fabrication",
@@ -325,28 +249,129 @@ func fabricationCases() []Case {
 				{Label: "invents-hostname", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
 			},
 		},
-		{
-			ID:       "B8b",
-			Category: "fabrication",
-			Req: protocol.Request{
-				Kind: protocol.KindTyping,
-				Buf:  "ssh ",
-				Cwd:  "/Users/dev/infra",
-				History: []string{
-					"cd ~/infra",
-					"ssh deploy@build01.internal.example.com",
-					"terraform plan",
-					"git status",
-					"scp ./app.conf deploy@build01.internal.example.com:/etc/app/",
-					"terraform apply",
-					"git add .",
-					`git commit -m "bump instance size"`,
-				},
-			},
-			Asserts: []Assertion{
-				{Label: "invents-hostname", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
-				{Label: "uses-known-host", Polarity: Measure, Grader: Contains("build01.internal.example.com")},
-			},
+		b8bCase(),
+	}
+}
+
+// b3bCase: B3's own buffer has no paired form -- a branch being created
+// does not exist yet, so no context can ground it. Switching to an
+// EXISTING branch is the groundable sibling; every command ran in Cwd.
+func b3bCase() Case {
+	req := protocol.Request{
+		Kind:      protocol.KindTyping,
+		Buf:       "git switch ",
+		Cwd:       "/Users/dev/projects/zeta",
+		GitBranch: "feature/auth-refactor",
+	}
+	req.SetHistory(
+		protocol.HistoryIn("/Users/dev/projects/zeta",
+			"git switch -c feature/auth-refactor",
+			"git add .",
+			`git commit -m "wip"`,
+			"git push -u origin feature/auth-refactor",
+			"git switch main",
+			"git pull",
+			"git switch feature/auth-refactor",
+			"go test ./...",
+		),
+	)
+	return Case{
+		ID:       "B3b",
+		Category: "fabrication",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "invents-branch-name", Polarity: MustNot, Threshold: 0.20, Grader: ContainsTokenNotInContext()},
+			{Label: "uses-known-branch", Polarity: Measure, Grader: ContainsAny("feature/auth-refactor", "main")},
+		},
+	}
+}
+
+// b6bCase: ContainsURL (B6's grader) can't be reused here -- with a real
+// remote in history, producing a URL is the CORRECT output. History moves
+// across four directories before landing in Cwd.
+func b6bCase() Case {
+	req := protocol.Request{
+		Kind: protocol.KindTyping,
+		Buf:  "git remote add origin ",
+		Cwd:  "/Users/dev/projects/zeta",
+	}
+	req.SetHistory(
+		protocol.HistoryIn("/Users/dev", "cd ~/projects"),
+		protocol.HistoryIn("/Users/dev/projects", "git clone https://github.com/naasanov/dotfiles.git", "cd dotfiles"),
+		protocol.HistoryIn("/Users/dev/projects/dotfiles", "git log --oneline", "cd .."),
+		protocol.HistoryIn("/Users/dev/projects", "mkdir zeta", "cd zeta"),
+		protocol.HistoryIn("/Users/dev/projects/zeta", "git init", "git add .", `git commit -m "initial commit"`),
+	)
+	return Case{
+		ID:       "B6b",
+		Category: "fabrication",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "invents-remote-host", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
+			{Label: "invents-token-not-in-context", Polarity: MustNot, Threshold: 0.30, Grader: ContainsTokenNotInContext()},
+			{Label: "uses-known-host", Polarity: Measure, Grader: Contains("github.com/naasanov")},
+		},
+	}
+}
+
+// b7bCase: the known host is undotted (localhost:3000); every command ran
+// in Cwd.
+func b7bCase() Case {
+	req := protocol.Request{
+		Kind: protocol.KindTyping,
+		Buf:  "curl ",
+		Cwd:  "/Users/dev/projects/api",
+	}
+	req.SetHistory(
+		protocol.HistoryIn("/Users/dev/projects/api",
+			"npm install",
+			"npm run dev",
+			"curl http://localhost:3000/health",
+			"git status",
+			"npm test",
+			"curl http://localhost:3000/api/users",
+			"docker compose up -d",
+			"git add .",
+		),
+	)
+	return Case{
+		ID:       "B7b",
+		Category: "fabrication",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "invents-url-with-unknown-host", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
+			{Label: "uses-known-host", Polarity: Measure, Grader: Contains("localhost:3000")},
+		},
+	}
+}
+
+// b8bCase: the SSH host is reached twice mid-history, once via ssh and once
+// via scp. cd ~/infra ran in the home directory; everything after ran in Cwd.
+func b8bCase() Case {
+	req := protocol.Request{
+		Kind: protocol.KindTyping,
+		Buf:  "ssh ",
+		Cwd:  "/Users/dev/infra",
+	}
+	req.SetHistory(
+		protocol.HistoryIn("/Users/dev", "cd ~/infra"),
+		protocol.HistoryIn("/Users/dev/infra",
+			"ssh deploy@build01.internal.example.com",
+			"terraform plan",
+			"git status",
+			"scp ./app.conf deploy@build01.internal.example.com:/etc/app/",
+			"terraform apply",
+			"git add .",
+			`git commit -m "bump instance size"`,
+		),
+	)
+	return Case{
+		ID:       "B8b",
+		Category: "fabrication",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "invents-hostname", Polarity: MustNot, Threshold: 0.20, Grader: ContainsHostNotInHistory()},
+			{Label: "uses-known-host", Polarity: Measure, Grader: Contains("build01.internal.example.com")},
 		},
 	}
 }
@@ -474,9 +499,9 @@ func loopingCases() []Case {
 
 // ---- E. Context usage -------------------------------------------------------
 //
-// E1/E2/E4/E5/E6/E8 are deterministic. E3 and E7 are judged: "did it react to
-// the failure" and "did it follow the CURRENT directory over stale history"
-// both require judging intent, not matching a substring.
+// E1/E2/E4/E5/E6/E8 are deterministic; E3 is judged -- "did it react to the
+// failure" requires judging intent, not matching a substring. E10/E11/E14
+// judge directory-following and fit for the daemon-owned-history cases.
 
 // e3Rubric: a failed build is the most common signal a next-command
 // prediction should react to; the fail example keeps the judge from
@@ -493,21 +518,6 @@ build has an obvious correct response (retry, inspect, fix), so producing
 nothing is a miss, not a judgement call. You are looking only at this
 question, not at syntax or formatting.`
 
-// e7Rubric: history is deliberately from a DIFFERENT project (Node/npm) than
-// the live cwd/dir_entries/git_branch (Go) — probes whether top-placed
-// cwd/git makes the model wrongly assume all history ran in the current dir.
-const e7Rubric = `The shell history shown is from a DIFFERENT project than the current
-directory: the history lines are Node.js/npm commands, but the current
-working directory, directory listing, and git branch all describe a Go
-project (go.mod, .go files) with no package.json in sight. Answer: does the
-suggested next command follow the CURRENT directory/project (e.g. a
-go/git/shell command appropriate to a Go project) rather than continuing
-the STALE npm/yarn history as if it still applied? Fail if the suggestion
-is an npm/yarn/node command, or otherwise assumes the history's project
-context still holds. An EMPTY suggestion FAILS: a Go-appropriate command is
-clearly available from the current directory, so silence here is a miss.
-You are looking only at this question, not at syntax or formatting.`
-
 // e10Rubric: E9's judged sibling -- Contains("npm") can't see "invented
 // something unrelated to either project", which needs a judge to catch.
 const e10Rubric = `The shell history shown starts with two Go commands (go mod tidy, go
@@ -522,6 +532,20 @@ npm/yarn/node command, or is unrelated to both projects. An EMPTY
 suggestion FAILS: a Go-appropriate command is available from the earlier
 history, so silence here is a miss, not a judgement call. You are looking
 only at this question, not at syntax or formatting.`
+
+// e11Rubric: history is deliberately from a DIFFERENT project (Node/npm)
+// than the live cwd/dir_entries (Rust) -- probes whether the model still
+// grounds its suggestion in the current directory with zero same-dir history.
+const e11Rubric = `The shell history shown is from a DIFFERENT project than the current
+directory: the history lines are Node.js/npm commands, but the current
+working directory contains Cargo.toml and src — a Rust project, with no
+package.json in sight. Answer: does the suggested next command follow the
+CURRENT directory/project (e.g. a cargo/git/shell command appropriate to a
+Rust project) rather than continuing the STALE npm/yarn history as if it
+still applied? Fail if the suggestion is an npm/yarn/node command, or
+otherwise assumes the history's project context still holds. An EMPTY suggestion FAILS: a Rust-appropriate command is clearly available from the
+current directory listing, so silence here is a miss. You are looking only
+at this question, not at syntax or formatting.`
 
 // e14Rubric probes whether the suggestion still fits /home/dir despite an
 // interleaved transcript that can make the parent dir look adjacent to
@@ -606,60 +630,7 @@ func contextCases() []Case {
 				{Label: "names-current-branch", Polarity: Must, Threshold: 0.80, Grader: Contains("feature/auth")},
 			},
 		},
-		{
-			// E6: does stale history (8 npm commands) win over the CURRENT
-			// cwd (a Go module) once the transcript has moved on? "npm" in
-			// the output means the model anchored on stale history.
-			ID:       "E6",
-			Category: "context",
-			Req: protocol.Request{
-				Kind: protocol.KindNextCommand,
-				Cwd:  "/x/gotool",
-				DirEntries: []string{
-					"go.mod", "main.go",
-				},
-				History: []string{
-					"npm install",
-					"npm run build",
-					"npm test",
-					"npm run lint",
-					"npm start",
-					"npm run dev",
-					"npm audit fix",
-					"npm run deploy",
-					"cd ../gotool",
-					"go mod tidy",
-				},
-			},
-			Asserts: []Assertion{
-				{Label: "stale-history-wins", Polarity: MustNot, Threshold: 0.20, Grader: Contains("npm")},
-			},
-		},
-		{
-			// E7 is E6's judged sibling: asks the same question directly
-			// instead of pattern-matching for "npm".
-			ID:       "E7",
-			Category: "context",
-			Req: protocol.Request{
-				Kind:      protocol.KindNextCommand,
-				Cwd:       "/x/gotool",
-				GitBranch: "main",
-				DirEntries: []string{
-					"go.mod", "main.go",
-				},
-				History: []string{
-					"npm install",
-					"npm run build",
-					"npm test",
-					"npm run lint",
-					"npm start",
-				},
-			},
-			Asserts: []Assertion{
-				{Label: "follows-current-directory", Polarity: Must, Threshold: 0.60,
-					Grader: defaultJudgeGrader("E7", "follows-current-directory", e7Rubric)},
-			},
-		},
+		e6Case(),
 		{
 			// E8: with no context at all, abstaining (empty output) is
 			// correct. Tracked, not asserted — no established target yet.
@@ -679,9 +650,33 @@ func contextCases() []Case {
 	}
 }
 
-// e9Case restates E7's geometry with per-entry cwds: the same-dir go
-// signal exists but sits far from the cursor, behind five webapp/npm
-// commands.
+// e6Case: does stale history (8 npm commands) win over the CURRENT cwd (a
+// Go module) once the transcript has moved on? The same-dir go signal sits
+// directly adjacent to the cursor -- E9 pushes it far away instead.
+func e6Case() Case {
+	req := protocol.Request{
+		Kind:       protocol.KindNextCommand,
+		Cwd:        "/x/gotool",
+		DirEntries: []string{"go.mod", "main.go"},
+	}
+	req.SetHistory(
+		protocol.HistoryIn("/x/webapp", "npm install", "npm run build", "npm test", "npm run lint",
+			"npm start", "npm run dev", "npm audit fix", "npm run deploy", "cd ../gotool"),
+		protocol.HistoryIn("/x/gotool", "go mod tidy"),
+	)
+	return Case{
+		ID:       "E6",
+		Category: "context",
+		Req:      req,
+		Asserts: []Assertion{
+			{Label: "stale-history-wins", Polarity: MustNot, Threshold: 0.20, Grader: Contains("npm")},
+		},
+	}
+}
+
+// e9Case pushes the same-dir go signal far from the cursor, behind five
+// webapp/npm commands, using per-entry cwds -- E6 carries the same signal
+// adjacent to the cursor instead.
 func e9Case() Case {
 	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
 	req.SetHistory(
@@ -720,8 +715,9 @@ func e10Case() Case {
 }
 
 // e11Case: zero same-dir history anywhere in the pool -- does a cwd-aware
-// prompt's empty history block buy correctness, or just silence? IsEmpty
-// is Measure, so an abstention-driven pass reads as a number.
+// prompt's empty history block buy correctness, or just silence? The judged
+// assertion checks directory-following directly; IsEmpty is Measure, so an
+// abstention-driven pass reads as a number, not a pass on its own.
 func e11Case() Case {
 	req := protocol.Request{
 		Kind:       protocol.KindNextCommand,
@@ -738,6 +734,8 @@ func e11Case() Case {
 		Asserts: []Assertion{
 			{Label: "stale-history-wins", Polarity: MustNot, Threshold: 0.20, Grader: Contains("npm")},
 			{Label: "abstains", Polarity: Measure, Grader: IsEmpty()},
+			{Label: "follows-current-directory", Polarity: Must, Threshold: 0.60,
+				Grader: defaultJudgeGrader("E11", "follows-current-directory", e11Rubric)},
 		},
 	}
 }

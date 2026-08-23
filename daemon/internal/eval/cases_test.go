@@ -9,14 +9,14 @@ import (
 
 // wantIDs is the full case set the plan doc's "Test cases" tables list:
 // categories A, B, D, F1/F2 in full, plus every C and E case — the
-// deterministic ones from Part 2 and the four Part 3 judged cases
-// (C3, E3, E7, F2).
+// deterministic ones from Part 2 and the three Part 3 judged cases
+// (C3, E3, F2).
 var wantIDs = []string{
 	"A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9",
 	"B1", "B2", "B3", "B3b", "B4", "B5", "B6", "B6b", "B7", "B7b", "B8", "B8b",
 	"C1", "C2", "C3",
 	"D1", "D2", "D3", "D4",
-	"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "E10", "E11", "E12", "E13", "E14",
+	"E1", "E2", "E3", "E4", "E5", "E6", "E8", "E9", "E10", "E11", "E12", "E13", "E14",
 	"F1", "F2",
 }
 
@@ -38,23 +38,23 @@ func TestCases_ExactIDSet(t *testing.T) {
 }
 
 func TestCases_JudgedIDsUseJudgeGrader(t *testing.T) {
-	// Every Must/MustNot/TripWire assertion of a judged case must use a
-	// judge.go grader (name prefix "judge:"), never deterministic -- else
-	// it looks judged in the plan tables but isn't. Measure is exempt: E14
-	// pairs a judged Must with a tracked-only Measure assertion by design.
-	judged := map[string]bool{"C3": true, "E3": true, "E7": true, "E10": true, "E14": true, "F2": true}
+	// Checks both directions against Cases(), so the judged set and the
+	// actual judge-graded cases can't silently drift apart. A judged case
+	// may also pair the judge assertion with deterministic ones (E11 keeps
+	// its deterministic "stale-history-wins" MustNot alongside the judged leg).
+	judged := map[string]bool{"C3": true, "E3": true, "E10": true, "E11": true, "E14": true, "F2": true}
 	for _, c := range Cases() {
-		if !judged[c.ID] {
-			continue
-		}
+		hasJudgeGrader := false
 		for _, a := range c.Asserts {
-			if a.Polarity == Measure {
-				continue
+			if a.Polarity != Measure && strings.HasPrefix(a.Grader.Name(), "judge:") {
+				hasJudgeGrader = true
 			}
-			if !strings.HasPrefix(a.Grader.Name(), "judge:") {
-				t.Errorf("case %s assertion %q uses grader %q, want a judge.go grader (name prefix \"judge:\")",
-					c.ID, a.Label, a.Grader.Name())
-			}
+		}
+		if judged[c.ID] && !hasJudgeGrader {
+			t.Errorf("case %s is in the judged set but has no judge.go grader (name prefix \"judge:\") among its assertions", c.ID)
+		}
+		if !judged[c.ID] && hasJudgeGrader {
+			t.Errorf("case %s has a judge.go grader but is missing from the judged set in this test", c.ID)
 		}
 	}
 }

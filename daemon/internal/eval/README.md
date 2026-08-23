@@ -94,20 +94,25 @@ judgment rather than a regex.
 ## E. Context usage
 
 E1/E2/E4/E5/E6/E8 are deterministic (Part 2, the original reason the harness
-exists). E3/E7 (Part 3) are judged: "did it react to the failure" and "did
-it follow the CURRENT directory over stale history" both require judging
-intent, not matching a substring.
+exists). E3 (Part 3) is judged: "did it react to the failure" requires
+judging intent, not matching a substring. The "did it follow the CURRENT
+directory over stale history" question is judged directly on E10/E11/E14.
 
 E9-E14 (the daemon-owned-history feature) probe cwd-scoped retrieval and the
 new `cwd-filtered`/`cwd-grouped` prompts, using per-entry cwd tags
-(`protocol.HistoryIn`/`HistoryUnknown`/`SetHistory`) that E6/E7 deliberately
-do not carry - E6/E7 stay the baseline evidence, unchanged. E9/E13 restate
-E7's "same-dir signal sits far from the cursor" geometry with the signal now
-tagged explicitly; E11/E12 probe the two failure modes of hard filtering
-(buying correctness vs. just buying silence, and hurting right after a `cd`
-when all relevant history is in the previous dir); E14 probes a filtering
-artifact - interleaved directories can make a filtered transcript look more
-contiguous than it was.
+(`protocol.HistoryIn`/`HistoryUnknown`/`SetHistory`). E6 also carries
+accurate per-entry tags now (adjacent to the cursor), so it activates the
+same cwd-aware prompts as E9-E14, not just baseline ones. E9/E13 restate
+E6's "same-dir signal sits far from the cursor" geometry with the signal now
+pushed away instead of adjacent; E11/E12 probe the two failure modes of hard
+filtering (buying correctness vs. just buying silence, and hurting right
+after a `cd` when all relevant history is in the previous dir); E14 probes a
+filtering artifact - interleaved directories can make a filtered transcript
+look more contiguous than it was.
+
+E11's `follows-current-directory` judged assertion has no hand labels yet in
+`testdata/judge_labels.jsonl` (those are scoped to C3/E3/F2), so it can't be
+scored by `-judge-validate` until it gets its own labels.
 
 | Case | Tag | Short name | Description | Assertion |
 |---|---|---|---|---|
@@ -116,12 +121,11 @@ contiguous than it was.
 | E3 | `responds-to-failed-build` | Reacts to a failed build instead of ignoring it | Last command `go build ./...` exited non-zero. Judged: does the suggestion respond to the failure (retry, narrower build/vet/test, inspect error output, edit the file) rather than moving on to unrelated work as if it succeeded? An empty suggestion FAILS - a failed build has an obvious correct response. | Must be judged as responding to the failure (LLM judge) at least 70% of the time. |
 | E4 | `names-a-runnable-script` | Names a runnable Python script, not just any dir entry | Buffer is `python ` with dir entries including a non-script `README.md`. Narrower than the general fabrication check (B4-style) - pins the suggestion to one of the two runnable scripts specifically. | Must match exactly `main.py` or `utils.py` (`MatchesRegexp`) at least 80% of the time. |
 | E5 | `names-current-branch` | Names the current git branch when pushing | Buffer is `git push origin ` on branch `feature/auth`; correct completion is the live branch name from context. | Must contain "feature/auth" (`Contains`) at least 80% of the time. |
-| E6 | `stale-history-wins` | Doesn't let stale npm history override the current Go directory | Open-question (a) probe from the design doc's "FIM prompt shape" section: does top-placed cwd/git make the model assume ALL history ran in the current directory? History is 8 npm/yarn commands from a different project, followed by a `cd` into a Go module. Deterministic pattern-match for "npm" leaking into the suggestion. | Must not contain "npm" (`Contains`) more than 20% of the time. |
-| E7 | `follows-current-directory` | Follows the current directory over stale cross-project history (judged) | E6's judged sibling, same open-question (a) probe, asked directly instead of pattern-matching for "npm": does the suggestion follow the CURRENT go.mod directory rather than continuing stale Node.js history? An empty suggestion FAILS - a Go-appropriate command is clearly available. | Must be judged as following the current directory (LLM judge) at least 60% of the time. |
+| E6 | `stale-history-wins` | Doesn't let stale npm history override the current Go directory | Open-question (a) probe from the design doc's "FIM prompt shape" section: does top-placed cwd/git make the model assume ALL history ran in the current directory? History is 8 npm commands tagged `/x/webapp`, then `cd ../gotool` and `go mod tidy` tagged `/x/gotool` - the same-dir signal sits directly adjacent to the cursor (E9 pushes it far away instead). Deterministic pattern-match for "npm" leaking into the suggestion. | Must not contain "npm" (`Contains`) more than 20% of the time. |
 | E8 | `abstains` | Abstention rate with genuinely no context | No history, no cwd/git/dir signal - there's nothing to predict from, so abstaining (empty output) IS correct. Tracked because there's no established target yet, only a number to watch move. | Tracked only (Measure) - reports how often output is empty (`IsEmpty`). |
-| E9 | `stale-history-wins`, `echoes-other-cwd-command` | Same-dir signal exists but sits far from the cursor | cwd is `/x/gotool`; history is 2 Go commands tagged `/x/gotool` followed by 5 npm commands tagged `/x/webapp` - E7's exact geometry, now with per-entry cwd tags. `EchoesOtherCwdCommand` generalizes `Contains("npm")`: it fires on any suggestion that parrots a command tagged with a different, known cwd, not just this one project's vocabulary. | Must not contain "npm" (`Contains`) more than 20% of the time, and must not echo an other-cwd command (`EchoesOtherCwdCommand`) more than 20% of the time. |
+| E9 | `stale-history-wins`, `echoes-other-cwd-command` | Same-dir signal exists but sits far from the cursor | cwd is `/x/gotool`; history is 2 Go commands tagged `/x/gotool` followed by 5 npm commands tagged `/x/webapp` - E6's geometry with the same-dir signal pushed away from the cursor instead of adjacent to it. `EchoesOtherCwdCommand` generalizes `Contains("npm")`: it fires on any suggestion that parrots a command tagged with a different, known cwd, not just this one project's vocabulary. | Must not contain "npm" (`Contains`) more than 20% of the time, and must not echo an other-cwd command (`EchoesOtherCwdCommand`) more than 20% of the time. |
 | E10 | `follows-current-directory` | E9's judged sibling | Same Request as E9. Judged because `Contains("npm")` can't see "invented something unrelated to either project" - the failure mode a pattern match misses. | Must be judged as following the current Go directory and giving a purposeful suggestion (LLM judge, `e10Rubric`) at least 60% of the time. |
-| E11 | `stale-history-wins`, `abstains` | Zero same-dir history anywhere in the pool | cwd is `/x/newproj` (dir entries `Cargo.toml`, `src`); all history is npm commands tagged `/x/webapp` - no same-dir signal exists at all. Probes whether a cwd-aware prompt's empty history block buys correctness or just silence. | Must not contain "npm" (`Contains`) more than 20% of the time. Tracked only (Measure) - also reports the abstention rate (`IsEmpty`). |
+| E11 | `stale-history-wins`, `abstains`, `follows-current-directory` | Zero same-dir history anywhere in the pool | cwd is `/x/newproj` (dir entries `Cargo.toml`, `src`); all history is npm commands tagged `/x/webapp` - no same-dir signal exists at all. Probes whether a cwd-aware prompt's empty history block buys correctness or just silence; the judged leg folds in the former "follows the current directory" question, asked directly instead of pattern-matching for "npm". | Must not contain "npm" (`Contains`) more than 20% of the time. Tracked only (Measure) - also reports the abstention rate (`IsEmpty`). Must be judged as following the current directory (LLM judge, `e11Rubric`) at least 60% of the time. |
 | E12 | `uses-prior-dir-context`, `abstains` | The counter-hypothesis: right after a `cd`, hard filtering should HURT | cwd is `/x/dotfiles`; `ls`, `git clone ...dotfiles`, `cd dotfiles` are all tagged `/x` (the previous directory) - zero same-dir signal, but the previous-dir history is exactly what's relevant right after a `cd`. | Must contain one of "ls"/"install"/"cat" (`ContainsAny`) at least 60% of the time. Tracked only (Measure) - also reports the abstention rate (`IsEmpty`). |
 | E13 | `stale-history-wins`, `echoes-other-cwd-command` | The actual shipping shape: bootstrapped then tagged | cwd is `/x/gotool`; 3 npm commands carry `""` cwd (bootstrapped from `$HISTFILE` before the daemon started tagging), followed by 2 Go commands tagged `/x/gotool`. The only case exercising the `""`-cwd policy end to end. | Must not contain "npm" (`Contains`) more than 20% of the time, and must not echo an other-cwd command (`EchoesOtherCwdCommand`) more than 20% of the time. |
 | E14 | `mentions-parent-dir-artifact`, `fits-current-directory` | Interleaving artifact from a cwd filter | cwd is `/home/dir`; history runs `echo 1`/`cd ..` in `/home/dir`, then `echo 2`/`cd dir` in `/home`, then `echo 3` back in `/home/dir`. Filtering to `/home/dir` drops the intermediate `/home` hop, so the filtered transcript reads as continuous when it wasn't - no cd-filtering is applied here; the leak is measured instead of asserted on. | Tracked only (Measure) - reports how often the output mentions the parent directory (`OutputMentionsParentDirArtifact`). Must be judged as fitting the current directory (LLM judge, `e14Rubric`) at least 60% of the time. |

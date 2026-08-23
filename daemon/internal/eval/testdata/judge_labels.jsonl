@@ -1,22 +1,23 @@
 # SYNTHETIC judge calibration labels — hand-authored, NOT harvested from real output.
 #
-# Why synthetic: the judged cases (C3/E3/E7/F2) return empty from Codestral almost
+# Why synthetic: the judged cases (C3/E3/F2) return empty from Codestral almost
 # every run, so there is no varied real output to label yet. These are written to
 # span each rubric's decision boundary rather than to sample production.
 #
 # Design constraints, deliberate:
-#   - Balanced 16 pass / 16 fail. A lopsided set inflates raw agreement and drives
-#     Cohen's kappa toward 0, measuring nothing.
+#   - 24 rows across three judged cases (C3, E3, F2), 8 rows each, 13 pass / 11
+#     fail overall. A lopsided set inflates raw agreement and drives Cohen's
+#     kappa toward 0, measuring nothing.
 #   - Includes the degenerate shapes we KNOW production emits (empty output, the
-#     single character "h") — those are real behaviour, not invented.
-#   - Three entries marked AMBIGUOUS are the empty-output cases for E3/E7 (plus
-#     F2's, which was never ambiguous — its rubric already states empty is a good
-#     outcome). C3's empty-output case WAS marked AMBIGUOUS but is no longer: judge
+#     single character "h"), real behaviour, not invented.
+#   - One entry marked AMBIGUOUS is E3's empty-output case (F2's is never
+#     ambiguous, its rubric already states empty is a good outcome). C3's
+#     empty-output case WAS marked AMBIGUOUS but is no longer: judge
 #     calibration surfaced the human label ("fail") disagreeing with the judge
 #     ("pass") on exactly this row, and per prompt.systemPrompt ("If nothing useful
 #     comes to mind, output nothing"), abstention is intended behaviour, not a
-#     defect — the judge was right. c3Rubric now says so explicitly and this label
-#     is "pass". The remaining AMBIGUOUS entries are the point: a judge that agrees
+#     defect, the judge was right. c3Rubric now says so explicitly and this label
+#     is "pass". The remaining AMBIGUOUS entry is the point: a judge that agrees
 #     on the obvious ones and diverges here is telling us the RUBRIC is
 #     underspecified, not that the judge is broken.
 #
@@ -39,14 +40,6 @@
 {"case_id": "E3", "suggestion": "ls", "verdict": "fail", "note": "unrelated; proceeds as if the build succeeded"}
 {"case_id": "E3", "suggestion": "git commit -m \"", "verdict": "fail", "note": "committing on top of a broken build ignores the failure"}
 {"case_id": "E3", "suggestion": "", "verdict": "fail", "note": "AMBIGUOUS: no response at all to a failed build. Judge may treat abstention as neutral."}
-{"case_id": "E7", "suggestion": "go build ./...", "verdict": "pass", "note": "follows the Go project in the current directory"}
-{"case_id": "E7", "suggestion": "go test ./...", "verdict": "pass", "note": "appropriate to the live cwd, not the stale history"}
-{"case_id": "E7", "suggestion": "go mod tidy", "verdict": "pass", "note": "Go-appropriate; ignores the npm history"}
-{"case_id": "E7", "suggestion": "git status", "verdict": "pass", "note": "generic and correct here; rubric allows git/shell commands"}
-{"case_id": "E7", "suggestion": "npm install", "verdict": "fail", "note": "continues stale npm history in a directory with no package.json"}
-{"case_id": "E7", "suggestion": "npm run build", "verdict": "fail", "note": "assumes the Node project context still holds"}
-{"case_id": "E7", "suggestion": "yarn dev", "verdict": "fail", "note": "same stale-context failure, different package manager"}
-{"case_id": "E7", "suggestion": "", "verdict": "fail", "note": "AMBIGUOUS: abstaining neither follows nor contradicts the current directory."}
 {"case_id": "F2", "suggestion": "", "verdict": "pass", "note": "rubric states empty is a GOOD outcome for an already-complete command"}
 {"case_id": "F2", "suggestion": " | less", "verdict": "pass", "note": "common, sensible continuation"}
 {"case_id": "F2", "suggestion": " | grep '\\.go$'", "verdict": "pass", "note": "plausible filter a developer would type"}

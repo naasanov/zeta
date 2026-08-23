@@ -1,5 +1,5 @@
-// validate.go is the judge-validation harness: no judged number (C3/E3/E7/F2)
-// may be quoted until a candidate judge model is measured at >=90% agreement
+// validate.go is the judge-validation harness: no judged number may be
+// quoted until a candidate judge model is measured at >=90% agreement
 // with hand-written human labels on the SAME samples, and the judge is
 // picked by agreement-per-dollar, not reputation.
 //
@@ -83,7 +83,7 @@ func LoadLabels(r io.Reader, cases []Case) ([]Label, error) {
 			return nil, fmt.Errorf("eval: judge labels line %d: case_id %q does not match any case in Cases()", lineNo, raw.CaseID)
 		}
 		if _, _, judged := judgedAssertion(c); !judged {
-			return nil, fmt.Errorf("eval: judge labels line %d: case_id %q exists but is not a judge-graded case (only C3/E3/E7/F2 take hand labels)", lineNo, raw.CaseID)
+			return nil, fmt.Errorf("eval: judge labels line %d: case_id %q exists but is not a judge-graded case; only judge-graded cases take hand labels", lineNo, raw.CaseID)
 		}
 		if raw.Verdict != "pass" && raw.Verdict != "fail" {
 			return nil, fmt.Errorf("eval: judge labels line %d: verdict must be \"pass\" or \"fail\", got %q", lineNo, raw.Verdict)
