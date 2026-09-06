@@ -472,10 +472,9 @@ func buildCellProvider(c cell, dryRun bool, modelOverride string) (provider.Prov
 // config.Config so only the preset table applies. modelOverride, if
 // non-empty, replaces the preset's default model.
 //
-// A missing required API key is a clear, named, fatal error — never a
-// silent fallback to echo/stub output, unlike cmd/autopilotd's degrade path:
-// an eval that quietly measured a stub would produce numbers that look real
-// and aren't.
+// A missing required API key is fatal here, unlike cmd/autopilotd's degrade
+// path: an eval that quietly measured a stub would produce numbers that look
+// real and aren't.
 func newLiveProvider(brand string, modelOverride string, maxTokens int, p prompt.Prompt) (provider.Provider, error) {
 	var cfg config.Config
 	resolved, err := cfg.Resolve(brand)

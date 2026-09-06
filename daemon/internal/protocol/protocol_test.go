@@ -121,6 +121,50 @@ func TestEncodeDisablesHTMLEscaping(t *testing.T) {
 	}
 }
 
+// TestReplyNotice_RoundTrip confirms Notice/NoticeKind survive an
+// Encode/Decode round trip, and that a notice-less Reply omits both keys
+// from the wire entirely while still emitting the non-omitempty "suggestion".
+func TestReplyNotice_RoundTrip(t *testing.T) {
+	want := Reply{V: Version, ID: "x.1", Source: SourceLLM, Notice: "auth failed (401) for codestral: check your API key", NoticeKind: "auth"}
+	var buf bytes.Buffer
+	if err := Encode(&buf, want); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	line := buf.String()
+	if !strings.Contains(line, `"notice":"auth failed (401) for codestral: check your API key"`) {
+		t.Errorf("notice missing from wire output: %s", line)
+	}
+	if !strings.Contains(line, `"notice_kind":"auth"`) {
+		t.Errorf("notice_kind missing from wire output: %s", line)
+	}
+	if !strings.Contains(line, `"suggestion":""`) {
+		t.Errorf("suggestion must always be present even when empty: %s", line)
+	}
+
+	var got Reply
+	if err := NewDecoder(strings.NewReader(line)).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got != want {
+		t.Errorf("round trip mismatch: got %+v want %+v", got, want)
+	}
+
+	// A Reply with no notice must omit both keys entirely, not emit them
+	// empty-but-present.
+	buf.Reset()
+	plain := Reply{V: Version, ID: "x.2", Source: SourceLLM, Suggestion: "git status"}
+	if err := Encode(&buf, plain); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	line = buf.String()
+	if strings.Contains(line, "notice") {
+		t.Errorf("notice-less reply should omit notice keys entirely, got: %s", line)
+	}
+	if !strings.Contains(line, `"suggestion":"git status"`) {
+		t.Errorf("suggestion key missing: %s", line)
+	}
+}
+
 // TestDecodeStreamFrames confirms the decoder pulls consecutive newline-framed
 // messages off a single stream, the way the daemon reads a session.
 func TestDecodeStreamFrames(t *testing.T) {

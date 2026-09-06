@@ -161,6 +161,11 @@ type Reply struct {
 	ID         string `json:"id"`         // echoes the Request.ID being answered
 	Source     string `json:"source"`     // SourceLLM | SourceHistory
 	Suggestion string `json:"suggestion"` // single line; the client paints the remainder past the buffer
+
+	// Notice/NoticeKind carry a non-recoverable failure the client should
+	// surface once per shell.
+	Notice     string `json:"notice,omitempty"`      // single-line, human-readable
+	NoticeKind string `json:"notice_kind,omitempty"` // dedupe key: auth | bad_request | no_key | provider_init
 }
 
 // Encode writes v as one newline-terminated JSON line with HTML escaping

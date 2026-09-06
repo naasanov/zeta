@@ -69,34 +69,39 @@ func TestLoadConfig_ImplicitMissingFileIsFine(t *testing.T) {
 	}
 }
 
-func TestEchoMissingKey(t *testing.T) {
-	fn := echoMissingKey("ZSH_AUTOPILOT_GROQ_KEY")
+// TestNoticeSuggest asserts the notice-only suggest stub never fabricates
+// ghost text and carries the notice text/kind through on every request,
+// regardless of buffer contents.
+func TestNoticeSuggest(t *testing.T) {
+	fn := noticeSuggest("no API key: set ZSH_AUTOPILOT_GROQ_KEY", "no_key")
 
-	t.Run("empty buffer gets a comment hint", func(t *testing.T) {
+	t.Run("empty buffer gets no ghost text, only a notice", func(t *testing.T) {
 		reply, err := fn(context.Background(), protocol.Request{
 			V: protocol.Version, ID: "1", Kind: protocol.KindNextCommand, Buf: "",
 		})
 		if err != nil {
-			t.Fatalf("echoMissingKey fn err = %v, want nil", err)
+			t.Fatalf("noticeSuggest fn err = %v, want nil", err)
 		}
-		want := "# autopilot: set ZSH_AUTOPILOT_GROQ_KEY"
-		if reply.Suggestion != want {
-			t.Errorf("Suggestion = %q, want %q", reply.Suggestion, want)
+		if reply.Suggestion != "" {
+			t.Errorf("Suggestion = %q, want empty", reply.Suggestion)
+		}
+		if reply.Notice != "no API key: set ZSH_AUTOPILOT_GROQ_KEY" || reply.NoticeKind != "no_key" {
+			t.Errorf("reply = %+v, want Notice/NoticeKind set", reply)
 		}
 		if reply.ID != "1" || reply.Source != protocol.SourceLLM {
 			t.Errorf("reply = %+v, want ID=1 Source=llm", reply)
 		}
 	})
 
-	t.Run("non-empty buffer gets no ghost text", func(t *testing.T) {
+	t.Run("non-empty buffer still gets no ghost text", func(t *testing.T) {
 		reply, err := fn(context.Background(), protocol.Request{
 			V: protocol.Version, ID: "2", Kind: protocol.KindTyping, Buf: "git status",
 		})
 		if err != nil {
-			t.Fatalf("echoMissingKey fn err = %v, want nil", err)
+			t.Fatalf("noticeSuggest fn err = %v, want nil", err)
 		}
-		if reply.Suggestion != "git status" {
-			t.Errorf("Suggestion = %q, want %q (no suffix appended)", reply.Suggestion, "git status")
+		if reply.Suggestion != "" {
+			t.Errorf("Suggestion = %q, want empty (no suffix appended)", reply.Suggestion)
 		}
 	})
 }

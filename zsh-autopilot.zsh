@@ -78,6 +78,11 @@ typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
 (( ! ${+ZSH_AUTOPILOT_RECORD} )) &&
 typeset -gi ZSH_AUTOPILOT_RECORD=1
 
+# Whether the client prints diagnostic notices (auth failures, missing
+# daemon binary, updates) to stderr above the next prompt. 0 disables.
+(( ! ${+ZSH_AUTOPILOT_NOTICES} )) &&
+typeset -g ZSH_AUTOPILOT_NOTICES=1
+
 # Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_CLEAR_WIDGETS
@@ -693,6 +698,51 @@ _zsh_autopilot_refresh_git
 # Seed the directory-listing cache immediately, same reasoning as the git
 # cache above.
 _zsh_autopilot_refresh_dir
+
+#--------------------------------------------------------------------#
+# Notice Channel                                                     #
+#--------------------------------------------------------------------#
+# One-line diagnostics for non-recoverable failures (bad key, missing
+# daemon, etc), queued by producers running outside widget context and
+# printed once per shell per failure class from a precmd hook.
+
+typeset -gA _ZSH_AUTOPILOT_SEEN_NOTICES
+typeset -ga _ZSH_AUTOPILOT_PENDING_NOTICES
+
+# true unless explicitly disabled with ZSH_AUTOPILOT_NOTICES=0 (or =false).
+_zsh_autopilot_notices_enabled() {
+  [[ $ZSH_AUTOPILOT_NOTICES != 0 && $ZSH_AUTOPILOT_NOTICES != false ]]
+}
+
+# Queue a notice for kind $1 with text $2, deduped per kind per shell.
+# Never prints; safe to call from a widget or a `zle -F` fd callback,
+# neither of which may write to stdout.
+_zsh_autopilot_notice() {
+  emulate -L zsh
+  local kind="$1" text="$2"
+
+  _zsh_autopilot_notices_enabled || return
+  [[ -z $kind ]] && return
+  [[ -n ${_ZSH_AUTOPILOT_SEEN_NOTICES[$kind]} ]] && return
+
+  _ZSH_AUTOPILOT_SEEN_NOTICES[$kind]=1
+  _ZSH_AUTOPILOT_PENDING_NOTICES+=("$text")
+}
+
+# precmd hook: print and clear any queued notices. Checked first since this
+# runs on every prompt and the common case is an empty array.
+_zsh_autopilot_drain_notices() {
+  (( ${#_ZSH_AUTOPILOT_PENDING_NOTICES} == 0 )) && return
+
+  local msg
+  for msg in "${_ZSH_AUTOPILOT_PENDING_NOTICES[@]}"; do
+    print -u2 -r -- "zsh-autopilot: $msg"
+  done
+  _ZSH_AUTOPILOT_PENDING_NOTICES=()
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _zsh_autopilot_drain_notices
 #--------------------------------------------------------------------#
 # Daemon Socket Transport                                            #
 #--------------------------------------------------------------------#
@@ -710,6 +760,39 @@ typeset -g ZSH_AUTOPILOT_SESSION_ID=${ZSH_AUTOPILOT_SESSION_ID:-$$-$RANDOM}
 typeset -gi _ZSH_AUTOPILOT_SEQ=0
 typeset -g _ZSH_AUTOPILOT_REQ_ID=
 
+zmodload zsh/datetime 2>/dev/null
+
+# Seconds a shell tolerates an absent daemon before saying so, when autostart
+# is off and something else owns the daemon's lifecycle. A shell launched
+# alongside its daemon would otherwise pin a false alarm for the session.
+typeset -gi _ZSH_AUTOPILOT_CONNECT_GRACE=10
+typeset -gi _ZSH_AUTOPILOT_FIRST_CONNECT_FAIL=0
+
+# Queues a notice only once this shell has been unable to reach a daemon for
+# longer than the grace window. A cold start outlasts the retry loop in
+# _zsh_autopilot_connect, and a notice pinned on that first miss is a false alarm.
+_zsh_autopilot_notice_after_grace() {
+  if (( ! _ZSH_AUTOPILOT_FIRST_CONNECT_FAIL )); then
+    _ZSH_AUTOPILOT_FIRST_CONNECT_FAIL=$EPOCHSECONDS
+    return
+  fi
+  (( EPOCHSECONDS - _ZSH_AUTOPILOT_FIRST_CONNECT_FAIL >= _ZSH_AUTOPILOT_CONNECT_GRACE )) &&
+    _zsh_autopilot_notice "$1" "$2"
+  return 0
+}
+
+# True when ZSH_AUTOPILOT_DAEMON_BIN names a runnable daemon. A value holding a
+# slash is a path and is tested directly; $commands only ever holds bare names,
+# so a path would always miss there.
+_zsh_autopilot_daemon_bin_present() {
+  [[ -n $ZSH_AUTOPILOT_DAEMON_BIN ]] || return 1
+  if [[ $ZSH_AUTOPILOT_DAEMON_BIN == */* ]]; then
+    [[ -x $ZSH_AUTOPILOT_DAEMON_BIN ]]
+  else
+    (( $+commands[$ZSH_AUTOPILOT_DAEMON_BIN] ))
+  fi
+}
+
 # Fork the daemon in a subshell so it outlives this shell (no job-table entry
 # to disown — the subshell itself exits right after backgrounding; nohup
 # guards against SIGHUP on the off chance one is delivered first).
@@ -722,8 +805,7 @@ _zsh_autopilot_spawn_daemon() {
   (( _ZSH_AUTOPILOT_SPAWN_TRIED )) && return 1
   typeset -g _ZSH_AUTOPILOT_SPAWN_TRIED=1
 
-  [[ -n $ZSH_AUTOPILOT_DAEMON_BIN ]] || return 1
-  (( $+commands[$ZSH_AUTOPILOT_DAEMON_BIN] )) || return 1
+  _zsh_autopilot_daemon_bin_present || return 1
 
   local log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/autopilot"
   mkdir -p "$log_dir" 2>/dev/null
@@ -743,22 +825,47 @@ _zsh_autopilot_connect() {
   if ! zsocket $ZSH_AUTOPILOT_SOCKET 2>/dev/null; then
     unset ZSH_AUTOPILOT_SOCKET_FD
 
+    # Checked directly (not derived from spawn_daemon's return code, which is
+    # also 1 for the once-per-shell guard and for a missing binary alike) so
+    # the notice kind actually names what's wrong.
+    local -i bin_present=0
+    _zsh_autopilot_daemon_bin_present && bin_present=1
+
+    if (( ! bin_present )); then
+      # A named binary we can't run is a broken install: permanent, and worth
+      # saying immediately.
+      if [[ -n $ZSH_AUTOPILOT_DAEMON_BIN ]]; then
+        _zsh_autopilot_notice no_daemon_bin \
+          "daemon binary '$ZSH_AUTOPILOT_DAEMON_BIN' not found or not executable; reinstall zsh-autopilot or fix \$ZSH_AUTOPILOT_DAEMON_BIN"
+        return 1
+      fi
+      # Empty means autostart was turned off deliberately, so someone else owns
+      # the daemon's lifecycle and may still be starting it.
+      _zsh_autopilot_notice_after_grace no_daemon \
+        "nothing listening on $ZSH_AUTOPILOT_SOCKET and autostart is off (ZSH_AUTOPILOT_DAEMON_BIN is empty); start autopilotd yourself"
+      return 1
+    fi
+
     # Daemon not up (or not up yet) — spawn it once and give it a moment to
     # bind the socket, then retry. Short/bounded so a broken binary doesn't
     # stall shell startup.
     if _zsh_autopilot_spawn_daemon; then
-      local -i tries=0 connected=0
+      local -i tries=0
       while (( tries++ < 10 )); do
-        zsocket $ZSH_AUTOPILOT_SOCKET 2>/dev/null && { connected=1; break }
+        if zsocket $ZSH_AUTOPILOT_SOCKET 2>/dev/null; then
+          typeset -g ZSH_AUTOPILOT_SOCKET_FD=$REPLY
+          zle -F $ZSH_AUTOPILOT_SOCKET_FD _zsh_autopilot_receive
+          return 0
+        fi
         sleep 0.05
       done
-      if (( connected )); then
-        typeset -g ZSH_AUTOPILOT_SOCKET_FD=$REPLY
-        zle -F $ZSH_AUTOPILOT_SOCKET_FD _zsh_autopilot_receive
-        return 0
-      fi
     fi
-    return 1 # still not up - caller degrades gracefully
+    # Reached whether the spawn just fired or already fired earlier this shell,
+    # so a daemon that never comes up is still reported once the grace window
+    # closes. The caller degrades gracefully until then.
+    _zsh_autopilot_notice_after_grace daemon_unreachable \
+      "autopilotd is not responding; check ${XDG_STATE_HOME:-$HOME/.local/state}/autopilot/daemon.log"
+    return 1
   fi
   typeset -g ZSH_AUTOPILOT_SOCKET_FD=$REPLY
 
@@ -876,8 +983,18 @@ _zsh_autopilot_receive() {
   local line
   IFS= read -r -u $fd line || return
 
-  # Correlate by id: ignore replies for a request we've already superseded.
   local REPLY
+
+  # Parsed before the id/suggestion gates below: a notice is about the
+  # session, not one keystroke, and must survive a superseded reply.
+  local notice notice_kind
+  if _zsh_autopilot_json_str_field "$line" notice && [[ -n $REPLY ]]; then
+    notice=$REPLY
+    _zsh_autopilot_json_str_field "$line" notice_kind && notice_kind=$REPLY
+    _zsh_autopilot_notice "${notice_kind:-unknown}" "$notice"
+  fi
+
+  # Correlate by id: ignore replies for a request we've already superseded.
   _zsh_autopilot_json_str_field "$line" id || return
   [[ $REPLY == $_ZSH_AUTOPILOT_REQ_ID ]] || return
   local reply_source
@@ -886,8 +1003,11 @@ _zsh_autopilot_receive() {
   _zsh_autopilot_json_str_field "$line" suggestion && suggestion=$REPLY || return
 
   # METRICS(§12): the reply matched our current request and is about to be
-  # painted — this is the "shown" event's paint anchor.
-  whence -w _zsh_autopilot_metric_shown &>/dev/null && _zsh_autopilot_metric_shown "$_ZSH_AUTOPILOT_REQ_ID" "$suggestion"
+  # painted — this is the "shown" event's paint anchor. A notice-carrying
+  # reply paints nothing, so counting it would inflate the shown denominator.
+  if [[ -z $notice ]]; then
+    whence -w _zsh_autopilot_metric_shown &>/dev/null && _zsh_autopilot_metric_shown "$_ZSH_AUTOPILOT_REQ_ID" "$suggestion"
+  fi
 
   zle autopilot-suggest -- "$reply_source" "$suggestion"
 }
@@ -1149,8 +1269,8 @@ _zsh_autopilot_connect
 # re-runs the published install script. That script is version-aware: it exits
 # immediately when already on the latest release, and on a real update it swaps
 # the binary/bundle and stops the running daemon so the NEXT new terminal
-# lazy-spawns the new one (this shell keeps the old daemon until then — the
-# spawn-once guard in 50_socket.zsh won't respawn mid-session).
+# lazy-spawns the new one; the pkill drops this shell's socket fd too, so its
+# very next request reconnects and spawns the new binary itself.
 #
 # Non-blocking by construction: the foreground shell never waits on the network
 # (the whole check is backgrounded). The throttle keeps many terminals from
@@ -1161,6 +1281,28 @@ _zsh_autopilot_connect
 # startup.
 
 zmodload zsh/datetime 2>/dev/null
+
+# Compares the installed VERSION stamp to what was last announced and queues
+# an `updated` notice on a real version bump. Runs unconditionally (subject
+# only to the notices gate) so the throttle below can't silence it.
+_zsh_autopilot_announce_update() {
+  emulate -L zsh
+
+  local dir="${XDG_DATA_HOME:-$HOME/.local/share}/zsh-autopilot"
+  local version_file="$dir/VERSION" announced_file="$dir/.announced-version"
+
+  [[ -r $version_file ]] || return
+  local version=$(<$version_file)
+
+  if [[ ! -r $announced_file ]]; then
+    print -r -- "$version" >| "$announced_file" 2>/dev/null
+    return
+  fi
+
+  local announced=$(<$announced_file)
+  [[ $version != $announced ]] && _zsh_autopilot_notice updated "updated $announced -> $version"
+  print -r -- "$version" >| "$announced_file" 2>/dev/null
+}
 
 _zsh_autopilot_autoupdate() {
   emulate -L zsh
@@ -1186,4 +1328,5 @@ _zsh_autopilot_autoupdate() {
       >>"$dir/update.log" 2>&1 & )
 }
 
+_zsh_autopilot_announce_update
 _zsh_autopilot_autoupdate

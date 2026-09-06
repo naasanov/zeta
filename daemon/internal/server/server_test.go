@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
+	"github.com/naasanov/zsh-autopilot/daemon/internal/suggest"
 )
 
 // testSocketPath returns a short, unique socket path inside a per-test temp
@@ -37,18 +39,30 @@ func testSocketPath(t *testing.T) string {
 // flaking on a loaded CI box.
 const testDebounce = 25 * time.Millisecond
 
-// startServer runs a Server in the background and returns it along with a
-// cancel func that shuts it down. It waits for the socket file to appear
-// before returning so callers can dial immediately.
-func startServer(t *testing.T, path string) (cancel context.CancelFunc, done <-chan error) {
-	t.Helper()
-	return startServerWithSuggest(t, path, nil)
+// stubSuggestion is what startServer's suggester replies with. Its callers
+// check plumbing, not content.
+const stubSuggestion = "stub reply"
+
+func stubSuggest(_ context.Context, req protocol.Request) (protocol.Reply, error) {
+	return protocol.Reply{
+		V:          protocol.Version,
+		ID:         req.ID,
+		Source:     protocol.SourceLLM,
+		Suggestion: stubSuggestion,
+	}, nil
 }
 
-// startServerWithSuggest is like startServer but lets the caller install a
-// controlled suggest stub before the server starts accepting connections
-// (nil keeps the default) — the seam the coordinator tests use to create
-// deterministic cancellation windows. Debounce is set to testDebounce.
+// startServer runs a Server in the background with a trivial suggester and
+// returns a cancel func that shuts it down. It waits for the socket file to
+// appear so callers can dial immediately.
+func startServer(t *testing.T, path string) (cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	return startServerWithSuggest(t, path, stubSuggest)
+}
+
+// startServerWithSuggest is like startServer but installs the caller's suggest
+// stub, the seam the coordinator tests use to create deterministic
+// cancellation windows. Debounce is set to testDebounce.
 func startServerWithSuggest(t *testing.T, path string, suggest func(ctx context.Context, req protocol.Request) (protocol.Reply, error)) (cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -110,7 +124,7 @@ func TestTypingRequest(t *testing.T) {
 	if reply.Source != protocol.SourceLLM {
 		t.Errorf("reply.Source = %q, want %q", reply.Source, protocol.SourceLLM)
 	}
-	want := "git --oneline"
+	want := stubSuggestion
 	if reply.Suggestion != want {
 		t.Errorf("reply.Suggestion = %q, want %q", reply.Suggestion, want)
 	}
@@ -131,7 +145,7 @@ func TestEmptyBufferRequest(t *testing.T) {
 	if reply.ID != "2.1" {
 		t.Errorf("reply.ID = %q, want %q", reply.ID, "2.1")
 	}
-	want := "git status"
+	want := stubSuggestion
 	if reply.Suggestion != want {
 		t.Errorf("reply.Suggestion = %q, want %q", reply.Suggestion, want)
 	}
@@ -742,5 +756,101 @@ func TestRecordBetweenTypingRequestsDoesNotSupersede(t *testing.T) {
 	}
 	if reply.ID != "B" {
 		t.Fatalf("reply.ID = %q, want B", reply.ID)
+	}
+}
+
+// TestNoticeOnNonRecoverableError asserts a suggest error that NoticeFor
+// classifies as surfaceable (auth) produces exactly one Reply with the
+// notice fields set and an empty Suggestion, rather than nothing at all.
+func TestNoticeOnNonRecoverableError(t *testing.T) {
+	path := testSocketPath(t)
+
+	suggestFn := func(context.Context, protocol.Request) (protocol.Reply, error) {
+		return protocol.Reply{}, &provider.Error{Kind: provider.ErrAuth, HTTPStatus: 401, Provider: "codestral"}
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(path, log)
+	srv.Debounce = testDebounce
+	srv.suggest = suggestFn
+	srv.SetNotice(suggest.NoticeFor("codestral", "ZSH_AUTOPILOT_CODESTRAL_KEY"))
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+	go func() { srv.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	reply := roundTrip(t, path, protocol.Request{V: protocol.Version, ID: "1", Kind: protocol.KindTyping, Buf: "git"})
+
+	if reply.NoticeKind != "auth" {
+		t.Errorf("reply.NoticeKind = %q, want %q", reply.NoticeKind, "auth")
+	}
+	if reply.Notice == "" {
+		t.Error("reply.Notice is empty, want a diagnostic message")
+	}
+	if reply.Suggestion != "" {
+		t.Errorf("reply.Suggestion = %q, want empty", reply.Suggestion)
+	}
+	if reply.ID != "1" {
+		t.Errorf("reply.ID = %q, want %q", reply.ID, "1")
+	}
+}
+
+// TestNoRecoverableErrorWritesNothing asserts a suggest error NoticeFor does
+// not surface (rate limited, recoverable by design) produces no write at all
+// on the wire.
+func TestNoRecoverableErrorWritesNothing(t *testing.T) {
+	path := testSocketPath(t)
+
+	suggestFn := func(context.Context, protocol.Request) (protocol.Reply, error) {
+		return protocol.Reply{}, &provider.Error{Kind: provider.ErrRateLimited, HTTPStatus: 429, Provider: "groq"}
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := New(path, log)
+	srv.Debounce = testDebounce
+	srv.suggest = suggestFn
+	srv.SetNotice(suggest.NoticeFor("groq", "ZSH_AUTOPILOT_GROQ_KEY"))
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+	go func() { srv.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "1", Kind: protocol.KindTyping, Buf: "git"}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	// Give the debounce + dispatch + would-be write time to happen, then
+	// assert nothing showed up: a short read deadline turns "no bytes ever
+	// arrive" into a fast, deterministic timeout instead of hanging.
+	conn.SetReadDeadline(time.Now().Add(testDebounce*4 + 200*time.Millisecond))
+	var reply protocol.Reply
+	err = protocol.NewDecoder(conn).Decode(&reply)
+	if err == nil {
+		t.Fatalf("expected no reply for a non-surfaceable error, got %+v", reply)
+	}
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("expected a read timeout, got: %v", err)
 	}
 }

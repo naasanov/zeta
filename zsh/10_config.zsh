@@ -51,6 +51,11 @@ typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
 (( ! ${+ZSH_AUTOPILOT_RECORD} )) &&
 typeset -gi ZSH_AUTOPILOT_RECORD=1
 
+# Whether the client prints diagnostic notices (auth failures, missing
+# daemon binary, updates) to stderr above the next prompt. 0 disables.
+(( ! ${+ZSH_AUTOPILOT_NOTICES} )) &&
+typeset -g ZSH_AUTOPILOT_NOTICES=1
+
 # Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_CLEAR_WIDGETS

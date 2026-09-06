@@ -43,7 +43,7 @@ func main() {
 	socket := flag.String("socket", envOr("ZSH_AUTOPILOT_SOCKET", server.DefaultSocket), "unix socket path to listen on (default $ZSH_AUTOPILOT_SOCKET)")
 	histfile := flag.String("histfile", resolveHistfilePath(), "shell HISTFILE to bootstrap history from (default $ZSH_AUTOPILOT_HISTFILE, $HISTFILE, or ~/.zsh_history)")
 	historyJournal := flag.String("history-journal", envOr("ZSH_AUTOPILOT_HISTORY_JOURNAL", historyJournalPath()), "path to the daemon-owned history journal (default $ZSH_AUTOPILOT_HISTORY_JOURNAL)")
-	verbose := flag.Bool("v", false, "enable debug logging")
+	verbose := flag.Bool("v", envTrue("ZSH_AUTOPILOT_DEBUG"), "enable debug logging (default $ZSH_AUTOPILOT_DEBUG)")
 	flag.Parse()
 
 	level := slog.LevelInfo
@@ -67,10 +67,8 @@ func main() {
 	defer stop()
 
 	// METRICS(§12): dev-only JSONL event log, dogfooding-only and stripped in
-	// Phase 3 (see internal/metrics). Fully independent of the provider gate
-	// below — metrics can run even in echo mode, but the "request" event
-	// only exists on the LLM path since only suggest.LLM has anything to
-	// report.
+	// Phase 3 (see internal/metrics). The "request" event only exists on the
+	// LLM path, since only suggest.LLM has anything to report.
 	var emit func(metrics.RequestEvent)
 	// METRICS(§12): rawText is passed into suggest.LLM below; false unless
 	// metrics are enabled AND ZSH_AUTOPILOT_METRICS_RAW_TEXT is also set.
@@ -128,6 +126,7 @@ func main() {
 		log.Error("config: failed to resolve provider", "selected", selected, "err", err)
 		os.Exit(1)
 	}
+	srv.SetNotice(suggest.NoticeFor(selected, resolved.APIKeyEnv))
 
 	// Preserve existing env overrides on top of the resolved profile: these
 	// predate config.toml and let a user override base URL/model/debounce
@@ -142,26 +141,25 @@ func main() {
 	// api_key_cmd, itself env/exec-based) only.
 	apiKey, err := resolved.ResolveKey()
 	if err != nil {
-		log.Error("config: failed to resolve api key, falling back to echo mode", "provider", selected, "err", err)
+		log.Error("config: failed to resolve api key", "provider", selected, "err", err)
 		apiKey = ""
 	}
 	needsKey := resolved.NeedsKey()
 
 	switch {
 	case needsKey && apiKey == "":
-		// Missing-key echo mode: install a suggest closure that carries the
-		// missing key var name so the cause is unmistakable both in the
-		// grey ghost-text (a harmless shell comment) and in the daemon log.
-		srv.SetSuggest(echoMissingKey(resolved.APIKeyEnv))
-		log.Error("echo mode: API key not set", "key_env", resolved.APIKeyEnv)
+		// Missing-key mode: no ghost text, but the client gets a notice
+		// naming the env var it needs to set.
+		srv.SetSuggest(noticeSuggest("no API key: set "+resolved.APIKeyEnv, "no_key"))
+		log.Error("no suggestions: API key not set", "key_env", resolved.APIKeyEnv)
 	default:
 		// Either a key was resolved, or this provider needs none (e.g.
 		// ollama running locally) — construct it with whatever key we have
 		// (possibly "").
 		p, err := provider.NewFromProfile(resolved, apiKey, maxTokens, prompt.ShippedFor(resolved.Adapter))
 		if err != nil {
-			log.Error("provider: failed to construct, falling back to echo mode", "provider", selected, "err", err)
-			srv.SetSuggest(echoMissingKey(resolved.APIKeyEnv))
+			log.Error("no suggestions: provider failed to construct", "provider", selected, "err", err)
+			srv.SetSuggest(noticeSuggest("provider init failed: "+err.Error(), "provider_init"))
 		} else {
 			srv.SetSuggest(enrich(store, history.DefaultPoolN, suggest.LLM(p, log, emit, rawText)))
 			// Never log the key itself.
@@ -175,21 +173,18 @@ func main() {
 	}
 }
 
-// echoMissingKey stands in for the LLM suggester when a provider is selected
-// but its API key isn't set. It never fabricates plausible ghost text: an
-// empty buffer gets a shell comment ("# autopilot: set X", harmless if
-// accepted); a non-empty buffer gets an empty suffix (no ghost text at all).
-func echoMissingKey(keyEnv string) func(context.Context, protocol.Request) (protocol.Reply, error) {
+// noticeSuggest stands in for the LLM suggester when the daemon can't reach
+// a provider at all (missing key, construct failure). It never fabricates
+// ghost text; the client learns why only through the notice channel.
+func noticeSuggest(text, kind string) func(context.Context, protocol.Request) (protocol.Reply, error) {
 	return func(_ context.Context, req protocol.Request) (protocol.Reply, error) {
-		suggestion := req.Buf
-		if req.Buf == "" {
-			suggestion = "# autopilot: set " + keyEnv
-		}
 		return protocol.Reply{
 			V:          protocol.Version,
 			ID:         req.ID,
 			Source:     protocol.SourceLLM,
-			Suggestion: suggestion,
+			Suggestion: "",
+			Notice:     text,
+			NoticeKind: kind,
 		}, nil
 	}
 }
@@ -246,6 +241,13 @@ func resolveHistfilePath() string {
 
 // envOr returns the environment variable named key, or fallback if unset or
 // empty.
+// envTrue reports whether key is set to anything but the two off values,
+// matching the zsh client's gate form.
+func envTrue(key string) bool {
+	v := os.Getenv(key)
+	return v != "" && v != "0" && v != "false"
+}
+
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
