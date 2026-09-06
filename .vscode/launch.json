@@ -2,30 +2,29 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "daemon (debug)",
-      "type": "go",
-      "request": "launch",
-      "mode": "debug",
-      "program": "${workspaceFolder}/daemon/cmd/autopilotd",
-      "cwd": "${workspaceFolder}",
-      "args": ["-v"],
-      "envFile": "${workspaceFolder}/sandbox/.env",
-      "console": "integratedTerminal",
-      "preLaunchTask": "build"
-    },
-    {
       "name": "sandbox: fresh zsh",
       "type": "node-terminal",
       "request": "launch",
       "command": "ZDOTDIR=${workspaceFolder}/sandbox exec zsh",
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "build"
+    },
+    {
+      // The path the sandbox daemon logs to, set by XDG_STATE_HOME in
+      // sandbox/.zshrc. mkdir first so tail has a directory to watch on a
+      // fresh clone; -F then waits for the file itself to appear.
+      "name": "sandbox: daemon log",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "mkdir -p ${workspaceFolder}/sandbox/.state/autopilot && exec tail -n 100 -F ${workspaceFolder}/sandbox/.state/autopilot/daemon.log",
+      "cwd": "${workspaceFolder}"
     }
   ],
+
   "compounds": [
     {
-      "name": "sandbox + daemon (debug)",
-      "configurations": ["daemon (debug)", "sandbox: fresh zsh"],
+      "name": "sandbox",
+      "configurations": ["sandbox: fresh zsh", "sandbox: daemon log"],
       "stopAll": true
     }
   ]

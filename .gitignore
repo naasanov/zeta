@@ -32,6 +32,7 @@ sandbox/.env
 sandbox/config.toml
 sandbox/.metrics/
 sandbox/.history/
+sandbox/.state/
 
 # Eval reports (VS Code task default -out dir)
 daemon/internal/eval/.reports/*
