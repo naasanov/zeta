@@ -1,4 +1,4 @@
-name: release
+name: Release
 run-name: "Release ${{ inputs.version || (inputs.bump && format('({0})', inputs.bump)) || github.ref_name }}"
 
 on:
