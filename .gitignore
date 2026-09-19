@@ -37,3 +37,6 @@ sandbox/.state/
 # Eval reports (VS Code task default -out dir)
 daemon/internal/eval/.reports/*
 !daemon/internal/eval/.reports/.gitkeep
+
+# Custom eval provider profiles (see eval.toml.example)
+daemon/internal/eval/eval.toml

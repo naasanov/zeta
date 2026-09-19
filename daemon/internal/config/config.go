@@ -181,6 +181,20 @@ func Parse(data []byte) (Config, error) {
 	return cfg, nil
 }
 
+// Load reads path and Parses it into a Config. A missing file is not an
+// error unless mustExist is true; otherwise it Parses an empty file, so
+// defaults apply and Profiles is empty. Load reads no environment variables.
+func Load(path string, mustExist bool) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && !mustExist {
+			return Parse([]byte{})
+		}
+		return Config{}, fmt.Errorf("config: read %s: %w", path, err)
+	}
+	return Parse(data)
+}
+
 // Resolve turns a selection (a config-profile name, a preset brand, or the
 // "openai" escape hatch) into a fully-resolved ResolvedProfile ready for
 // provider construction: a name not in c.Profiles but matching a preset brand

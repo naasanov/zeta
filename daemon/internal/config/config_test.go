@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -404,4 +406,53 @@ func TestResolvedProfileNeedsKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoad(t *testing.T) {
+	t.Run("missing file, not required, returns defaults", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.toml")
+		cfg, err := Load(path, false)
+		if err != nil {
+			t.Fatalf("Load() err = %v, want nil", err)
+		}
+		if cfg.DebounceMS != DefaultDebounceMS || cfg.MaxTokens != DefaultMaxTokens {
+			t.Errorf("Load() = %+v, want defaults applied", cfg)
+		}
+	})
+
+	t.Run("missing file, required, errors and names the path", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.toml")
+		_, err := Load(path, true)
+		if err == nil {
+			t.Fatalf("Load() err = nil, want error for missing required file")
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("Load() err = %v, want it to name %s", err, path)
+		}
+	})
+
+	t.Run("valid file with a profile parses", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "eval.toml")
+		toml := `
+[profiles.fw-qwen30b]
+provider = "openai"
+base_url = "https://api.fireworks.ai/inference/v1"
+model = "accounts/fireworks/models/qwen3-coder-30b-a3b-instruct"
+api_key_env = "ZSH_AUTOPILOT_FIREWORKS_KEY"
+`
+		if err := os.WriteFile(path, []byte(toml), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		cfg, err := Load(path, true)
+		if err != nil {
+			t.Fatalf("Load() err = %v, want nil", err)
+		}
+		p, ok := cfg.Profiles["fw-qwen30b"]
+		if !ok {
+			t.Fatalf("Load() profiles = %+v, want fw-qwen30b", cfg.Profiles)
+		}
+		if p.Provider != "openai" || p.Model != "accounts/fireworks/models/qwen3-coder-30b-a3b-instruct" {
+			t.Errorf("profile = %+v, unexpected fields", p)
+		}
+	})
 }

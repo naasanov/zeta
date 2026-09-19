@@ -105,6 +105,10 @@ func NewAdaptiveLimiter() *AdaptiveLimiter {
 	return &AdaptiveLimiter{}
 }
 
+// DefaultEvalConfigPath holds eval-only provider profiles, relative to the
+// daemon module root. It is independent of the daemon's own config.toml.
+const DefaultEvalConfigPath = "internal/eval/eval.toml"
+
 // LimiterForBrand returns the rate limiter an eval run should use for calls
 // to brand: groq gets the adaptive token-bucket AdaptiveLimiter;
 // codestral/anthropic and unknown brands get NoopLimiter
@@ -242,11 +246,9 @@ type Runner struct {
 	// result for no gain — rate-limited cells should pass Concurrency: 1.
 	Concurrency int
 
-	// ProviderLabel overrides CaseResult.Provider and must be the brand
-	// (codestral/anthropic/groq/ollama), not Provider.Name() (the adapter):
-	// several brands share the openai adapter, so Name() alone would report
-	// groq as "openai" and collide with it in the scorecard. Empty falls
-	// back to Provider.Name().
+	// ProviderLabel overrides CaseResult.Provider with the name the user
+	// selected (brand or profile), never the adapter, which several brands
+	// share. Empty falls back to Provider.Name().
 	ProviderLabel string
 
 	// Progress, when non-nil, is called once per completed case, in CASE

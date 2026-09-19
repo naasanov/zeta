@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -196,14 +195,7 @@ func noticeSuggest(text, kind string) func(context.Context, protocol.Request) (p
 // falls back silently.
 func loadConfig() (config.Config, error) {
 	path, explicit := configPath()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) && !explicit {
-			return config.Parse([]byte{})
-		}
-		return config.Config{}, fmt.Errorf("read %s: %w", path, err)
-	}
-	return config.Parse(data)
+	return config.Load(path, explicit)
 }
 
 // configPath resolves the config.toml location and reports whether it was
