@@ -69,7 +69,7 @@
     },
     {
       "label": "eval: custom args (prompted)",
-      "detail": "Escape hatch: prompts for a raw cmd/eval flag string (-matrix, -import, -diff, -out, ...) with sandbox/.env loaded. Defaults -out to ./internal/eval/.reports; add your own -out in the prompt to override (flag package: last wins).",
+      "detail": "Escape hatch: prompts for a raw cmd/eval flag string (-profiles, -import, -diff, -out, ...) with sandbox/.env loaded. Defaults -out to ./internal/eval/.reports; add your own -out in the prompt to override (flag package: last wins).",
       "type": "shell",
       "command": ". \"${workspaceFolder}/sandbox/.env\" && go run ./cmd/eval -out ./internal/eval/.reports ${input:evalArgs}",
       "options": {
@@ -96,7 +96,7 @@
     {
       "id": "evalArgs",
       "type": "promptString",
-      "description": "Raw cmd/eval flags, e.g. -matrix -out /tmp/sc.json",
+      "description": "Raw cmd/eval flags, e.g. -profiles anthropic,groq -out /tmp/sc.json",
       "default": "-cases syntax"
     }
   ]

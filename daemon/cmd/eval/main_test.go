@@ -14,7 +14,7 @@ func TestResolveCellsAcceptsProfileName(t *testing.T) {
 		},
 	}
 
-	cells, skipped := resolveCells(false, false, "my-codestral", "default", cfg)
+	cells, skipped := resolveCells(false, "my-codestral", "default", cfg)
 	if len(skipped) != 0 {
 		t.Fatalf("resolveCells() skipped = %v, want none", skipped)
 	}

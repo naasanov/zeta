@@ -30,28 +30,21 @@ import (
 // pre-flight worst-case call count below.
 const maxN = 10
 
-// matrixProviders is what `-matrix` expands -providers to. ollama (untested
-// local placeholder model) and the openai escape hatch (no sensible default
-// base_url/model) are excluded from an unattended full-matrix run.
-var matrixProviders = []string{"codestral", "anthropic", "groq"}
-
 func main() {
 	var (
 		n             = flag.Int("n", 0, "fixed run count per case (0 = adaptive, hard-capped at 10)")
 		caseSel       = flag.String("cases", "", "comma-separated case selectors: IDs (\"A1,B2\"), categories (\"syntax\"), or ID globs (\"A*\"); empty runs everything")
 		outPath       = flag.String("out", "", "write the JSON report to this path (in addition to the text scorecard on stdout); if it's an existing directory, a timestamped provider/variant-named file is created inside it")
 		printJSON     = flag.Bool("print-json", false, "print the JSON report to stdout before the scorecard, with embedded newlines (e.g. in the rendered Prompt field) shown literally rather than escaped — NOT valid JSON, a terminal-reading convenience only")
-		dryRun        = flag.Bool("dry-run", false, "use a scripted stub provider instead of a live one (no network); -providers/-matrix are ignored, -prompts still selects the prompt-building path")
-		providersFlag = flag.String("providers", "codestral", "comma-separated provider brands (\"codestral,anthropic,groq\") or custom profile names from the eval config (see -config) to run against; the cheap default is a single provider")
+		dryRun        = flag.Bool("dry-run", false, "use a scripted stub provider instead of a live one (no network); -profiles is ignored, -prompts still selects the prompt-building path")
+		profilesFlag  = flag.String("profiles", "codestral", "comma-separated preset brands (\"codestral,anthropic,groq\") or custom profile names from the eval config (see -config) to run against; the cheap default is a single provider")
 		promptsFlag   = flag.String("prompts", "default", "comma-separated registered prompt names to run (\"fim-transcript-marker,chat-append\"); \"default\" is an input alias that resolves per-provider to prompt.ShippedFor(adapter) — never persisted as-is")
-		matrix        = flag.Bool("matrix", false, "shorthand for every provider (matrixProviders) x every registered prompt; the occasional full run, not the default")
-		modelOverride = flag.String("model", "", "override the resolved model for every selected provider (see newLiveProvider); empty keeps each provider's preset default")
 		importPath    = flag.String("import", "", "read a §12 metrics events.jsonl, print case stubs + import stats to stdout/stderr, and exit without running anything")
 		diffMode      = flag.Bool("diff", false, "compare two scorecard JSON dumps (positional args: old.json new.json), print the diff, and exit non-zero if anything regressed; a terminal mode like -import — never runs cases")
 		judgeValidate = flag.Bool("judge-validate", false, "score candidate judge models (-judges) against hand labels (-labels) and exit non-zero unless the best clears the plan doc's >=90% agreement gate; a terminal mode like -diff/-import — never runs cases")
 		judgesFlag    = flag.String("judges", "", "comma-separated judge model ids to validate (\"gemini-3.5-flash-lite,gpt-5-mini\"); empty defaults to the single configured judge model (ZSH_AUTOPILOT_EVAL_JUDGE_MODEL or its default)")
 		labelsPath    = flag.String("labels", eval.DefaultJudgeLabelsPath, "path to the hand-labeled judge_labels.jsonl (see .docs/eval_harness_plan.md, \"The judge\")")
-		configFlag    = flag.String("config", "", "path to a TOML file of custom provider profiles for -providers (see eval.DefaultEvalConfigPath for the default location); missing is fatal when passed explicitly")
+		configFlag    = flag.String("config", "", "path to a TOML file of custom provider profiles for -profiles (see eval.DefaultEvalConfigPath for the default location); missing is fatal when passed explicitly")
 	)
 	flag.Parse()
 
@@ -120,7 +113,7 @@ func main() {
 	cfg, cfgLogLine := resolveEvalConfig(*configFlag)
 	fmt.Fprintln(os.Stderr, cfgLogLine)
 
-	cells, skipped := resolveCells(*dryRun, *matrix, *providersFlag, *promptsFlag, cfg)
+	cells, skipped := resolveCells(*dryRun, *profilesFlag, *promptsFlag, cfg)
 	for _, s := range skipped {
 		fmt.Fprintf(os.Stderr, "eval: skipping incompatible pairing %s\n", s)
 	}
@@ -151,7 +144,7 @@ func main() {
 	var allResults []eval.CaseResult
 	var lastMeta eval.Meta
 	for _, c := range cells {
-		p, limiter, err := buildCellProvider(c, *dryRun, *modelOverride, cfg)
+		p, limiter, err := buildCellProvider(c, *dryRun, cfg)
 		if err != nil {
 			// Fatal, not "skip this cell and keep going": a provider that
 			// silently dropped out of a matrix run would produce a report
@@ -274,7 +267,7 @@ func sanitizeForFilename(s string) string {
 }
 
 // cell is one (provider brand, resolved prompt name) combination — one row
-// of the matrix this command assembles from -providers/-prompts/-matrix.
+// of the matrix this command assembles from -profiles x -prompts.
 // PromptName is always a concrete registered name; "default" never survives
 // resolveCells.
 type cell struct {
@@ -382,24 +375,17 @@ func resolveEvalConfig(configFlag string) (config.Config, string) {
 	return cfg, fmt.Sprintf("eval: config: %s (default)", eval.DefaultEvalConfigPath)
 }
 
-// resolveCells assembles the -providers x -prompts matrix and applies the
+// resolveCells assembles the -profiles x -prompts matrix and applies the
 // shape-compatibility rule: an incompatible (provider, prompt) pairing is
 // SKIPPED (returned separately for the caller to report), but a requested
 // provider or prompt left with zero resulting cells is FATAL — same
 // principle as a -cases selector matching nothing: a silently narrowed
 // matrix must never be presentable as a clean one. Runs entirely before any
-// provider is constructed. Under -dry-run, -providers/-matrix are ignored
-// entirely (a single scripted stub, no provider axis, no incompatibility to
-// check), but -prompts still selects which prompt-building path the stub
-// exercises.
-func resolveCells(dryRun, matrix bool, providersFlag, promptsFlag string, cfg config.Config) ([]cell, []string) {
+// provider is constructed. Under -dry-run, -profiles is ignored entirely (a
+// single scripted stub, no provider axis, no incompatibility to check), but
+// -prompts still selects which prompt-building path the stub exercises.
+func resolveCells(dryRun bool, profilesFlag, promptsFlag string, cfg config.Config) ([]cell, []string) {
 	promptNames := splitCSV(promptsFlag)
-	if matrix {
-		promptNames = nil
-		for _, p := range prompt.All() {
-			promptNames = appendUnique(promptNames, p.Name())
-		}
-	}
 
 	if dryRun {
 		cells := make([]cell, 0, len(promptNames))
@@ -410,16 +396,13 @@ func resolveCells(dryRun, matrix bool, providersFlag, promptsFlag string, cfg co
 		return cells, nil
 	}
 
-	providerNames := splitCSV(providersFlag)
-	if matrix {
-		providerNames = matrixProviders
-	}
+	providerNames := splitCSV(profilesFlag)
 
 	adapterFor := make(map[string]string, len(providerNames))
 	for _, pn := range providerNames {
 		resolved, err := cfg.Resolve(pn)
 		if err != nil {
-			log.Fatalf("eval: -providers=%q: %v", providersFlag, err)
+			log.Fatalf("eval: -profiles=%q: %v", profilesFlag, err)
 		}
 		adapterFor[pn] = resolved.Adapter
 	}
@@ -460,11 +443,11 @@ func resolveCells(dryRun, matrix bool, providersFlag, promptsFlag string, cfg co
 		// adapter, so it can only land here as a literal, incompatible name.
 		p, _ := prompt.ByName(name)
 		shape := promptShape(p)
-		errs = append(errs, fmt.Sprintf("prompt %q is %s-shaped, but none of -providers=%q needs that shape (registered providers in this run: %s)",
-			name, shape, providersFlag, strings.Join(providerNames, ", ")))
+		errs = append(errs, fmt.Sprintf("prompt %q is %s-shaped, but none of -profiles=%q needs that shape (registered providers in this run: %s)",
+			name, shape, profilesFlag, strings.Join(providerNames, ", ")))
 	}
 	if len(errs) > 0 {
-		log.Fatalf("eval: -providers/-prompts produced zero cells for:\n  %s", strings.Join(errs, "\n  "))
+		log.Fatalf("eval: -profiles/-prompts produced zero cells for:\n  %s", strings.Join(errs, "\n  "))
 	}
 
 	return cells, skipped
@@ -474,7 +457,7 @@ func resolveCells(dryRun, matrix bool, providersFlag, promptsFlag string, cfg co
 // matrix cell. Under -dry-run it always returns a freshly scripted
 // StubProvider with a NoopLimiter, regardless of c.Provider. c.PromptName is
 // always a concrete registered name by the time it reaches here.
-func buildCellProvider(c cell, dryRun bool, modelOverride string, cfg config.Config) (provider.Provider, eval.Limiter, error) {
+func buildCellProvider(c cell, dryRun bool, cfg config.Config) (provider.Provider, eval.Limiter, error) {
 	if dryRun {
 		return eval.NewStubProvider(c.PromptName,
 			eval.StubResult{Output: " status"},
@@ -487,7 +470,7 @@ func buildCellProvider(c cell, dryRun bool, modelOverride string, cfg config.Con
 	if err != nil {
 		return nil, nil, err
 	}
-	prov, brand, err := newLiveProvider(cfg, c.Provider, modelOverride, config.DefaultMaxTokens, p)
+	prov, brand, err := newLiveProvider(cfg, c.Provider, config.DefaultMaxTokens, p)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -497,19 +480,16 @@ func buildCellProvider(c cell, dryRun bool, modelOverride string, cfg config.Con
 // newLiveProvider resolves name (a brand, the "openai" escape hatch, or a
 // profile from cfg) into a real provider.Provider, and also returns the
 // resolved BRAND (e.g. a "groq"-backed profile still reports "groq") for the
-// caller's rate-limiter selection. modelOverride, if non-empty, replaces the
-// resolved model.
+// caller's rate-limiter selection. A different model means a different
+// profile in cfg, not a flag override here.
 //
 // A missing required API key is fatal here, unlike cmd/autopilotd's degrade
 // path: an eval that quietly measured a stub would produce numbers that look
 // real and aren't.
-func newLiveProvider(cfg config.Config, name string, modelOverride string, maxTokens int, p prompt.Prompt) (provider.Provider, string, error) {
+func newLiveProvider(cfg config.Config, name string, maxTokens int, p prompt.Prompt) (provider.Provider, string, error) {
 	resolved, err := cfg.Resolve(name)
 	if err != nil {
 		return nil, "", fmt.Errorf("eval: resolving provider %q: %w", name, err)
-	}
-	if modelOverride != "" {
-		resolved.Model = modelOverride
 	}
 
 	apiKey, err := resolved.ResolveKey()
@@ -597,7 +577,7 @@ func splitCSV(s string) []string {
 // The terminal modes (-diff, -import, -judge-validate) exit before reaching
 // that code, so any of these being set alongside one is surfaced as an error
 // rather than silently dropped.
-var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "providers", "prompts", "matrix", "model", "config"}
+var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "profiles", "prompts", "config"}
 
 // setRunOnlyFlags returns which of runOnlyFlagNames were explicitly passed on
 // the command line, each rendered as "-name", in flag-declaration order.

@@ -8,18 +8,19 @@ in the scorecard means.
 
 ## Custom provider profiles
 
-`-providers` accepts preset brands (codestral/anthropic/groq/ollama) plus
+`-profiles` accepts preset brands (codestral/anthropic/groq/ollama) plus
 profile names from a TOML config: `internal/eval/eval.toml` (gitignored) by
 default, or a path passed via `-config`. See `eval.toml.example` for the
-format. Missing default config is fine (presets only); a missing `-config`
-path is fatal. One line logs which config resolved, e.g.:
+format. A different model means a new profile there, not a flag. Missing
+default config is fine (presets only); a missing `-config` path is fatal.
+One line logs which config resolved, e.g.:
 
 ```
 eval: config: internal/eval/eval.toml (default)
 eval: config: none, presets only (default internal/eval/eval.toml not found)
 ```
 
-Example: `go run ./cmd/eval -providers fw-qwen30b,codestral`.
+Example: `go run ./cmd/eval -profiles fw-qwen30b,codestral`.
 
 One row per **assertion** - most cases have one, a few (A9 aside, see F1)
 have more than one, each catching a different failure mode on the same

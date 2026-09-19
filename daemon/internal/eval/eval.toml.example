@@ -1,9 +1,10 @@
 # Example eval.toml for the eval harness (daemon/cmd/eval).
 #
-# Copy this to internal/eval/eval.toml (gitignored) and -providers will
+# Copy this to internal/eval/eval.toml (gitignored) and -profiles will
 # accept profile names from it, not just preset brands
 # (codestral/anthropic/groq/ollama). -config points at a different path
-# instead, if you'd rather keep it elsewhere.
+# instead, if you'd rather keep it elsewhere. Want a different model on the
+# same brand? Add another profile here, not a flag.
 #
 # This is independent of the daemon's own config.toml (see
 # sandbox/config.toml.example): the harness never reads ZSH_AUTOPILOT_CONFIG
@@ -21,4 +22,4 @@
 # model = "accounts/fireworks/models/qwen3-coder-30b-a3b-instruct"
 # api_key_env = "ZSH_AUTOPILOT_FIREWORKS_KEY"
 
-# Then: go run ./cmd/eval -providers fw-qwen30b,codestral
+# Then: go run ./cmd/eval -profiles fw-qwen30b,codestral
