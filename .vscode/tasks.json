@@ -53,23 +53,8 @@
       "problemMatcher": []
     },
     {
-      "label": "eval: judge-validate (prompted)",
-      "detail": "Score candidate judge models against the hand labels. Exits non-zero below the 90% agreement gate.",
-      "type": "shell",
-      "command": ". \"${workspaceFolder}/sandbox/.env\" && go run ./cmd/eval -judge-validate -judges '${input:evalJudges}'",
-      "options": {
-        "cwd": "${workspaceFolder}/daemon"
-      },
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      },
-      "problemMatcher": []
-    },
-    {
-      "label": "eval: custom args (prompted)",
-      "detail": "Escape hatch: prompts for a raw cmd/eval flag string (-profiles, -import, -diff, -out, ...) with sandbox/.env loaded. Defaults -out to ./internal/eval/.reports; add your own -out in the prompt to override (flag package: last wins).",
+      "label": "eval: custom args",
+      "detail": "Escape hatch: prompts for a raw cmd/eval flag string (-profiles, -out, ...) with sandbox/.env loaded. Defaults -out to ./internal/eval/.reports; add your own -out in the prompt to override (flag package: last wins).",
       "type": "shell",
       "command": ". \"${workspaceFolder}/sandbox/.env\" && go run ./cmd/eval -out ./internal/eval/.reports ${input:evalArgs}",
       "options": {
@@ -87,12 +72,6 @@
   // VS Code prompts for each of these the first time it is referenced in a
   // task run, and remembers the answer for the rest of the window session.
   "inputs": [
-    {
-      "id": "evalJudges",
-      "type": "promptString",
-      "description": "Judge model ids, comma-separated. NB: Gemini ids use DOTS (gemini-3.5-flash-lite), not dashes.",
-      "default": "gemini-3.5-flash-lite"
-    },
     {
       "id": "evalArgs",
       "type": "promptString",

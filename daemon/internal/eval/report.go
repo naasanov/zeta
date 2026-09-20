@@ -69,7 +69,7 @@ func JSON(w io.Writer, results []CaseResult, meta Meta) error {
 	return enc.Encode(dump{Meta: meta, Results: results})
 }
 
-// PrettyJSON's output is NOT valid JSON; LoadRun must never read it.
+// PrettyJSON's output is NOT valid JSON.
 func PrettyJSON(w io.Writer, results []CaseResult, meta Meta) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

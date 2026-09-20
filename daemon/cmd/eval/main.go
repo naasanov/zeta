@@ -5,13 +5,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/naasanov/zsh-autopilot/daemon/internal/config"
@@ -24,62 +22,16 @@ const maxN = 10
 
 func main() {
 	var (
-		n             = flag.Int("n", 0, "fixed run count per case (0 = adaptive, hard-capped at 10)")
-		caseSel       = flag.String("cases", "", "comma-separated case selectors: IDs (\"A1,B2\"), categories (\"syntax\"), or ID globs (\"A*\"); empty runs everything")
-		outPath       = flag.String("out", "", "write the JSON report to this path (in addition to the text scorecard on stdout); if it's an existing directory, a timestamped provider/variant-named file is created inside it")
-		printJSON     = flag.Bool("print-json", false, "print the JSON report to stdout before the scorecard, with embedded newlines (e.g. in the rendered Prompt field) shown literally rather than escaped — NOT valid JSON, a terminal-reading convenience only")
-		dryRun        = flag.Bool("dry-run", false, "use a scripted stub provider instead of a live one (no network); -profiles is ignored, -prompts still selects the prompt-building path")
-		profilesFlag  = flag.String("profiles", "codestral", "comma-separated preset brands (\"codestral,anthropic,groq,qwen\") or custom profile names from the eval config (see -config) to run against; the cheap default is a single provider")
-		promptsFlag   = flag.String("prompts", "default", "comma-separated registered prompt names to run (\"fim-transcript-marker,chat-append\"); \"default\" is an input alias that resolves per-provider to prompt.ShippedFor(adapter) — never persisted as-is")
-		importPath    = flag.String("import", "", "read a §12 metrics events.jsonl, print case stubs + import stats to stdout/stderr, and exit without running anything")
-		diffMode      = flag.Bool("diff", false, "compare two scorecard JSON dumps (positional args: old.json new.json), print the diff, and exit non-zero if anything regressed; a terminal mode like -import — never runs cases")
-		judgeValidate = flag.Bool("judge-validate", false, "score candidate judge models (-judges) against hand labels (-labels) and exit non-zero unless the best clears the plan doc's >=90% agreement gate; a terminal mode like -diff/-import — never runs cases")
-		judgesFlag    = flag.String("judges", "", "comma-separated judge model ids to validate (\"gemini-3.5-flash-lite,gpt-5-mini\"); empty defaults to the single configured judge model (ZSH_AUTOPILOT_EVAL_JUDGE_MODEL or its default)")
-		labelsPath    = flag.String("labels", eval.DefaultJudgeLabelsPath, "path to the hand-labeled judge_labels.jsonl (see .docs/eval_harness_plan.md, \"The judge\")")
-		configFlag    = flag.String("config", "", "path to a TOML file of custom provider profiles for -profiles (see eval.DefaultEvalConfigPath for the default location); missing is fatal when passed explicitly")
+		n            = flag.Int("n", 0, "fixed run count per case (0 = adaptive, hard-capped at 10)")
+		caseSel      = flag.String("cases", "", "comma-separated case selectors: IDs (\"A1,B2\"), categories (\"syntax\"), or ID globs (\"A*\"); empty runs everything")
+		outPath      = flag.String("out", "", "write the JSON report to this path (in addition to the text scorecard on stdout); if it's an existing directory, a timestamped provider/variant-named file is created inside it")
+		printJSON    = flag.Bool("print-json", false, "print the JSON report to stdout before the scorecard, with embedded newlines (e.g. in the rendered Prompt field) shown literally rather than escaped — NOT valid JSON, a terminal-reading convenience only")
+		dryRun       = flag.Bool("dry-run", false, "use a scripted stub provider instead of a live one (no network); -profiles is ignored, -prompts still selects the prompt-building path")
+		profilesFlag = flag.String("profiles", "codestral", "comma-separated preset brands (\"codestral,anthropic,groq,qwen\") or custom profile names from the eval config (see -config) to run against; the cheap default is a single provider")
+		promptsFlag  = flag.String("prompts", "default", "comma-separated registered prompt names to run (\"fim-transcript-marker,chat-append\"); \"default\" is an input alias that resolves per-provider to prompt.ShippedFor(adapter) — never persisted as-is")
+		configFlag   = flag.String("config", "", "path to a TOML file of custom provider profiles for -profiles (see eval.DefaultEvalConfigPath for the default location); missing is fatal when passed explicitly")
 	)
 	flag.Parse()
-
-	setFlags := map[string]bool{}
-	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
-
-	terminalModesSet := 0
-	for _, set := range []bool{*diffMode, *importPath != "", *judgeValidate} {
-		if set {
-			terminalModesSet++
-		}
-	}
-	if terminalModesSet > 1 {
-		log.Fatalf("eval: -diff, -import, and -judge-validate are mutually exclusive terminal modes; run one at a time")
-	}
-
-	if *diffMode {
-		if ignored := setRunOnlyFlags(setFlags); len(ignored) > 0 {
-			log.Fatalf("eval: -diff never runs cases, so %s would be silently ignored; drop them", strings.Join(ignored, ", "))
-		}
-		args := flag.Args()
-		if len(args) != 2 {
-			log.Fatalf("eval: -diff requires exactly two positional args (old.json new.json), got %d: %v", len(args), args)
-		}
-		runDiff(args[0], args[1])
-		return
-	}
-
-	if *importPath != "" {
-		if ignored := setRunOnlyFlags(setFlags); len(ignored) > 0 {
-			log.Fatalf("eval: -import never runs cases, so %s would be silently ignored; drop them", strings.Join(ignored, ", "))
-		}
-		runImport(*importPath)
-		return
-	}
-
-	if *judgeValidate {
-		if ignored := setRunOnlyFlags(setFlags); len(ignored) > 0 {
-			log.Fatalf("eval: -judge-validate never runs cases, so %s would be silently ignored; drop them", strings.Join(ignored, ", "))
-		}
-		runJudgeValidate(*judgesFlag, *labelsPath)
-		return
-	}
 
 	if *n > maxN {
 		log.Fatalf("eval: -n=%d exceeds the hard cap of %d; the plan doc treats anything higher as wasted "+
@@ -471,199 +423,4 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
-}
-
-// runOnlyFlagNames are flagged as errors, not silently dropped, when set alongside a terminal mode.
-var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "profiles", "prompts", "config"}
-
-func setRunOnlyFlags(setFlags map[string]bool) []string {
-	var ignored []string
-	for _, name := range runOnlyFlagNames {
-		if setFlags[name] {
-			ignored = append(ignored, "-"+name)
-		}
-	}
-	return ignored
-}
-
-func runDiff(beforePath, afterPath string) {
-	before, err := loadRunFile(beforePath)
-	if err != nil {
-		log.Fatalf("eval: -diff: %v", err)
-	}
-	after, err := loadRunFile(afterPath)
-	if err != nil {
-		log.Fatalf("eval: -diff: %v", err)
-	}
-
-	report := eval.DiffRuns(before, after)
-	if err := report.Text(os.Stdout); err != nil {
-		log.Fatalf("eval: -diff: writing report: %v", err)
-	}
-
-	if report.Regressed() {
-		os.Exit(1)
-	}
-}
-
-func loadRunFile(path string) (eval.Run, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return eval.Run{}, fmt.Errorf("opening %s: %w", path, err)
-	}
-	defer f.Close()
-
-	run, err := eval.LoadRun(f)
-	if err != nil {
-		return eval.Run{}, fmt.Errorf("loading %s: %w", path, err)
-	}
-	return run, nil
-}
-
-func runImport(path string) {
-	f, err := os.Open(path)
-	if err != nil {
-		log.Fatalf("eval: -import: opening %s: %v", path, err)
-	}
-	defer f.Close()
-
-	cases, stats, err := eval.ImportEvents(f, eval.DefaultImportOptions())
-	if err != nil {
-		log.Fatalf("eval: -import: reading %s: %v", path, err)
-	}
-
-	for i, ic := range cases {
-		id := fmt.Sprintf("IMPORT-%d", i+1)
-		if err := eval.RenderCaseStub(os.Stdout, ic, id); err != nil {
-			log.Fatalf("eval: -import: rendering stub %s: %v", id, err)
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "\neval: import stats for %s:\n", path)
-	fmt.Fprintf(os.Stderr, "  lines read:               %d\n", stats.LinesRead)
-	fmt.Fprintf(os.Stderr, "  imported:                 %d\n", stats.Imported)
-	fmt.Fprintf(os.Stderr, "  duplicates:               %d\n", stats.Duplicates)
-	fmt.Fprintf(os.Stderr, "  skipped, not a request:   %d\n", stats.SkippedNotRequest)
-	fmt.Fprintf(os.Stderr, "  skipped, no raw text:     %d\n", stats.SkippedNoRawText)
-	fmt.Fprintf(os.Stderr, "  skipped, malformed JSON:  %d\n", stats.SkippedMalformedJSON)
-	fmt.Fprintf(os.Stderr, "  skipped, bad buf prefix:  %d\n", stats.SkippedBadPrefix)
-	fmt.Fprintf(os.Stderr, "  skipped, trigger filter:  %d\n", stats.SkippedTriggerFilter)
-	fmt.Fprintf(os.Stderr, "  skipped, likely secret:   %d\n", stats.SkippedLikelySecret)
-	fmt.Fprintf(os.Stderr, "  skipped, over -MaxCases:  %d\n", stats.SkippedOverCap)
-
-	if stats.LinesRead > 0 && stats.Imported*10 < stats.LinesRead {
-		fmt.Fprintf(os.Stderr, "eval: WARNING - imported only %d of %d lines read (<10%%); "+
-			"check the skip counts above before assuming this is a healthy import\n", stats.Imported, stats.LinesRead)
-	}
-}
-
-const judgeAgreementGate = 0.90
-
-func runJudgeValidate(judgesFlag, labelsPath string) {
-	cfg := eval.JudgeConfigFromEnv()
-	if cfg.APIKey == "" {
-		log.Fatalf("eval: -judge-validate requires a judge API key; set ZSH_AUTOPILOT_EVAL_JUDGE_KEY " +
-			"(see .docs/eval_harness_plan.md, \"The judge\")")
-	}
-
-	models := splitCSV(judgesFlag)
-	if len(models) == 0 {
-		models = []string{cfg.Model}
-	}
-
-	judges := make([]eval.Judge, 0, len(models))
-	for _, m := range models {
-		jcfg := cfg
-		jcfg.Model = m
-		j, err := eval.NewGeminiJudge(jcfg)
-		if err != nil {
-			log.Fatalf("eval: -judge-validate: building judge %q: %v", m, err)
-		}
-		judges = append(judges, j)
-	}
-
-	f, err := os.Open(labelsPath)
-	if err != nil {
-		log.Fatalf("eval: -judge-validate: no hand labels at %s (write them first — see .docs/eval_harness_plan.md, "+
-			"\"The judge\": \"hand-label 30 outputs\"): %v", labelsPath, err)
-	}
-	defer f.Close()
-
-	cases := eval.Cases()
-	labels, err := eval.LoadLabels(f, cases)
-	if err != nil {
-		log.Fatalf("eval: -judge-validate: %v", err)
-	}
-	if len(labels) == 0 {
-		log.Fatalf("eval: -judge-validate: %s contains no labels", labelsPath)
-	}
-
-	if fracPass, imbalanced := eval.LabelImbalance(labels); imbalanced {
-		fmt.Fprintf(os.Stderr, "eval: WARNING - label set is imbalanced (%.0f%% pass, n=%d); raw agreement is "+
-			"inflated by chance here, read Kappa, not just Agreement\n", fracPass*100, len(labels))
-	}
-
-	fmt.Fprintf(os.Stderr, "eval: scoring %d judge(s) against %d hand label(s) from %s (verdict cache bypassed)\n",
-		len(judges), len(labels), labelsPath)
-
-	scores := eval.ValidateJudges(context.Background(), labels, cases, judges)
-	ranked := eval.RankByAgreementPerDollar(scores)
-
-	printJudgeScoreboard(os.Stdout, ranked)
-	printJudgeDisagreements(os.Stdout, ranked)
-
-	bestAgreement := 0.0
-	for _, s := range ranked {
-		if s.Agreement > bestAgreement {
-			bestAgreement = s.Agreement
-		}
-	}
-	if bestAgreement < judgeAgreementGate {
-		fmt.Fprintf(os.Stderr, "eval: FAIL - best judge agreement %.1f%% is below the %.0f%% gate; "+
-			"per the plan doc, the rubric is the problem — rewrite, re-label, re-measure before quoting any judged number\n",
-			bestAgreement*100, judgeAgreementGate*100)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "eval: PASS - best judge agreement %.1f%% clears the %.0f%% gate\n",
-		bestAgreement*100, judgeAgreementGate*100)
-}
-
-func printJudgeScoreboard(w io.Writer, ranked []eval.JudgeScore) {
-	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "judge\tagreement\tkappa\terrors\tcost_usd\tagreement/$")
-	for _, s := range ranked {
-		fmt.Fprintf(tw, "%s\t%.1f%% (%d/%d)\t%.3f\t%d\t$%.4f\t%s\n",
-			s.Judge, s.Agreement*100, s.Agreed, s.Total, s.Kappa, s.Errors, s.CostUSD, formatAgreementPerDollar(s))
-	}
-	tw.Flush()
-	// The "errors" column is a bare count; print the first error per judge
-	// that had one so a total-failure row isn't just "0.0% (0/0) errors 2".
-	for _, s := range ranked {
-		if s.Errors > 0 && s.FirstError != "" {
-			fmt.Fprintf(w, "  %s: first error — %s\n", s.Judge, s.FirstError)
-		}
-	}
-}
-
-func formatAgreementPerDollar(s eval.JudgeScore) string {
-	if s.CostUSD <= 0 {
-		if s.Agreement > 0 {
-			return "inf (cost unpriced)"
-		}
-		return "0"
-	}
-	return fmt.Sprintf("%.1f", s.Agreement/s.CostUSD)
-}
-
-func printJudgeDisagreements(w io.Writer, ranked []eval.JudgeScore) {
-	for _, s := range ranked {
-		if len(s.Disagreements) == 0 {
-			continue
-		}
-		fmt.Fprintf(w, "\n%s: %d disagreement(s)\n", s.Judge, len(s.Disagreements))
-		for _, d := range s.Disagreements {
-			fmt.Fprintf(w, "  [%s] suggestion=%q human=%s judge=%s reason=%q\n",
-				d.CaseID, d.Suggestion, d.HumanVerdict, d.JudgeVerdict, d.JudgeReason)
-		}
-	}
 }
