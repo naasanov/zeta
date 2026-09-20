@@ -2,18 +2,12 @@ package eval
 
 import "github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 
-// This file is the full case corpus (plan doc "Test cases"): categories A,
-// B, D, F1, the deterministic C/E cases (C1/C2, E1/E2/E4/E5/E6/E8), plus
-// three judged cases (C3, E3, F2) graded through defaultJudgeGrader (judge.go).
-//
-// Cases() keeps the plan doc's table order (A -> B -> C -> D -> E -> F) so a
-// diff against the plan is a visual scan. README.md in this directory
-// indexes every case; update it alongside any case change.
+// Cases() keeps the plan doc's table order (A -> B -> C -> D -> E -> F).
+// README.md in this directory indexes every case; update it alongside any
+// case change.
 
 // Cases returns the full corpus, in stable ID order. Every Case is built
-// fresh on each call (no shared package-level state), so two calls produce
-// equivalent values — see cases_test.go's determinism check, which compares
-// judged-case Graders by Name() rather than identity.
+// fresh on each call, so two calls produce equivalent values.
 func Cases() []Case {
 	var cases []Case
 	cases = append(cases, syntaxCases()...)
@@ -25,14 +19,11 @@ func Cases() []Case {
 	return cases
 }
 
-// ---- A. Syntax — zero-tolerance trip-wires on shipped logic --------------
+// ---- A. Syntax - zero-tolerance trip-wires on shipped logic --------------
 
 func syntaxCases() []Case {
 	return []Case{
 		{
-			// A1 guards stripLeadingSeparators/firstShellCommand
-			// (codestral.go): a next-command prediction must never lead with
-			// a bare separator.
 			ID:       "A1",
 			Category: "syntax",
 			Req: protocol.Request{
@@ -44,8 +35,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A2: the buffer already ends with a trailing space, so ANY
-			// leading space in the completion produces a double space.
 			ID:       "A2",
 			Category: "syntax",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "git add "},
@@ -54,11 +43,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A3: the buffer has NO trailing space and the completion starts
-			// a new word, so it needs to supply its own leading space. Not a
-			// trip-wire — this is a quality bar on the spacing contract, not
-			// a guard on code that makes the failure structurally
-			// impossible, so it gets a measured threshold.
 			ID:       "A3",
 			Category: "syntax",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "git add"},
@@ -67,9 +51,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A4 guards the same stripLeadingSeparators/firstShellCommand
-			// logic as A1, from the over-chaining direction: a code model
-			// chaining "mkdir proj; cd proj; git init" on one line.
 			ID:       "A4",
 			Category: "syntax",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "mkdir proj"},
@@ -78,9 +59,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A5 guards the accumulator's first-line cutoff (accum.go). It
-			// should almost never fire — the cutoff already strips anything
-			// past the first newline — so a trip here means the cutoff broke.
 			ID:       "A5",
 			Category: "syntax",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "grep -rn 'TODO' src"},
@@ -89,9 +67,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A6: a bare word plus a directory listing is bait for a
-			// chat-assistant reflex (wrapping the suggestion in a code
-			// fence) that a raw shell completion must never do.
 			ID:       "A6",
 			Category: "syntax",
 			Req: protocol.Request{
@@ -104,10 +79,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A7: "never repeat or restate a non-empty buffer" is a hard
-			// rule in the system prompt (prompt.go) — mustNot rather than a
-			// trip-wire only because it's plausible enough for a model to
-			// slip on that a 10% ceiling is the honest bar, not zero.
 			ID:       "A7",
 			Category: "syntax",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "git status"},
@@ -116,9 +87,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A8: a nonsense token that isn't a real command; the model
-			// must still emit a shell-shaped completion (or abstain), never
-			// slip into chat-assistant prose.
 			ID:       "A8",
 			Category: "syntax",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "xyzzy "},
@@ -127,13 +95,6 @@ func syntaxCases() []Case {
 			},
 		},
 		{
-			// A9 regression guard: history's last entry ("git push") is
-			// already complete, but rendering it directly adjacent to the
-			// predicted next command (no boundary marker) made the model
-			// treat it as an unfinished buffer and append "origin main".
-			// Fixed by RenderFIM's "$ " transcript marker (codestral.go);
-			// `-variants fim-no-prompt-marker` re-runs this against the old
-			// shape.
 			ID:       "A9",
 			Category: "syntax",
 			Req: protocol.Request{
@@ -147,13 +108,8 @@ func syntaxCases() []Case {
 	}
 }
 
-// ---- B. Fabrication — "stop before free-form input you can't know" -------
+// ---- B. Fabrication - "stop before free-form input you can't know" -------
 
-// A "b"-suffixed case pairs the bare case above it: same buffer, realistic
-// context. Read each pair together — B1-B8 send almost no context, so a rate
-// that collapses in the paired case means the fix is more grounded context,
-// not a tighter output filter. The grounded value sits mid-history, never
-// last, so a pass can't come from continuing the adjacent line.
 func fabricationCases() []Case {
 	return []Case{
 		{
@@ -169,10 +125,6 @@ func fabricationCases() []Case {
 			},
 		},
 		{
-			// B2: the ONLY acceptable output here is the opening quote and
-			// its leading space (` "`, 2 runes) — anything longer means the
-			// model kept going past the point it should have stopped. No
-			// B1b/B2b: a commit message is free-form input no context supplies.
 			ID:       "B2",
 			Category: "fabrication",
 			Req: protocol.Request{
@@ -254,9 +206,6 @@ func fabricationCases() []Case {
 	}
 }
 
-// b3bCase: B3's own buffer has no paired form -- a branch being created
-// does not exist yet, so no context can ground it. Switching to an
-// EXISTING branch is the groundable sibling; every command ran in Cwd.
 func b3bCase() Case {
 	req := protocol.Request{
 		Kind:      protocol.KindTyping,
@@ -287,9 +236,6 @@ func b3bCase() Case {
 	}
 }
 
-// b6bCase: ContainsURL (B6's grader) can't be reused here -- with a real
-// remote in history, producing a URL is the CORRECT output. History moves
-// across four directories before landing in Cwd.
 func b6bCase() Case {
 	req := protocol.Request{
 		Kind: protocol.KindTyping,
@@ -315,8 +261,6 @@ func b6bCase() Case {
 	}
 }
 
-// b7bCase: the known host is undotted (localhost:3000); every command ran
-// in Cwd.
 func b7bCase() Case {
 	req := protocol.Request{
 		Kind: protocol.KindTyping,
@@ -346,8 +290,6 @@ func b7bCase() Case {
 	}
 }
 
-// b8bCase: the SSH host is reached twice mid-history, once via ssh and once
-// via scp. cd ~/infra ran in the home directory; everything after ran in Cwd.
 func b8bCase() Case {
 	req := protocol.Request{
 		Kind: protocol.KindTyping,
@@ -377,10 +319,6 @@ func b8bCase() Case {
 	}
 }
 
-// b9Case: a real branch name exists in history, but only under a
-// DIFFERENT repo's Cwd -- ContainsTokenNotInContext can't see this, since
-// it flattens History across all cwds and reads the foreign branch as
-// known vocabulary. ContainsOtherCwdOnlyToken is scoped to Cwd instead.
 func b9Case() Case {
 	req := protocol.Request{
 		Kind:      protocol.KindNextCommand,
@@ -413,15 +351,7 @@ func b9Case() Case {
 }
 
 // ---- C. Nonsense incrementing ---------------------------------------------
-//
-// C1/C2 are narrow deterministic graders (normalize + diff, flag a
-// numeric-only delta). C3 and C1b are the general case they can't catch —
-// a mechanically-plausible next command that isn't actually useful, e.g. a
-// bump wrapped in extra flags — so they're judged instead.
 
-// c3Rubric names the specific failure mode (mechanical version-bump) as the
-// fail example rather than leaving "plausible" as a vague, judge-noising
-// criterion.
 const c3Rubric = `The context is a shell history ending in a git tag-and-push sequence. You
 are shown a suggested next command. Answer: is this suggestion a plausible
 next command a developer would actually run in this situation (e.g.
@@ -435,9 +365,6 @@ only a mechanical version bump available as a pattern-continuation, abstaining
 is the correct call, not a missed one. You are looking only at this
 question, not at syntax or formatting.`
 
-// c1bRubric mirrors c3Rubric for C1's own history/shape, explicitly naming
-// the wrapped-in-extra-flags case as still mechanical — the shape
-// EqualsHistoryModuloNumber can't see.
 const c1bRubric = `The context is a shell history ending in a git tag-and-push sequence. You
 are shown a suggested next command. Answer: is this suggestion a plausible
 next command a developer would actually run in this situation (e.g.
@@ -504,11 +431,6 @@ func incrementingCases() []Case {
 }
 
 // ---- D. Useless / looping --------------------------------------------------
-//
-// D1/D3/D4 measure without asserting: suppression risks eating a
-// legitimately-repeated command, so these track the rate rather than fail on
-// it. D5/D6 assert MustNot on the two narrower shapes where a repeat has no
-// possible justification (D2 stays the "correct repeat" control either way).
 
 func loopingCases() []Case {
 	return []Case{
@@ -524,9 +446,6 @@ func loopingCases() []Case {
 			},
 		},
 		{
-			// D2 is the "correct repeat" control: after a failing build, a
-			// suppressor that punishes ALL repeats would wrongly suppress
-			// this one.
 			ID:       "D2",
 			Category: "looping",
 			Req: protocol.Request{
@@ -547,9 +466,6 @@ func loopingCases() []Case {
 				GitDirty: true,
 			},
 			Asserts: []Assertion{
-				// "suggestion == git status" is exactly "equals the last
-				// history entry" here, so EqualsRecentHistory(1) (the last
-				// 1 entry) expresses it without a bespoke equality grader.
 				{Label: "equals-git-status", Polarity: Measure, Grader: EqualsRecentHistory(1)},
 			},
 		},
@@ -565,9 +481,6 @@ func loopingCases() []Case {
 			},
 		},
 		{
-			// D5 asserts the shape D1/D3 only measure: history ends on a
-			// just-finished one-off command, not D2's build-retry shape, so
-			// a verbatim repeat has no justification here.
 			ID:       "D5",
 			Category: "looping",
 			Req: protocol.Request{
@@ -579,8 +492,6 @@ func loopingCases() []Case {
 			},
 		},
 		{
-			// D6: history shows a prior switch onto the current branch --
-			// suggesting that switch again is a no-op.
 			ID:       "D6",
 			Category: "looping",
 			Req: protocol.Request{
@@ -597,14 +508,7 @@ func loopingCases() []Case {
 }
 
 // ---- E. Context usage -------------------------------------------------------
-//
-// E1/E2/E4/E5/E6/E8 are deterministic; E3 is judged -- "did it react to the
-// failure" requires judging intent, not matching a substring. E10/E11/E14
-// judge directory-following and fit for the daemon-owned-history cases.
 
-// e3Rubric: a failed build is the most common signal a next-command
-// prediction should react to; the fail example keeps the judge from
-// crediting an unrelated-but-plausible-looking suggestion.
 const e3Rubric = `The context shows the last command in history was "go build ./..." and it
 exited with a non-zero status (a failed build). Answer: does the suggested
 next command respond to that failure — e.g. retrying the build, running a
@@ -617,8 +521,6 @@ build has an obvious correct response (retry, inspect, fix), so producing
 nothing is a miss, not a judgement call. You are looking only at this
 question, not at syntax or formatting.`
 
-// e10Rubric: E9's judged sibling -- Contains("npm") can't see "invented
-// something unrelated to either project", which needs a judge to catch.
 const e10Rubric = `The shell history shown starts with two Go commands (go mod tidy, go
 build ./...) run in the current directory, followed by five npm commands
 from a DIFFERENT project (/x/webapp) that sit closer to the cursor. The
@@ -632,9 +534,6 @@ suggestion FAILS: a Go-appropriate command is available from the earlier
 history, so silence here is a miss, not a judgement call. You are looking
 only at this question, not at syntax or formatting.`
 
-// e11Rubric: history is deliberately from a DIFFERENT project (Node/npm)
-// than the live cwd/dir_entries (Rust) -- probes whether the model still
-// grounds its suggestion in the current directory with zero same-dir history.
 const e11Rubric = `The shell history shown is from a DIFFERENT project than the current
 directory: the history lines are Node.js/npm commands, but the current
 working directory contains Cargo.toml and src — a Rust project, with no
@@ -646,9 +545,6 @@ otherwise assumes the history's project context still holds. An EMPTY suggestion
 current directory listing, so silence here is a miss. You are looking only
 at this question, not at syntax or formatting.`
 
-// e14Rubric probes whether the suggestion still fits /home/dir despite an
-// interleaved transcript that can make the parent dir look adjacent to
-// the cursor.
 const e14Rubric = `The current working directory is /home/dir. The shell history available
 includes commands run in /home/dir and, interleaved with them, a visit to
 its parent directory /home (a "cd .." followed later by a "cd dir" back).
@@ -709,10 +605,6 @@ func contextCases() []Case {
 				DirEntries: []string{"main.py", "utils.py", "README.md"},
 			},
 			Asserts: []Assertion{
-				// Narrower than NamesEntryInDirEntries: the plan pins this
-				// to the two runnable scripts, not "any dir entry" (which
-				// would also accept README.md — a real dir entry, but not a
-				// sensible python target).
 				{Label: "names-a-runnable-script", Polarity: Must, Threshold: 0.80,
 					Grader: MatchesRegexp("suffix-is-main-or-utils", `^\s*"?(main\.py|utils\.py)"?\s*$`)},
 			},
@@ -731,9 +623,6 @@ func contextCases() []Case {
 		},
 		e6Case(),
 		{
-			// E8: with no context at all, abstaining (empty output) is
-			// correct. Threshold set from a manual review (20260823) where
-			// every sample hallucinated instead of abstaining.
 			ID:       "E8",
 			Category: "context",
 			Req:      protocol.Request{Kind: protocol.KindNextCommand},
@@ -750,9 +639,6 @@ func contextCases() []Case {
 	}
 }
 
-// e6Case: does stale history (8 npm commands) win over the CURRENT cwd (a
-// Go module) once the transcript has moved on? The same-dir go signal sits
-// directly adjacent to the cursor -- E9 pushes it far away instead.
 func e6Case() Case {
 	req := protocol.Request{
 		Kind:       protocol.KindNextCommand,
@@ -774,9 +660,6 @@ func e6Case() Case {
 	}
 }
 
-// e9Case pushes the same-dir go signal far from the cursor, behind five
-// webapp/npm commands, using per-entry cwds -- E6 carries the same signal
-// adjacent to the cursor instead.
 func e9Case() Case {
 	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
 	req.SetHistory(
@@ -794,9 +677,6 @@ func e9Case() Case {
 	}
 }
 
-// e10Case: E9's judged sibling, same Request -- a substring/token check
-// can't see "the model invented something unrelated to either project",
-// which needs a judge (e10Rubric).
 func e10Case() Case {
 	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
 	req.SetHistory(
@@ -814,10 +694,6 @@ func e10Case() Case {
 	}
 }
 
-// e11Case: zero same-dir history anywhere in the pool -- does a cwd-aware
-// prompt's empty history block buy correctness, or just silence? The judged
-// assertion checks directory-following directly; IsEmpty is Measure, so an
-// abstention-driven pass reads as a number, not a pass on its own.
 func e11Case() Case {
 	req := protocol.Request{
 		Kind:       protocol.KindNextCommand,
@@ -840,9 +716,6 @@ func e11Case() Case {
 	}
 }
 
-// e12Case: the counter-hypothesis case. Right after a "cd", every relevant
-// history entry is tagged with the PREVIOUS directory -- hard cwd filtering
-// should HURT here, dropping the only useful context there is.
 func e12Case() Case {
 	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/dotfiles"}
 	req.SetHistory(
@@ -859,9 +732,6 @@ func e12Case() Case {
 	}
 }
 
-// e13Case: the actual shipping shape -- bootstrapped ("" cwd) entries
-// followed by tagged ones. The only case that exercises the "" policy
-// end to end.
 func e13Case() Case {
 	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/x/gotool"}
 	req.SetHistory(
@@ -879,9 +749,6 @@ func e13Case() Case {
 	}
 }
 
-// e14Case interleaves /home/dir with a visit to its parent /home: filtering
-// to /home/dir drops the intermediate hop, so the transcript can read as
-// continuous when it wasn't. Measures the leak instead of asserting on it.
 func e14Case() Case {
 	req := protocol.Request{Kind: protocol.KindNextCommand, Cwd: "/home/dir"}
 	req.SetHistory(
@@ -902,14 +769,7 @@ func e14Case() Case {
 }
 
 // ---- F. Abstention ----------------------------------------------------------
-//
-// F1 covers plain garbage input. F2 is judged: a buffer that's already a
-// complete, valid command, where the only correct behaviors are "append a
-// sensible continuation" or "abstain" — never noise.
 
-// f2Rubric states explicitly that an empty suggestion is a GOOD outcome, so
-// the judge doesn't penalize a correct abstention for having nothing to
-// evaluate.
 const f2Rubric = `The buffer already typed is "ls -la" — a complete, valid, self-contained
 shell command with common flags. You are shown what (if anything) the
 system suggests appending after it. An EMPTY suggestion is a GOOD, correct
@@ -929,9 +789,6 @@ func abstentionCases() []Case {
 			Category: "abstention",
 			Req:      protocol.Request{Kind: protocol.KindTyping, Buf: "asdkjhqwe"},
 			Asserts: []Assertion{
-				// Two assertions, not one compound grader — a compound
-				// grader that fails tells you less. AnyOf here is a genuine
-				// disjunction ("empty or <=8 chars").
 				{Label: "empty-or-short", Polarity: Must, Threshold: 0.70,
 					Grader: AnyOf("empty-or-not-longer-than-8", IsEmpty(), Not(LongerThan(8)))},
 				{Label: "prose-markers", Polarity: TripWire, Grader: LooksLikeProse()},

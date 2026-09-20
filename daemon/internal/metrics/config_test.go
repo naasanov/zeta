@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestConfigFromEnv_EnabledByDefault pins the TEMPORARY dogfooding
-// default-ON; flips to asserting disabled at the Phase-3 metrics strip.
+// Pins the TEMPORARY dogfooding default-ON; flip this test once metrics
+// default to OFF.
 func TestConfigFromEnv_EnabledByDefault(t *testing.T) {
 	t.Setenv(EnvEnable, "")
 	if _, ok := ConfigFromEnv(); !ok {
@@ -15,8 +15,6 @@ func TestConfigFromEnv_EnabledByDefault(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_OnlyExplicitZeroDisables: only literal "0"/"false" turns
-// metrics off; every other value leaves them on.
 func TestConfigFromEnv_OnlyExplicitZeroDisables(t *testing.T) {
 	for _, v := range []string{"0", "false"} {
 		t.Setenv(EnvEnable, v)
@@ -32,7 +30,6 @@ func TestConfigFromEnv_OnlyExplicitZeroDisables(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_Defaults checks resolved values when only the gate is set.
 func TestConfigFromEnv_Defaults(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 	t.Setenv(EnvLogPath, "")
@@ -55,7 +52,6 @@ func TestConfigFromEnv_Defaults(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_Overrides checks each env override wins over its default.
 func TestConfigFromEnv_Overrides(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 	t.Setenv(EnvLogPath, "/tmp/custom/ev.jsonl")
@@ -77,7 +73,6 @@ func TestConfigFromEnv_Overrides(t *testing.T) {
 	}
 }
 
-// TestDefaultLogPath_FallsBackToHome covers the no-XDG_STATE_HOME branch.
 func TestDefaultLogPath_FallsBackToHome(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("HOME", "/tmp/fakehome")
@@ -88,8 +83,8 @@ func TestDefaultLogPath_FallsBackToHome(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_RawTextEnabledByDefault pins the TEMPORARY dogfooding
-// default-ON; flips to asserting false once raw-text reverts to opt-in.
+// Pins the TEMPORARY dogfooding default-ON; flip this test once raw-text
+// reverts to opt-in.
 func TestConfigFromEnv_RawTextEnabledByDefault(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 	t.Setenv(EnvRawText, "")
@@ -103,8 +98,6 @@ func TestConfigFromEnv_RawTextEnabledByDefault(t *testing.T) {
 	}
 }
 
-// TestConfigFromEnv_RawTextOnlyExplicitZeroDisables: only literal "0"/"false"
-// turns raw-text capture off; every other value leaves it on.
 func TestConfigFromEnv_RawTextOnlyExplicitZeroDisables(t *testing.T) {
 	t.Setenv(EnvEnable, "1")
 
@@ -131,8 +124,6 @@ func TestConfigFromEnv_RawTextOnlyExplicitZeroDisables(t *testing.T) {
 	}
 }
 
-// TestDefaultUser_NeverEmpty: DefaultUser must never return "" (an empty
-// user fails silently as an unattributable row).
 func TestDefaultUser_NeverEmpty(t *testing.T) {
 	if got := DefaultUser(); strings.TrimSpace(got) == "" {
 		t.Error("DefaultUser() = empty, want the OS user or \"unknown\"")

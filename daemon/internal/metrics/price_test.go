@@ -2,9 +2,6 @@ package metrics
 
 import "testing"
 
-// TestCostUSD_KnownModel checks a known token count against a hand-computed
-// expected cost for the default groq model, pinning the current priceTable
-// numbers (openai/gpt-oss-20b: $0.075/M in, $0.30/M out).
 func TestCostUSD_KnownModel(t *testing.T) {
 	// 1,000,000 input tokens, 500,000 output tokens, no cached tokens.
 	got := CostUSD("openai", "openai/gpt-oss-20b", 1_000_000, 500_000, 0)
@@ -14,10 +11,6 @@ func TestCostUSD_KnownModel(t *testing.T) {
 	}
 }
 
-// TestCostUSD_CachedDiscount asserts cached input tokens are billed at the
-// model's CachedPerM rate (50% of InPerM for Groq's gpt-oss-120b, per
-// https://console.groq.com/docs/prompt-caching), using openai/gpt-oss-120b
-// since it's the priced model that actually supports caching.
 func TestCostUSD_CachedDiscount(t *testing.T) {
 	const provider = "openai"
 	const model = "openai/gpt-oss-120b"
@@ -42,9 +35,6 @@ func TestCostUSD_CachedDiscount(t *testing.T) {
 	}
 }
 
-// TestCostUSD_UnknownModelIsZero asserts unknown provider/model pairs return
-// 0 cost rather than erroring, since cost_usd is a dev-only advisory number,
-// not billing.
 func TestCostUSD_UnknownModelIsZero(t *testing.T) {
 	got := CostUSD("openai", "some-model-not-in-the-table", 1_000_000, 1_000_000, 500_000)
 	if got != 0 {
@@ -52,10 +42,6 @@ func TestCostUSD_UnknownModelIsZero(t *testing.T) {
 	}
 }
 
-// TestCostUSD_SameModelNameDifferentProviderDoesNotCollide pins the T1
-// refactor's whole reason for keying priceTable by provider+model: an
-// unpriced provider serving a model name that happens to match a priced
-// Groq model must not silently inherit Groq's price.
 func TestCostUSD_SameModelNameDifferentProviderDoesNotCollide(t *testing.T) {
 	got := CostUSD("anthropic", "llama-3.3-70b-versatile", 1_000_000, 500_000, 0)
 	if got != 0 {
@@ -63,9 +49,6 @@ func TestCostUSD_SameModelNameDifferentProviderDoesNotCollide(t *testing.T) {
 	}
 }
 
-// TestCostUSD_AnthropicCachedDiscount pins the anthropic/claude-haiku-4-5
-// entry: cached tokens bill at 0.1x the input rate (Anthropic's discount),
-// not Groq's 0.5x, which is exactly why CachedPerM is a per-model field.
 func TestCostUSD_AnthropicCachedDiscount(t *testing.T) {
 	const provider = "anthropic"
 	const model = "claude-haiku-4-5"
@@ -82,10 +65,6 @@ func TestCostUSD_AnthropicCachedDiscount(t *testing.T) {
 	}
 }
 
-// TestCostUSD_Codestral pins the codestral/codestral-latest entry against
-// Mistral's verified published pricing (mistral.ai/pricing/api, checked
-// 2026-07-16): $0.30/$0.90 per 1M input/output tokens, so a future price
-// change shows up as an intentional test diff rather than a silent drift.
 func TestCostUSD_Codestral(t *testing.T) {
 	got := CostUSD("codestral", "codestral-latest", 1_000_000, 500_000, 0)
 	want := 1.0*0.30 + 0.5*0.90 // $0.30 + $0.45 = $0.75

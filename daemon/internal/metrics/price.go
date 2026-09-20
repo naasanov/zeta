@@ -5,7 +5,6 @@ package metrics
 // apart when re-deriving cost_usd. Bump it whenever priceTable changes.
 const PriceTableVersion = 5
 
-// modelPrice holds per-million-token USD pricing for one provider+model.
 type modelPrice struct {
 	InPerM  float64
 	OutPerM float64
@@ -15,14 +14,9 @@ type modelPrice struct {
 	CachedPerM float64
 }
 
-// priceTable maps "provider/model" -> pricing. Unknown keys cost 0 rather
-// than erroring — this is a dev-only advisory number, not billing. Prices
-// last verified 2026-08-22; re-check against each provider's pricing page
-// before citing these numbers if the table is more than a few months old.
-// Only Groq's GPT-OSS family and Anthropic/Codestral support cached-token
-// discounts; llama-3.3-70b-versatile legitimately always reports 0 cached.
-// llama-3.3-70b-versatile is retired (Groq shut it down 2026-08-16) but stays
-// priced so old events.jsonl rows can still be re-derived.
+// priceTable maps "provider/model" -> pricing. Unknown keys cost 0: this is
+// a dev-only advisory number, not billing. llama-3.3-70b-versatile is
+// retired but stays priced so old events.jsonl rows can be re-derived.
 var priceTable = map[string]modelPrice{
 	"openai/llama-3.3-70b-versatile": {
 		InPerM:     0.59,
@@ -34,18 +28,13 @@ var priceTable = map[string]modelPrice{
 		OutPerM:    0.60,
 		CachedPerM: 0.15 * 0.5,
 	},
-	// qwen3.6-27b: the interim groq preset before gpt-oss-20b (see below).
-	// Cached-token discount support is unconfirmed on Groq for this model,
-	// so CachedPerM is left at InPerM (no assumed discount) rather than
-	// guessed.
+	// Cached-token discount is unconfirmed on Groq for this model, so
+	// CachedPerM is left at InPerM rather than guessed.
 	"openai/qwen/qwen3.6-27b": {
 		InPerM:     0.60,
 		OutPerM:    3.00,
 		CachedPerM: 0.60,
 	},
-	// gpt-oss-20b: current groq preset default (console.groq.com/docs/models,
-	// verified 2026-08-22). Supports the same 0.5x cached-input discount as
-	// gpt-oss-120b.
 	"openai/openai/gpt-oss-20b": {
 		InPerM:     0.075,
 		OutPerM:    0.30,
@@ -63,8 +52,7 @@ var priceTable = map[string]modelPrice{
 	},
 }
 
-// CostUSD estimates the dollar cost of one request given its provider,
-// model, and token counts. Unknown provider/model pairs return 0.
+// Unknown provider/model pairs return 0.
 func CostUSD(provider, model string, inputTokens, outputTokens, cachedTokens int) float64 {
 	p, ok := priceTable[provider+"/"+model]
 	if !ok {

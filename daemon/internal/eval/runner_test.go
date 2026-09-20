@@ -51,8 +51,7 @@ func TestAdaptiveLimiter_LearnsCostAndThrottles(t *testing.T) {
 	l := NewAdaptiveLimiter()
 	// Refill rate: 8000 tokens over 60s = ~133.3 tokens/sec.
 	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 8000, ResetTokens: 60 * time.Second})
-	// Second observation, 245 tokens consumed with negligible elapsed time
-	// between the two calls: the running-max cost estimate should land near 245.
+	// 245 tokens consumed with ~0 elapsed time: cost estimate should land near 245.
 	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 7755, ResetTokens: time.Second})
 
 	l.mu.Lock()
@@ -62,8 +61,7 @@ func TestAdaptiveLimiter_LearnsCostAndThrottles(t *testing.T) {
 		t.Fatalf("learned cost estimate = %v, want roughly 245", cost)
 	}
 
-	// Drain the projected budget down near the cost estimate so the next
-	// Wait must actually throttle.
+	// Set remaining near the cost estimate so the next Wait must throttle.
 	l.mu.Lock()
 	l.remaining = cost - 1
 	l.mu.Unlock()
@@ -85,8 +83,7 @@ func TestAdaptiveLimiter_RefillBetweenObservationsDoesNotUnderestimateCost(t *te
 	l.lastUpdate = time.Now().Add(-time.Second) // pretend a full second refilled since then
 	l.mu.Unlock()
 
-	// Naively, remaining barely dropped (1000 -> 900), but ~117 tokens/sec
-	// refilled in that second, so the real cost was closer to 217, not 100.
+	// Remaining barely drops (1000 -> 900), but ~117 tokens/sec refilled, so the real cost is ~217, not 100.
 	l.Observe(&provider.RateLimit{LimitTokens: 8000, RemainingTokens: 900, ResetTokens: 60 * time.Second})
 
 	l.mu.Lock()
@@ -166,16 +163,15 @@ func TestAdaptiveLimiter_WaitRespectsCtxCancellation(t *testing.T) {
 	}
 }
 
-// rlScriptEntry is one scripted Complete outcome for rlScriptProvider: unlike
-// StubResult, it can attach a RateLimit to an ERRORED completion the way a
-// real 429 response does.
+// rlScriptEntry is one scripted Complete outcome for rlScriptProvider: it
+// can attach a RateLimit to an errored completion, matching a real 429.
 type rlScriptEntry struct {
 	completion provider.Completion
 	err        error
 }
 
 // rlScriptProvider replays rlScriptEntry values in order (cycling once
-// exhausted) and counts calls, for exercising runOne's rate-limit retry loop.
+// exhausted) and counts calls.
 type rlScriptProvider struct {
 	mu     sync.Mutex
 	idx    int
@@ -203,15 +199,13 @@ func (p *rlScriptProvider) Model() string                        { return "stub-
 func (p *rlScriptProvider) PromptName() string                   { return "stub" }
 func (p *rlScriptProvider) RenderPrompt(provider.Request) string { return "" }
 
-// rateLimitedErr is a *provider.Error classified the way a real 429 is, so
-// errors.As(err, &perr) with perr.Kind == provider.ErrRateLimited matches it.
+// rateLimitedErr returns a *provider.Error classified the way a real 429 is.
 func rateLimitedErr() error {
 	return &provider.Error{Kind: provider.ErrRateLimited, Provider: "groq", Err: errBoom}
 }
 
 // spyLimiter is a Limiter test double that counts Wait calls and records
-// every Observe argument, so a test can assert the retry loop actually
-// re-consults the limiter and feeds it what each attempt learned.
+// every Observe argument.
 type spyLimiter struct {
 	mu       sync.Mutex
 	waits    int
@@ -237,9 +231,6 @@ func (l *spyLimiter) snapshot() (waits int, observed []*provider.RateLimit) {
 	return l.waits, append([]*provider.RateLimit(nil), l.observed...)
 }
 
-// TestRunCase_RateLimitedAttemptRetriedNotRecorded guards runOne's contract
-// that a throttled attempt never becomes a Sample: only the eventual
-// success does, carrying its own TTFT rather than the throttled attempt's.
 func TestRunCase_RateLimitedAttemptRetriedNotRecorded(t *testing.T) {
 	p := &rlScriptProvider{script: []rlScriptEntry{
 		{err: rateLimitedErr()},
@@ -264,9 +255,6 @@ func TestRunCase_RateLimitedAttemptRetriedNotRecorded(t *testing.T) {
 	}
 }
 
-// TestRunCase_RateLimitRetriesBounded guards maxRateLimitAttempts: a
-// provider that is always rate-limited must not retry forever, and the
-// eventual give-up records exactly one error sample.
 func TestRunCase_RateLimitRetriesBounded(t *testing.T) {
 	p := &rlScriptProvider{script: []rlScriptEntry{{err: rateLimitedErr()}}}
 	r := &Runner{Provider: p, FixedN: 1}
@@ -282,9 +270,6 @@ func TestRunCase_RateLimitRetriesBounded(t *testing.T) {
 	}
 }
 
-// TestRunCase_NonRateLimitErrorNotRetried guards that the retry loop is
-// specific to ErrRateLimited: any other error records immediately, with no
-// wasted retry against a call that isn't going to succeed on its own.
 func TestRunCase_NonRateLimitErrorNotRetried(t *testing.T) {
 	p := &rlScriptProvider{script: []rlScriptEntry{{err: errBoom}}}
 	r := &Runner{Provider: p, FixedN: 1}
@@ -300,7 +285,6 @@ func TestRunCase_NonRateLimitErrorNotRetried(t *testing.T) {
 	}
 }
 
-// containsGrader reports whether out contains sub.
 func containsGrader(sub string) Grader {
 	return GraderFunc{
 		N: "contains:" + sub,
@@ -314,11 +298,6 @@ func basicCase(asserts ...Assertion) Case {
 	return Case{ID: "T1", Category: "test", Req: protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"}, Asserts: asserts}
 }
 
-// TestRunCase_CapturesProviderTTFT guards the plumbing the report's P50
-// LATENCY column depends on: provider.Completion.TTFT must survive into
-// Sample.TTFT on the success path, and stay zero on the error path (an
-// errored call never got a first byte, so it must not silently contribute a
-// fake zero-latency data point to a cell's median).
 func TestRunCase_CapturesProviderTTFT(t *testing.T) {
 	p := NewStubProvider("test",
 		StubResult{Output: "ok", TTFT: 42 * time.Millisecond},
@@ -362,8 +341,7 @@ func TestRun_IdenticalOutputsSaturateAtMinRuns(t *testing.T) {
 }
 
 func TestRun_DisagreementEscalatesToMaxRuns(t *testing.T) {
-	// Alternates present/absent for the "has-d" grader every other sample,
-	// so the first 3 samples cannot possibly all agree.
+	// Alternates present/absent every other sample, so the first 3 samples cannot all agree.
 	p := NewStubProvider("test", StubResult{Output: "d"}, StubResult{Output: "x"})
 	r := &Runner{Provider: p}
 	c := basicCase(Assertion{Label: "has-d", Polarity: Measure, Grader: containsGrader("d")})
@@ -575,12 +553,8 @@ func TestRun_ProviderAndModelPopulated(t *testing.T) {
 	}
 }
 
-// TestRunCase_GraderErrorsNeverPass guards the hole found reviewing Part 1:
-// a Grader that always errors produces zero graded samples, and the natural
-// formulation of each polarity would then read as a pass — most dangerously
-// for TripWire, whose "no occurrences seen" is indistinguishable from "never
-// looked". An assertion that never ran must fail loudly for EVERY polarity,
-// and the grader errors must be counted rather than swallowed.
+// TestRunCase_GraderErrorsNeverPass checks that a Grader which always errors
+// produces zero graded samples for every polarity.
 func TestRunCase_GraderErrorsNeverPass(t *testing.T) {
 	boom := GraderFunc{N: "boom", F: func(protocol.Request, string) (bool, error) {
 		return false, errors.New("grader exploded")
@@ -615,10 +589,6 @@ func TestRunCase_GraderErrorsNeverPass(t *testing.T) {
 	}
 }
 
-// TestRunCase_FirstGraderErrorKeepsOnlyTheFirst mirrors
-// TestRun_TripWireRecordsOnlyFirstOffending: a grader that errors with a
-// DIFFERENT message on each call must still surface only the first one, not
-// the last or a concatenation — same "keep the first instance" contract.
 func TestRunCase_FirstGraderErrorKeepsOnlyTheFirst(t *testing.T) {
 	calls := 0
 	flaky := GraderFunc{N: "flaky", F: func(protocol.Request, string) (bool, error) {
@@ -638,10 +608,8 @@ func TestRunCase_FirstGraderErrorKeepsOnlyTheFirst(t *testing.T) {
 	}
 }
 
-// TestTruncateGraderError checks that a long grader error message is
-// truncated, but that the truncated form still contains an identifying
-// prefix (in the live bug this fix targets, an HTTP status code and a model
-// id sit right at the start of the message).
+// TestTruncateGraderError checks that a long grader error is truncated but
+// still retains its identifying prefix (HTTP status, model id).
 func TestTruncateGraderError(t *testing.T) {
 	short := "404 models/some-judge-model is not found for API version v1main"
 	if got := truncateGraderError(short); got != short {
@@ -658,12 +626,8 @@ func TestTruncateGraderError(t *testing.T) {
 	}
 }
 
-// TestRun_ProgressIsInCaseOrder pins the guarantee live progress output
-// depends on: cases run concurrently (defaultConcurrency workers), but
-// Progress must fire in CASE order. If it fired in completion order, the Nth
-// symbol on the pytest-style row would belong to whichever case happened to
-// finish Nth, and reading "the 5th case failed" off the 5th dot would be
-// wrong. Run with -race: this is where an out-of-order or racy emission shows.
+// TestRun_ProgressIsInCaseOrder guards that Progress fires in case order
+// even though cases run concurrently.
 func TestRun_ProgressIsInCaseOrder(t *testing.T) {
 	const n = 50
 	cases := make([]Case, n)
@@ -693,9 +657,8 @@ func TestRun_ProgressIsInCaseOrder(t *testing.T) {
 	}
 }
 
-// TestRun_ProgressResultMatchesReturnedResult guards against the emitted
-// CaseResult drifting from the one Run returns — the row would then disagree
-// with the scorecard printed underneath it.
+// TestRun_ProgressResultMatchesReturnedResult guards that the emitted
+// CaseResult matches the one Run returns.
 func TestRun_ProgressResultMatchesReturnedResult(t *testing.T) {
 	cases := []Case{
 		{ID: "P1", Asserts: []Assertion{{Label: "has-x", Polarity: Must, Threshold: 0.8, Grader: containsGrader("x")}}},

@@ -8,8 +8,6 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// TestContextBlockOmitsAbsentFields: with no context fields set,
-// contextBlock must produce nothing at all.
 func TestContextBlockOmitsAbsentFields(t *testing.T) {
 	got := contextBlock(protocol.Request{V: protocol.Version, ID: "x", Kind: protocol.KindTyping, Buf: "git ad"})
 	if got != "" {
@@ -17,10 +15,8 @@ func TestContextBlockOmitsAbsentFields(t *testing.T) {
 	}
 }
 
-// TestContextBlockLastExitZeroOmitted checks the one deliberately asymmetric
-// rule in the contract: LastExit == 0 (or absent, indistinguishable on the
-// Go side once decoded) must NOT produce a "last command" line, since only
-// failures are worth surfacing to the model.
+// TestContextBlockLastExitZeroOmitted: LastExit == 0 is indistinguishable
+// from absent once decoded, and must not produce a "last command" line.
 func TestContextBlockLastExitZeroOmitted(t *testing.T) {
 	got := contextBlock(protocol.Request{LastExit: 0, Cwd: "/tmp"})
 	if strings.Contains(got, "last command") {
@@ -28,8 +24,6 @@ func TestContextBlockLastExitZeroOmitted(t *testing.T) {
 	}
 }
 
-// TestContextBlockEmptyHistoryAndBranchOmitted checks that a present-but-empty
-// slice/string doesn't leak a line either.
 func TestContextBlockEmptyHistoryAndBranchOmitted(t *testing.T) {
 	got := contextBlock(protocol.Request{Cwd: "/tmp", GitBranch: "", History: nil, DirEntries: nil})
 	if strings.Contains(got, "git:") {
@@ -43,10 +37,6 @@ func TestContextBlockEmptyHistoryAndBranchOmitted(t *testing.T) {
 	}
 }
 
-// TestContextBlockDirEntriesPresentAndAbsent checks the dir_entries render
-// contract directly: present entries produce a "- files: ..." line
-// space-joined (mirroring the history line's gating idiom), and an
-// absent/empty slice produces no line at all.
 func TestContextBlockDirEntriesPresentAndAbsent(t *testing.T) {
 	got := contextBlock(protocol.Request{Cwd: "/tmp", DirEntries: []string{"a", "b", "c"}})
 	if !strings.Contains(got, "- files: a b c") {
@@ -64,9 +54,6 @@ func TestContextBlockDirEntriesPresentAndAbsent(t *testing.T) {
 	}
 }
 
-// TestContextBlockFullyPopulated is the positive case: every field present
-// produces exactly the documented line, in order, with correct formatting
-// (dirty suffix, exit code, semicolon-joined history oldest-to-newest).
 func TestContextBlockFullyPopulated(t *testing.T) {
 	req := protocol.Request{
 		V: protocol.Version, ID: "sess.1", Kind: protocol.KindTyping, Buf: "git ad",
@@ -92,8 +79,7 @@ func TestContextBlockFullyPopulated(t *testing.T) {
 			t.Errorf("expected block to contain %q, got:\n%s", want, got)
 		}
 	}
-	// Order matters for the stable-prefix caching story (design §7): cwd,
-	// then files (directory-static context, §7), then git, then last-exit,
+	// Order matters for prompt-cache stability: cwd, files, git, last-exit,
 	// then history.
 	idxs := make([]int, len(wantLines)-1)
 	for i, want := range wantLines[1:] {
@@ -109,8 +95,6 @@ func TestContextBlockFullyPopulated(t *testing.T) {
 	}
 }
 
-// TestContextBlockCleanBranchNoDirtySuffix ensures a clean tree doesn't get
-// the "(dirty)" suffix appended.
 func TestContextBlockCleanBranchNoDirtySuffix(t *testing.T) {
 	got := contextBlock(protocol.Request{GitBranch: "main", GitDirty: false})
 	if !strings.Contains(got, "- git: branch main\n") && !strings.HasSuffix(strings.TrimSpace(got), "- git: branch main") {
@@ -121,9 +105,8 @@ func TestContextBlockCleanBranchNoDirtySuffix(t *testing.T) {
 	}
 }
 
-// TestBufferStaysLastInAssembledUserMessage: however much context is
-// prepended, the user message must end with req.Buf so the completion
-// continues directly from it.
+// TestBufferStaysLastInAssembledUserMessage: the buffer must stay last so
+// completion continues directly from it.
 func TestBufferStaysLastInAssembledUserMessage(t *testing.T) {
 	req := protocol.Request{
 		Kind: protocol.KindTyping,
@@ -137,9 +120,6 @@ func TestBufferStaysLastInAssembledUserMessage(t *testing.T) {
 	}
 }
 
-// TestPromptUsesOneSystemPromptForBothModes checks that typing and
-// next-command share one system prompt, differing only in the user-turn
-// directive.
 func TestPromptUsesOneSystemPromptForBothModes(t *testing.T) {
 	typingPayload := chatAppend.RenderChat(protocol.Request{Kind: protocol.KindTyping, Buf: "git ad"})
 	nextPayload := chatAppend.RenderChat(protocol.Request{Kind: protocol.KindNextCommand, Buf: ""})
@@ -161,9 +141,6 @@ func TestPromptUsesOneSystemPromptForBothModes(t *testing.T) {
 	}
 }
 
-// TestFIMPopulatesHistory asserts the FIM prompts render req.History
-// verbatim (oldest-first) as raw command lines, which is what makes the
-// transcript contiguous with the buffer.
 func TestFIMPopulatesHistory(t *testing.T) {
 	req := protocol.Request{
 		Kind:    protocol.KindTyping,
@@ -178,9 +155,6 @@ func TestFIMPopulatesHistory(t *testing.T) {
 	}
 }
 
-// TestNextCommandPromptCarriesContextAndNoFakeBufferMarker checks that
-// next-command mode keeps using the real request context but no longer needs a
-// special "(prompt is empty)" sentinel in the user turn.
 func TestNextCommandPromptCarriesContextAndNoFakeBufferMarker(t *testing.T) {
 	req := protocol.Request{
 		Kind:      protocol.KindNextCommand,
@@ -208,9 +182,8 @@ func TestNextCommandPromptCarriesContextAndNoFakeBufferMarker(t *testing.T) {
 }
 
 // TestFIMGuardCommentShape pins the two things the guard block can break:
-// its last line must not run into the ambient context (the `{{if}}` vs
-// `{{- if}}` trap noted on the template), and the rules must stay ABOVE the
-// transcript so history and the buffer remain adjacent.
+// the `{{if}}`/`{{- if}}` whitespace trap, and history/buffer staying
+// adjacent.
 func TestFIMGuardCommentShape(t *testing.T) {
 	req := protocol.Request{
 		Kind:    protocol.KindTyping,
@@ -245,13 +218,12 @@ func TestFIMGuardCommentWithoutContext(t *testing.T) {
 }
 
 // ============================================================
-// cwd-aware prompts: cwd-filtered, cwd-grouped (plan A.6b/A.6c/E)
+// cwd-aware prompts: cwd-filtered, cwd-grouped
 // ============================================================
 
-// TestCwdPromptsPassthroughWithoutCwdData is the control: whenever grouping
-// cannot act (no req.Cwd, or no pool entry carries a known cwd), both
-// cwd-filtered and cwd-grouped must render byte-identically to the
-// baseline prompt, in both chat and FIM shape.
+// TestCwdPromptsPassthroughWithoutCwdData is the control: when grouping
+// cannot act (no req.Cwd, or no pool entry with known cwd), both prompts
+// must render byte-identically to the baseline.
 func TestCwdPromptsPassthroughWithoutCwdData(t *testing.T) {
 	base := protocol.Request{
 		Kind: protocol.KindTyping, Buf: "git com",
@@ -295,10 +267,9 @@ func TestCwdPromptsPassthroughWithoutCwdData(t *testing.T) {
 	}
 }
 
-// TestBaselineTruncatesPoolIdenticallyToToday is the other control (A.6b): a
-// pool larger than the rendered tail must render exactly what a pool that
-// already IS that tail renders, for every prompt that truncates to
-// defaultHistoryN.
+// TestBaselineTruncatesPoolIdenticallyToToday: a pool larger than the
+// rendered tail must render exactly what a pool that already is that tail
+// renders, for every prompt truncating to defaultHistoryN.
 func TestBaselineTruncatesPoolIdenticallyToToday(t *testing.T) {
 	all100 := make([]string, 100)
 	for i := range all100 {
@@ -321,8 +292,6 @@ func TestBaselineTruncatesPoolIdenticallyToToday(t *testing.T) {
 	}
 }
 
-// TestCwdFilteredDropsOtherDirs checks that entries from a different
-// directory never reach either rendering.
 func TestCwdFilteredDropsOtherDirs(t *testing.T) {
 	req := protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj"}
 	req.SetHistory(
@@ -351,10 +320,9 @@ func TestCwdFilteredDropsOtherDirs(t *testing.T) {
 	}
 }
 
-// TestCwdFilteredReachesRecalledSameDirEntries checks that cwd-filtered
-// filters the full pool before truncating, so same-dir entries buried
-// behind a large window of unrelated commands still surface (scenario 3,
-// "cold / long absence", in the plan's coverage table).
+// TestCwdFilteredReachesRecalledSameDirEntries: cwd-filtered filters the
+// full pool before truncating, so same-dir entries buried behind noise
+// still surface.
 func TestCwdFilteredReachesRecalledSameDirEntries(t *testing.T) {
 	noise := make([]string, 40)
 	for i := range noise {
@@ -377,10 +345,9 @@ func TestCwdFilteredReachesRecalledSameDirEntries(t *testing.T) {
 	}
 }
 
-// TestCwdGroupedRecallsSameDirEntriesBehindBootstrapWindow is the A.6b edge
-// case: the pool's recent window is entirely cwd-unknown (bootstrap), with
-// tagged same-dir entries only further back. cwd-grouped must still pull
-// them forward, adjacent to the cursor, despite being oldest in the pool.
+// TestCwdGroupedRecallsSameDirEntriesBehindBootstrapWindow: when the pool's
+// recent window is entirely cwd-unknown, cwd-grouped must still pull older
+// same-dir entries forward, adjacent to the cursor.
 func TestCwdGroupedRecallsSameDirEntriesBehindBootstrapWindow(t *testing.T) {
 	noise := make([]string, 40)
 	for i := range noise {
@@ -398,9 +365,8 @@ func TestCwdGroupedRecallsSameDirEntriesBehindBootstrapWindow(t *testing.T) {
 	}
 }
 
-// TestCwdGroupedPutsSameDirLast checks that same-dir entries render as a
-// block immediately above the cursor, after any other-dir entries, and
-// that the pool's chronological order is preserved within each group.
+// TestCwdGroupedPutsSameDirLast: same-dir entries render as a block above
+// the cursor, with chronological order preserved within each group.
 func TestCwdGroupedPutsSameDirLast(t *testing.T) {
 	req := protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj"}
 	req.SetHistory(
@@ -460,7 +426,7 @@ func TestCwdGroupedHeaderNeverAdjacentToCursor(t *testing.T) {
 
 // TestCwdPromptsToleratesMisalignedCwds checks that HistoryCwds shorter,
 // longer, or absent relative to History never panics either cwd-aware
-// prompt, mirroring protocol.HistoryWithCwd's own tolerance.
+// prompt.
 func TestCwdPromptsToleratesMisalignedCwds(t *testing.T) {
 	mk := func(history, cwds []string) protocol.Request {
 		return protocol.Request{Kind: protocol.KindTyping, Buf: "go bui", Cwd: "/proj", History: history, HistoryCwds: cwds}

@@ -87,9 +87,6 @@ provider = "ollama"
 [profiles.together]
 provider = "openai"
 `,
-			// Parse deliberately does not validate the openai escape hatch's
-			// required fields (base_url/model/api_key_env|api_key_cmd) — that
-			// check lives in Resolve only.
 		},
 		{
 			name: "unknown provider rejected",
@@ -349,9 +346,7 @@ func TestResolvedProfileResolveKey(t *testing.T) {
 	})
 
 	t.Run("cmd path trims trailing newline", func(t *testing.T) {
-		// echo always appends a trailing newline; a pass/op-style shell-out
-		// behaves the same way, and ResolveKey must trim it or the resolved
-		// key is silently wrong (see doc comment on ResolveKey).
+		// echo appends a trailing newline, like pass/op-style shell-outs.
 		r := ResolvedProfile{APIKeyCmd: "echo sk-from-cmd"}
 		got, err := r.ResolveKey()
 		if err != nil {

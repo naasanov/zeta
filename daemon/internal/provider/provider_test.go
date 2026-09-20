@@ -20,9 +20,6 @@ func TestRenderChatPrompt(t *testing.T) {
 	}
 }
 
-// TestNewFromProfile_ShapeMismatch asserts a clear, named error rather than a
-// panic or silent misbehavior when a prompt doesn't match the adapter it's
-// paired with — e.g. a FIM-only prompt handed to the anthropic (chat) adapter.
 func TestNewFromProfile_ShapeMismatch(t *testing.T) {
 	fimOnly, err := prompt.ByName("fim-no-marker")
 	if err != nil {
@@ -42,9 +39,6 @@ func TestNewFromProfile_ShapeMismatch(t *testing.T) {
 	}
 }
 
-// TestNewFromProfile_UnknownAdapter asserts an unrecognized adapter errors
-// rather than panicking — config.Resolve should never produce one, but the
-// switch must fail closed if it somehow does.
 func TestNewFromProfile_UnknownAdapter(t *testing.T) {
 	chatOnly, err := prompt.ByName("chat-append")
 	if err != nil {
@@ -57,9 +51,6 @@ func TestNewFromProfile_UnknownAdapter(t *testing.T) {
 	}
 }
 
-// TestNewFromProfile_MaxTokensOverride asserts a non-zero ResolvedProfile.MaxTokens
-// (e.g. the groq preset's gpt-oss-20b override) wins over the caller's global
-// maxTokens param — see the doc comment on NewFromProfile.
 func TestNewFromProfile_MaxTokensOverride(t *testing.T) {
 	chatOnly, err := prompt.ByName("chat-append")
 	if err != nil {
@@ -80,9 +71,6 @@ func TestNewFromProfile_MaxTokensOverride(t *testing.T) {
 	}
 }
 
-// TestNewFromProfile_MaxTokensFallsBackToParam asserts a zero
-// ResolvedProfile.MaxTokens (the common case) leaves the caller's own
-// maxTokens param untouched.
 func TestNewFromProfile_MaxTokensFallsBackToParam(t *testing.T) {
 	chatOnly, err := prompt.ByName("chat-append")
 	if err != nil {

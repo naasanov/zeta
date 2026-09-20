@@ -18,7 +18,6 @@ _zsh_autopilot_bind_widget() {
 
   local -i bind_count
 
-  # Save a reference to the original widget
   case $widgets[$widget] in
     # Already bound
     user:_zsh_autopilot_(bound|orig)_*)
@@ -45,21 +44,16 @@ _zsh_autopilot_bind_widget() {
       ;;
   esac
 
-  # Pass the original widget's name explicitly into the autopilot
-  # function. Use this passed in widget name to call the original
-  # widget instead of relying on the $WIDGET variable being set
-  # correctly. $WIDGET cannot be trusted because other plugins call
-  # zle without the `-w` flag (e.g. `zle self-insert` instead of
-  # `zle self-insert -w`).
+  # $WIDGET can't be trusted: other plugins call zle without -w (e.g. plain
+  # `zle self-insert`), so the original widget name is passed explicitly
+  # instead.
   eval "_zsh_autopilot_bound_${bind_count}_${(q)widget}() {
     _zsh_autopilot_widget_$autopilot_action $prefix$bind_count-${(q)widget} \$@
   }"
 
-  # Create the bound widget
   zle -N -- $widget _zsh_autopilot_bound_${bind_count}_$widget
 }
 
-# Map all configured widgets to the right autopilot widgets
 _zsh_autopilot_bind_widgets() {
   emulate -L zsh
 
@@ -74,7 +68,6 @@ _zsh_autopilot_bind_widgets() {
     $ZSH_AUTOPILOT_IGNORE_WIDGETS
   )
 
-  # Find every widget we might want to bind and bind it appropriately
   for widget in ${${(f)"$(builtin zle -la)"}:#${(j:|:)~ignore_widgets}}; do
     if [[ -n ${ZSH_AUTOPILOT_CLEAR_WIDGETS[(r)$widget]} ]]; then
       _zsh_autopilot_bind_widget $widget clear
@@ -91,9 +84,7 @@ _zsh_autopilot_bind_widgets() {
   done
 }
 
-# Given the name of an original widget and args, invoke it, if it exists
 _zsh_autopilot_invoke_original_widget() {
-  # Do nothing unless called with at least one arg
   (( $# )) || return 0
 
   local original_widget_name="$1"

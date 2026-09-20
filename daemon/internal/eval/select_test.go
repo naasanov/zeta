@@ -57,10 +57,8 @@ func TestSelect(t *testing.T) {
 	}
 }
 
-// TestSelect_UnmatchedSelectorIsAnError is the point of the whole function:
-// a selector that matches nothing must fail loudly. Silently running the
-// subset that did match would exit 0 with a clean scorecard for a run that
-// skipped the case the user was actually asking about.
+// TestSelect_UnmatchedSelectorIsAnError pins that a selector matching
+// nothing fails loudly rather than silently running the matched subset.
 func TestSelect_UnmatchedSelectorIsAnError(t *testing.T) {
 	for _, sel := range []string{
 		"A11",     // plausible typo for A1 that must not silently match A1

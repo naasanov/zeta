@@ -7,10 +7,9 @@ import (
 	"testing"
 )
 
-// TestEncodeDecodeRoundTrip drives a Request through Encode and back through a
-// Decoder, exercising the characters that make the wire format tricky: quotes,
-// backslashes, embedded newlines/tabs, and the HTML-significant '<>&' that Go
-// would otherwise \u-escape.
+// TestEncodeDecodeRoundTrip exercises the characters that make the wire
+// format tricky: quotes, backslashes, embedded newlines/tabs, and the
+// HTML-significant '<>&' that Go would otherwise \u-escape.
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	cases := []Request{
 		{V: Version, ID: "sess.1", Kind: KindTyping, Buf: "git status"},
@@ -47,9 +46,6 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		if err := NewDecoder(&buf).Decode(&got); err != nil {
 			t.Fatalf("Decode(%q): %v", want.Buf, err)
 		}
-		// Request now carries slice fields (History, DirEntries), so it's no
-		// longer comparable with !=; reflect.DeepEqual handles nil-vs-empty
-		// and element-wise comparison correctly.
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("round trip mismatch:\n got %+v\nwant %+v", got, want)
 		}
@@ -60,8 +56,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 // emits. encoding/json ignores unknown keys, so a field-name drift between
 // the client and these struct tags leaves a field zero instead of erroring.
 func TestDecodeClientContextJSON(t *testing.T) {
-	// history_cwds deliberately includes a "" element (the second entry) so
-	// the unknown-cwd encoding is pinned, not just the happy path.
+	// history_cwds includes a "" element (the second entry) so the
+	// unknown-cwd encoding is pinned, not just the happy path.
 	full := `{"v":2,"id":"s.1","kind":"typing","buf":"git sta","cwd":"/home/u/p","git_branch":"phase-1","git_dirty":true,"last_exit":127,"history":["git commit -m \"wip\"","cat a > b & echo hi","ls"],"history_cwds":["/home/u/p","",""],"dir_entries":["a","b"]}`
 	var got Request
 	if err := NewDecoder(strings.NewReader(full)).Decode(&got); err != nil {
@@ -78,7 +74,6 @@ func TestDecodeClientContextJSON(t *testing.T) {
 		t.Errorf("context fields did not land from client JSON:\n got %+v\nwant %+v", got, want)
 	}
 
-	// A request with the context fields omitted must decode to zero values.
 	min := `{"v":2,"id":"s.2","kind":"next_command","buf":"","cwd":"/tmp"}`
 	got = Request{}
 	if err := NewDecoder(strings.NewReader(min)).Decode(&got); err != nil {
@@ -121,9 +116,6 @@ func TestEncodeDisablesHTMLEscaping(t *testing.T) {
 	}
 }
 
-// TestReplyNotice_RoundTrip confirms Notice/NoticeKind survive an
-// Encode/Decode round trip, and that a notice-less Reply omits both keys
-// from the wire entirely while still emitting the non-omitempty "suggestion".
 func TestReplyNotice_RoundTrip(t *testing.T) {
 	want := Reply{V: Version, ID: "x.1", Source: SourceLLM, Notice: "auth failed (401) for codestral: check your API key", NoticeKind: "auth"}
 	var buf bytes.Buffer
@@ -149,8 +141,6 @@ func TestReplyNotice_RoundTrip(t *testing.T) {
 		t.Errorf("round trip mismatch: got %+v want %+v", got, want)
 	}
 
-	// A Reply with no notice must omit both keys entirely, not emit them
-	// empty-but-present.
 	buf.Reset()
 	plain := Reply{V: Version, ID: "x.2", Source: SourceLLM, Suggestion: "git status"}
 	if err := Encode(&buf, plain); err != nil {
@@ -165,8 +155,6 @@ func TestReplyNotice_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestDecodeStreamFrames confirms the decoder pulls consecutive newline-framed
-// messages off a single stream, the way the daemon reads a session.
 func TestDecodeStreamFrames(t *testing.T) {
 	stream := `{"v":1,"id":"a","kind":"typing","buf":"ls"}` + "\n" +
 		`{"v":1,"id":"b","kind":"typing","buf":"cd /"}` + "\n"
@@ -184,9 +172,6 @@ func TestDecodeStreamFrames(t *testing.T) {
 	}
 }
 
-// TestHistoryWithCwd_Alignment pins the tolerance contract: HistoryCwds may
-// be shorter than History, longer, entirely absent, or all-"", and
-// HistoryWithCwd must never panic — any unpaired position is just unknown.
 func TestHistoryWithCwd_Alignment(t *testing.T) {
 	cases := []struct {
 		name string
@@ -239,8 +224,6 @@ func TestHistoryWithCwd_Alignment(t *testing.T) {
 	}
 }
 
-// TestHasHistoryCwd covers the passthrough decision inputs: no HistoryCwds,
-// an all-"" HistoryCwds, and one with a single known entry.
 func TestHasHistoryCwd(t *testing.T) {
 	if (Request{History: []string{"a"}}).HasHistoryCwd() {
 		t.Error("nil HistoryCwds must report false")
@@ -253,9 +236,6 @@ func TestHasHistoryCwd(t *testing.T) {
 	}
 }
 
-// TestSetHistoryEntries_RoundTrip confirms SetHistoryEntries (the zip) and
-// HistoryWithCwd (the unzip) are inverses, and that clearing to an empty
-// slice nils both wire fields rather than leaving them empty-but-present.
 func TestSetHistoryEntries_RoundTrip(t *testing.T) {
 	es := []HistoryEntry{
 		{Cmd: "npm install", Cwd: "/x/webapp"},
@@ -285,9 +265,6 @@ func TestSetHistoryEntries_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSetHistory_Segments exercises the segment builders. The "unknown after
-// known" subtest is the mirror image of "known then unknown": bootstrapped
-// (unknown-cwd) entries followed by tagged ones, in the same mechanism.
 func TestSetHistory_Segments(t *testing.T) {
 	t.Run("single known segment", func(t *testing.T) {
 		var r Request
@@ -325,9 +302,6 @@ func TestSetHistory_Segments(t *testing.T) {
 		}
 	})
 
-	// "unknown after known": bootstrapped ("" cwd) entries followed by tagged
-	// ones. A sticky/inherit-cwd design could not express this (no prior
-	// entry to inherit "" from without a second, sentinel mechanism).
 	t.Run("unknown after known (E13 shape)", func(t *testing.T) {
 		var r Request
 		r.SetHistory(

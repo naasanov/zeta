@@ -1,13 +1,4 @@
-// Package config parses the daemon's TOML configuration (design §6):
-// provider profiles, plus the top-level debounce/max-tokens/default-profile
-// knobs. `provider` is a user-facing BRAND (codestral/anthropic/groq/ollama)
-// backed by a preset with tested base_url/model/api_key_env defaults; `openai`
-// is a generic escape hatch, NOT a preset — it requires an explicit
-// [profiles.*] block since there's nothing sensible to default it to.
-//
-// This package is PURE: Parse takes bytes and returns a validated Config, no
-// filesystem or env reads. The one exception is ResolvedProfile.ResolveKey,
-// which shells out/reads env to resolve a key.
+// Package config parses the daemon's TOML configuration.
 package config
 
 import (
@@ -20,20 +11,12 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Default values applied by Parse when the corresponding TOML key is absent
-// (zero value). These reproduce today's env-only defaults (design §4/§5)
-// so an empty or partial config.toml doesn't change existing behavior.
 const (
 	DefaultDebounceMS = 100
 	DefaultMaxTokens  = 48
 )
 
-// Preset is a brand's tested defaults: which internal adapter it speaks,
-// where it lives, which model to use, and which env var carries its key.
-// MaxTokens is 0 for every brand except groq: gpt-oss-20b burns ~50 tokens on
-// hidden reasoning (see the groq preset comment) before any visible output,
-// so it needs a larger budget than DefaultMaxTokens. 0 means "use the
-// configured/default max_tokens" (see Resolve and NewFromProfile).
+// MaxTokens 0 means "use the configured/default max_tokens".
 type Preset struct {
 	Adapter   string
 	BaseURL   string
@@ -42,14 +25,7 @@ type Preset struct {
 	MaxTokens int
 }
 
-// presets is the brand table (T2.5). "openai" is deliberately absent — it's
-// the generic escape hatch, not a preset, and is handled specially in
-// Resolve.
-//
-// qwen2.5-coder:1.5b (ollama) is an UNTESTED placeholder default for local
-// use — the user must have `ollama pull`ed it themselves. This is unlike the
-// codestral/anthropic/groq picks, which are dogfood-tested defaults. Override
-// with `model` in a profile, or ZSH_AUTOPILOT_MODEL.
+// "openai" is not a preset here; it's the generic escape hatch.
 var presets = map[string]Preset{
 	"codestral": {
 		Adapter: "codestral",
@@ -63,12 +39,8 @@ var presets = map[string]Preset{
 		Model:   "claude-haiku-4-5",
 		KeyEnv:  "ZSH_AUTOPILOT_ANTHROPIC_KEY",
 	},
-	// gpt-oss-20b is Groq's production-tier small model (qwen3.6-27b, the
-	// prior stopgap, is preview-tier and scored lower in eval: 30/38 vs
-	// 33/38). Its reasoning can't be fully silenced — openai/gpt-oss-* only
-	// accepts reasoning_effort low/medium/high, no "none" — and even "low"
-	// burns ~50 tokens on hidden chain-of-thought before any visible output
-	// (set in openai.go), hence the MaxTokens override below.
+	// gpt-oss-20b can't fully silence its reasoning (accepts only
+	// low/medium/high, no "none"); MaxTokens compensates.
 	"groq": {
 		Adapter:   "openai",
 		BaseURL:   "https://api.groq.com/openai/v1",
@@ -84,8 +56,6 @@ var presets = map[string]Preset{
 	},
 }
 
-// validProviders is the set of provider (brand) names Parse accepts in a
-// profile: every preset brand, plus "openai" (the escape hatch).
 var validProviders = func() map[string]bool {
 	m := map[string]bool{"openai": true}
 	for name := range presets {
@@ -94,8 +64,6 @@ var validProviders = func() map[string]bool {
 	return m
 }()
 
-// sortedProviderNames returns the valid provider/brand names, sorted, for use
-// in error messages.
 func sortedProviderNames() []string {
 	names := make([]string, 0, len(validProviders))
 	for n := range validProviders {
@@ -105,7 +73,6 @@ func sortedProviderNames() []string {
 	return names
 }
 
-// Config is the top-level parsed shape of config.toml.
 type Config struct {
 	DefaultProfile string             `toml:"default_profile"`
 	DebounceMS     int                `toml:"debounce_ms"`
@@ -114,22 +81,19 @@ type Config struct {
 }
 
 // Profile is one named provider configuration under [profiles.<name>].
-// Provider is a brand (a preset name, or "openai" for the escape hatch);
-// BaseURL/Model/APIKeyEnv/APIKeyCmd are OPTIONAL overrides layered on top of
-// the brand's preset (see Resolve) — for a preset brand, a profile need only
-// set Provider and everything else defaults.
+// BaseURL/Model/APIKeyEnv/APIKeyCmd are optional overrides layered on the
+// brand's preset.
 type Profile struct {
-	Provider  string `toml:"provider"`    // brand: "anthropic" | "codestral" | "groq" | "ollama" | "openai"
-	BaseURL   string `toml:"base_url"`    // override; ignored by the anthropic adapter (no baseURL param)
-	Model     string `toml:"model"`       // override
-	APIKeyEnv string `toml:"api_key_env"` // override; read first
-	APIKeyCmd string `toml:"api_key_cmd"` // override; fallback: shell command whose stdout is the key
-	MaxTokens int    `toml:"max_tokens"`  // override; 0 means "use the preset/global default"
+	Provider  string `toml:"provider"` // brand: "anthropic" | "codestral" | "groq" | "ollama" | "openai"
+	BaseURL   string `toml:"base_url"` // ignored by the anthropic adapter (no baseURL param)
+	Model     string `toml:"model"`
+	APIKeyEnv string `toml:"api_key_env"` // read first
+	APIKeyCmd string `toml:"api_key_cmd"` // fallback: shell command whose stdout is the key
+	MaxTokens int    `toml:"max_tokens"`  // 0 means "use the preset/global default"
 }
 
-// ResolvedProfile is the fully-resolved result of Config.Resolve: a brand's
-// preset defaults with any profile-level overrides applied, ready to
-// construct a provider.Provider from (see cmd/autopilotd's newProvider).
+// ResolvedProfile is a brand's preset defaults with any profile-level
+// overrides applied.
 type ResolvedProfile struct {
 	Provider  string // the brand selected (e.g. "codestral", "groq", "openai")
 	Adapter   string // the internal adapter to construct: "openai" | "anthropic" | "codestral"
@@ -137,19 +101,13 @@ type ResolvedProfile struct {
 	Model     string
 	APIKeyEnv string
 	APIKeyCmd string
-	// MaxTokens is 0 unless the preset or profile set an override; 0 means
-	// "the caller's own maxTokens param wins" (see provider.NewFromProfile).
+	// MaxTokens is 0 unless a preset or the profile set an override; 0
+	// means the caller's own maxTokens param wins.
 	MaxTokens int
 }
 
-// Parse decodes TOML bytes into a Config, applies defaults for absent
-// top-level fields, and validates cross-field invariants the TOML decoder
-// can't express (unknown provider/brand, dangling default_profile) so a bad
-// config.toml fails at startup, not on the first keystroke.
-//
-// Parse deliberately does NOT validate the openai escape hatch's required
-// fields — that lives in Resolve only, since Parse can't tell a bare-brand
-// profile (valid) from an incomplete escape-hatch one.
+// Parse decodes TOML bytes into a Config, applying defaults and validating
+// unknown-provider/dangling-default_profile invariants.
 func Parse(data []byte) (Config, error) {
 	var cfg Config
 	if err := toml.Unmarshal(data, &cfg); err != nil {
@@ -181,9 +139,9 @@ func Parse(data []byte) (Config, error) {
 	return cfg, nil
 }
 
-// Load reads path and Parses it into a Config. A missing file is not an
-// error unless mustExist is true; otherwise it Parses an empty file, so
-// defaults apply and Profiles is empty. Load reads no environment variables.
+// Load reads path and parses it into a Config. A missing file is not an
+// error unless mustExist is true; then it parses an empty file, so
+// defaults apply and Profiles is empty.
 func Load(path string, mustExist bool) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -195,15 +153,9 @@ func Load(path string, mustExist bool) (Config, error) {
 	return Parse(data)
 }
 
-// Resolve turns a selection (a config-profile name, a preset brand, or the
-// "openai" escape hatch) into a fully-resolved ResolvedProfile ready for
-// provider construction: a name not in c.Profiles but matching a preset brand
-// (or "openai") synthesizes a bare Profile{Provider: name} — the simple path,
-// e.g. ZSH_AUTOPILOT_PROVIDER=codestral with no [profiles.*] block. Preset
-// brands fill Adapter/BaseURL/Model/APIKeyEnv from the preset, then let the
-// profile override; "openai" requires base_url, model, and
-// api_key_env|api_key_cmd straight from the profile (so it's only reachable
-// via a [profiles.*] block, never the bare env path).
+// Resolve turns a selection (a profile name, a preset brand, or "openai")
+// into a fully-resolved ResolvedProfile. A name absent from c.Profiles but
+// matching a preset (or "openai") synthesizes a bare Profile{Provider: name}.
 func (c Config) Resolve(name string) (ResolvedProfile, error) {
 	profile, ok := c.Profiles[name]
 	if !ok {
@@ -267,19 +219,12 @@ func (c Config) Resolve(name string) (ResolvedProfile, error) {
 		}, nil
 	}
 
-	// Parse already validates profile.Provider against validProviders, so
-	// reaching here means a hand-built Config (not run through Parse) named
-	// an unrecognized brand — a programmer error, not user input.
 	return ResolvedProfile{}, fmt.Errorf("config: unknown provider %q, want one of %s", brand, strings.Join(sortedProviderNames(), ", "))
 }
 
-// ResolveKey resolves this profile's API key: APIKeyEnv first, then
-// APIKeyCmd as a shell-out fallback. Neither set (e.g. a local/Ollama
-// profile) returns "", nil.
-//
-// Trailing whitespace is trimmed from the command's stdout: password
-// managers (`pass show`, `op read`) emit a trailing newline that, left in,
-// produces a silently-wrong key — a 401 instead of a clear config error.
+// ResolveKey resolves the API key: APIKeyEnv first, then APIKeyCmd as a
+// shell-out fallback; neither set returns "", nil. Trailing whitespace is
+// trimmed from the command's stdout to avoid a silently-wrong key.
 func (r ResolvedProfile) ResolveKey() (string, error) {
 	if r.APIKeyEnv != "" {
 		if v := os.Getenv(r.APIKeyEnv); v != "" {
@@ -296,5 +241,4 @@ func (r ResolvedProfile) ResolveKey() (string, error) {
 	return "", nil
 }
 
-// NeedsKey reports whether this profile requires an API key.
 func (r ResolvedProfile) NeedsKey() bool { return r.APIKeyEnv != "" || r.APIKeyCmd != "" }

@@ -2,6 +2,7 @@
 #--------------------------------------------------------------------#
 # CLI                                                                 #
 #--------------------------------------------------------------------#
+
 # User-facing `autopilot` command. Not an alias to autopilotd: version,
 # log tailing, kill+respawn, and env-based level toggling are all shell-side
 # operations the daemon binary has no flags for.
@@ -15,9 +16,8 @@ _zsh_autopilot_version_path() {
 }
 
 # Kills the running daemon and respawns it, waiting out both transitions
-# instead of racing them. A level change needs a live daemon to pick it up,
-# since there's no config reload, so `log-level` reuses this too. Returns 1
-# if the daemon never comes back reachable.
+# instead of racing them. `log-level` reuses this too since there's no
+# config reload. Returns 1 if the daemon never comes back reachable.
 _zsh_autopilot_restart_daemon() {
   emulate -L zsh
   zmodload zsh/net/socket 2>/dev/null
@@ -26,7 +26,7 @@ _zsh_autopilot_restart_daemon() {
 
   [[ -n $ZSH_AUTOPILOT_SOCKET_FD ]] && exec {ZSH_AUTOPILOT_SOCKET_FD}<&- 2>/dev/null
   unset ZSH_AUTOPILOT_SOCKET_FD
-  # Once-per-shell latch (50_socket.zsh) would otherwise skip this respawn.
+  # Otherwise the once-per-shell spawn latch would skip this respawn.
   unset _ZSH_AUTOPILOT_SPAWN_TRIED
 
   local -i tries=0

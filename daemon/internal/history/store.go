@@ -5,8 +5,7 @@ import (
 	"os"
 )
 
-// Config is everything Store needs. All of it is resolved by the caller —
-// this package reads no environment.
+// Config is everything Store needs; this package reads no environment.
 type Config struct {
 	// JournalPath is the JSONL file the daemon owns. Its ABSENCE is the
 	// bootstrap watermark: there is no separate marker file.
@@ -29,15 +28,13 @@ type Store struct {
 	j      *journal
 	log    *slog.Logger
 
-	// Retrieve is the candidate-pool policy. A function field so it can be
-	// swapped in one line, and so a test can install its own.
+	// Retrieve is the candidate-pool policy, swappable for tests.
 	Retrieve Retriever
 }
 
 // New loads the corpus and starts the journal writer. Bootstrap runs once
 // ever: with no journal file, $HISTFILE seeds both the corpus and the new
-// journal, and the journal is the only source thereafter — the overlap
-// between the two is not reliably detectable.
+// journal, which is the only source thereafter.
 func New(cfg Config) (*Store, error) {
 	log := cfg.Log
 	if log == nil {
@@ -100,7 +97,7 @@ func (s *Store) Record(e Entry) {
 }
 
 // Select returns the candidate pool for one request, oldest-first. Callers
-// truncate it themselves — this is a pool, not a render list.
+// truncate it themselves: this is a pool, not a render list.
 func (s *Store) Select(q Query) []Entry {
 	if s == nil {
 		return nil
@@ -112,7 +109,6 @@ func (s *Store) Select(q Query) []Entry {
 	return r(s.corpus, q)
 }
 
-// Len reports the corpus size, for logging and tests.
 func (s *Store) Len() int {
 	if s == nil {
 		return 0

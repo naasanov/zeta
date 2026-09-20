@@ -20,8 +20,7 @@ const DefaultJournalMax = 10000
 const journalChanBuf = 256
 
 // journal appends entries to a JSONL file from a single writer goroutine.
-// The concurrency shape is copied from internal/metrics, not imported —
-// metrics must stay a leaf. Mode 0600: the file holds unredacted commands.
+// Mode 0600: the file holds unredacted commands.
 type journal struct {
 	path string
 	max  int
@@ -73,9 +72,9 @@ func openJournal(path string, max, seen int) (*journal, error) {
 	return j, nil
 }
 
-// newJSONEncoder disables HTML escaping for the same reason protocol.Encode
-// does: shell commands are full of '<', '>' and '&', and \uXXXX in the
-// journal would be both unreadable and lossy to re-read.
+// newJSONEncoder disables HTML escaping: shell commands are full of '<',
+// '>' and '&', and \uXXXX in the journal would be both unreadable and
+// lossy to re-read.
 func newJSONEncoder(f *os.File) *json.Encoder {
 	enc := json.NewEncoder(f)
 	enc.SetEscapeHTML(false)
@@ -100,7 +99,6 @@ func (j *journal) write(e Entry) {
 	}
 }
 
-// drops reports how many entries were dropped because the buffer was full.
 func (j *journal) dropped() int64 {
 	if j == nil {
 		return 0

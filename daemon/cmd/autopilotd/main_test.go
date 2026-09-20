@@ -10,8 +10,6 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// writeTempConfig writes body to a temp config.toml and points
-// ZSH_AUTOPILOT_CONFIG at it for the duration of the test.
 func writeTempConfig(t *testing.T, body string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
@@ -21,8 +19,6 @@ func writeTempConfig(t *testing.T, body string) {
 	t.Setenv("ZSH_AUTOPILOT_CONFIG", path)
 }
 
-// TestLoadConfig_MissingExplicitPathErrors confirms a typo'd ZSH_AUTOPILOT_CONFIG
-// fails loudly rather than silently falling back to defaults.
 func TestLoadConfig_MissingExplicitPathErrors(t *testing.T) {
 	t.Setenv("ZSH_AUTOPILOT_CONFIG", filepath.Join(t.TempDir(), "does-not-exist.toml"))
 
@@ -31,10 +27,6 @@ func TestLoadConfig_MissingExplicitPathErrors(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_EmptyFileAppliesDefaults confirms an empty config.toml (no
-// profiles at all) still loads cleanly with the package defaults — presets
-// resolve on demand via Config.Resolve now, so there's no built-in profile
-// left to seed.
 func TestLoadConfig_EmptyFileAppliesDefaults(t *testing.T) {
 	writeTempConfig(t, "")
 
@@ -53,12 +45,9 @@ func TestLoadConfig_EmptyFileAppliesDefaults(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_ImplicitMissingFileIsFine confirms the implicit XDG default
-// path simply being absent (no ZSH_AUTOPILOT_CONFIG set, and presumably no
-// ~/.config/autopilot/config.toml) falls back silently rather than erroring.
 func TestLoadConfig_ImplicitMissingFileIsFine(t *testing.T) {
 	t.Setenv("ZSH_AUTOPILOT_CONFIG", "")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // empty dir, no autopilot/config.toml in it
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -69,9 +58,6 @@ func TestLoadConfig_ImplicitMissingFileIsFine(t *testing.T) {
 	}
 }
 
-// TestNoticeSuggest asserts the notice-only suggest stub never fabricates
-// ghost text and carries the notice text/kind through on every request,
-// regardless of buffer contents.
 func TestNoticeSuggest(t *testing.T) {
 	fn := noticeSuggest("no API key: set ZSH_AUTOPILOT_GROQ_KEY", "no_key")
 
@@ -106,8 +92,6 @@ func TestNoticeSuggest(t *testing.T) {
 	})
 }
 
-// newTestHistoryStore returns a *history.Store backed by a fresh temp
-// journal, with no $HISTFILE bootstrap.
 func newTestHistoryStore(t *testing.T) *history.Store {
 	t.Helper()
 	h, err := history.New(history.Config{
@@ -120,9 +104,6 @@ func newTestHistoryStore(t *testing.T) *history.Store {
 	return h
 }
 
-// TestEnrich_FillsHistoryInOrderWithAlignedCwds confirms enrich populates
-// req.History/HistoryCwds from the store's pool, index-aligned, before
-// calling next.
 func TestEnrich_FillsHistoryInOrderWithAlignedCwds(t *testing.T) {
 	h := newTestHistoryStore(t)
 	h.Record(history.Entry{Cmd: "git status", Cwd: "/x/proj", Session: "s"})
@@ -160,8 +141,6 @@ func TestEnrich_FillsHistoryInOrderWithAlignedCwds(t *testing.T) {
 	}
 }
 
-// TestEnrich_NilStoreIsPassthrough confirms a nil store leaves the request
-// untouched and still delegates to next.
 func TestEnrich_NilStoreIsPassthrough(t *testing.T) {
 	var calledWith protocol.Request
 	called := false
@@ -188,7 +167,6 @@ func TestEnrich_NilStoreIsPassthrough(t *testing.T) {
 	}
 }
 
-// TestSessionOf covers the "<session>.<seq>" split and the no-'.' fallback.
 func TestSessionOf(t *testing.T) {
 	cases := []struct {
 		id   string
@@ -206,9 +184,6 @@ func TestSessionOf(t *testing.T) {
 	}
 }
 
-// TestResolveHistfilePath_AppScopedWinsOverAmbient confirms the app-scoped
-// var is preferred over the ambient $HISTFILE, matching this repo's
-// convention of not borrowing an ambient var when an app-scoped one exists.
 func TestResolveHistfilePath_AppScopedWinsOverAmbient(t *testing.T) {
 	t.Setenv("ZSH_AUTOPILOT_HISTFILE", "/app/histfile")
 	t.Setenv("HISTFILE", "/ambient/histfile")
@@ -218,8 +193,6 @@ func TestResolveHistfilePath_AppScopedWinsOverAmbient(t *testing.T) {
 	}
 }
 
-// TestResolveHistfilePath_AmbientWinsOverFallback confirms $HISTFILE is used
-// when the app-scoped var is unset.
 func TestResolveHistfilePath_AmbientWinsOverFallback(t *testing.T) {
 	t.Setenv("ZSH_AUTOPILOT_HISTFILE", "")
 	t.Setenv("HISTFILE", "/ambient/histfile")
@@ -229,8 +202,6 @@ func TestResolveHistfilePath_AmbientWinsOverFallback(t *testing.T) {
 	}
 }
 
-// TestResolveHistfilePath_FallsBackToHome confirms ~/.zsh_history is used
-// when neither the app-scoped var nor $HISTFILE is set.
 func TestResolveHistfilePath_FallsBackToHome(t *testing.T) {
 	t.Setenv("ZSH_AUTOPILOT_HISTFILE", "")
 	t.Setenv("HISTFILE", "")

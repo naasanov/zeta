@@ -1,20 +1,16 @@
 # Example eval.toml for the eval harness (daemon/cmd/eval).
-#
-# Copy this to internal/eval/eval.toml (gitignored) and -profiles will
-# accept profile names from it, not just preset brands
-# (codestral/anthropic/groq/ollama). -config points at a different path
-# instead, if you'd rather keep it elsewhere. Want a different model on the
-# same brand? Add another profile here, not a flag.
-#
-# This is independent of the daemon's own config.toml (see
-# sandbox/config.toml.example): the harness never reads ZSH_AUTOPILOT_CONFIG
-# or ~/.config/autopilot/config.toml, so a profile added here has no effect
-# on the running daemon and vice versa.
-#
-# A profile's `provider` field is still a BRAND: a preset
-# (anthropic/codestral/groq/ollama) or the "openai" escape hatch for any
-# other OpenAI-compatible endpoint. The example below reaches Fireworks
-# through that escape hatch.
+
+# Copy this to internal/eval/eval.toml (gitignored); -profiles then accepts
+# names from it too, not just preset brands. -config points at a different
+# path instead.
+
+# Independent of the daemon's own config.toml: the harness never reads
+# ZSH_AUTOPILOT_CONFIG or ~/.config/autopilot/config.toml, so a profile
+# added here has no effect on the running daemon and vice versa.
+
+# A profile's `provider` field is still a brand: a preset
+# (anthropic/codestral/groq/ollama) or the "openai" escape hatch, as used
+# by the Fireworks example below.
 
 # [profiles.fw-qwen30b]
 # provider = "openai"

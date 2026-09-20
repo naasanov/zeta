@@ -26,9 +26,6 @@ func TestClassifyHTTP(t *testing.T) {
 	}
 }
 
-// TestError_UnwrapPreservesErrorsIs asserts errors.Is(err, context.Canceled)
-// works through the *Error wrapper, matching TestComplete_Cancellation's
-// expectation in openai_test.go.
 func TestError_UnwrapPreservesErrorsIs(t *testing.T) {
 	err := &Error{Kind: ErrCanceled, Provider: "openai", Err: context.Canceled}
 	if !errors.Is(err, context.Canceled) {

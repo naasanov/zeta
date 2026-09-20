@@ -32,7 +32,6 @@ func TestByNameAndAll(t *testing.T) {
 		if _, err := ByName(name); err != nil {
 			t.Errorf("ByName(%q) error: %v", name, err)
 		}
-		// case-insensitive
 		if _, err := ByName(strings.ToUpper(name)); err != nil {
 			t.Errorf("ByName(%q) (uppercased) error: %v", name, err)
 		}

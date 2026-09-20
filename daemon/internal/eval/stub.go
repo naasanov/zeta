@@ -1,5 +1,3 @@
-// This file holds the scripted, offline provider.Provider that backs this
-// package's unit tests and `cmd/eval -dry-run`.
 package eval
 
 import (
@@ -20,30 +18,23 @@ type StubResult struct {
 }
 
 // StubProvider is a provider.Provider that returns scripted results in
-// sequence, never touching the network. Backs both this package's unit
-// tests and `cmd/eval -dry-run`, hence exported.
-//
-// The script replays cyclically (index i % len(script)): a single-element
-// script drives "identical outputs" tests, a two-element alternating script
-// drives "disagreement"/escalation tests, and StubResult{Err: ...} entries
-// drive the errors-excluded-from-grading path.
+// sequence, never touching the network. The script replays cyclically
+// (index i % len(script)).
 type StubProvider struct {
 	mu  sync.Mutex
 	idx int
 
 	Script []StubResult
-	// PName/PModel back Name()/Model(); default to "stub"/"stub-1" when unset
-	// so a zero-value StubProvider is still usable.
+	// PName/PModel back Name()/Model(); default to "stub"/"stub-1" when unset.
 	PName  string
 	PModel string
 
-	// promptName backs PromptName(), so a dry-run report can label its cell
-	// with the prompt that was actually selected.
+	// promptName backs PromptName().
 	promptName string
 }
 
 // NewStubProvider returns a StubProvider that replays script in order,
-// cycling once it runs out, labeled with promptName.
+// cycling once it runs out.
 func NewStubProvider(promptName string, script ...StubResult) *StubProvider {
 	return &StubProvider{Script: script, PName: "stub", PModel: "stub-1", promptName: promptName}
 }

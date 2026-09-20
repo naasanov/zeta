@@ -54,8 +54,8 @@ func TestJournal_WriteReadRoundTrip(t *testing.T) {
 		}
 	}
 
-	// Same reason protocol.Encode disables it: shell text is full of these
-	// and \uXXXX would be unreadable in the journal and lossy to re-read.
+	// Shell text is full of these; \uXXXX would be unreadable in the
+	// journal and lossy to re-read.
 	raw, _ := os.ReadFile(p)
 	if strings.Contains(string(raw), `\u003e`) || !strings.Contains(string(raw), `>`) {
 		t.Fatalf("journal HTML-escaped '>'; escaping must be off. got:\n%s", raw)
@@ -117,7 +117,7 @@ func TestJournal_WriteAfterCloseIsSafe(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "history.jsonl")
 	j, _ := openJournal(p, 100, 0)
 	j.close()
-	j.write(Entry{Cmd: "after close"}) // must not panic on a closed channel
+	j.write(Entry{Cmd: "after close"})
 	if err := j.close(); err != nil {
 		t.Fatalf("second close: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestStore_BootstrapsOnceThenNeverAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The journal now exists, so $HISTFILE must not be read again — otherwise
+	// The journal now exists, so $HISTFILE must not be read again: otherwise
 	// every restart would duplicate the whole bootstrap corpus.
 	s2 := newStore(t, cfg)
 	eq(t, cmds(s2.Select(Query{N: 10})), []string{"boot a", "boot b", "live one"})

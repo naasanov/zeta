@@ -9,10 +9,8 @@ import (
 	"time"
 )
 
-// TestMain forces NO_COLOR for this package's tests: report_test.go asserts
-// on exact plain-text substrings (e.g. ". 80%"), and letting the ambient
-// environment decide whether Text() emits ANSI codes would make those
-// assertions flaky depending on where `go test` runs.
+// TestMain forces NO_COLOR so plain-text substring assertions below don't
+// depend on the ambient environment.
 func TestMain(m *testing.M) {
 	os.Setenv("NO_COLOR", "1")
 	os.Exit(m.Run())
@@ -74,10 +72,8 @@ func TestText_NoTripWiresReportsNone(t *testing.T) {
 	}
 }
 
-// TestText_NeverEvaluatedIncludesGraderErrorReason guards the diagnosability
-// fix: a "NEVER EVALUATED" line by itself (just a count) is indistinguishable
-// from a dozen other causes — diagnosing the live judge 404 required
-// bypassing the harness entirely. The rendered report must name the reason.
+// TestText_NeverEvaluatedIncludesGraderErrorReason pins that the rendered
+// report names the grader error reason, not just a count.
 func TestText_NeverEvaluatedIncludesGraderErrorReason(t *testing.T) {
 	var buf bytes.Buffer
 	results := []CaseResult{{
@@ -181,11 +177,8 @@ func TestSample_JSONRoundTripsOutput(t *testing.T) {
 	}
 }
 
-// TestText_PivotsCellsIntoColumns is the scorecard's actual contract (plan
-// doc: "case x (provider x prompt-variant) -> pass-rate"). Before this, Text
-// rendered results as a flat list with no cell identity, so a two-provider
-// run printed every case ID twice with nothing distinguishing the rows — the
-// comparison the harness exists to produce was the one thing unreadable.
+// TestText_PivotsCellsIntoColumns pins that a two-provider run pivots into
+// one row per case with a column per cell, not a repeated flat list.
 func TestText_PivotsCellsIntoColumns(t *testing.T) {
 	mk := func(provider, prompt string, present, graded int, pass bool) CaseResult {
 		return CaseResult{
@@ -208,17 +201,14 @@ func TestText_PivotsCellsIntoColumns(t *testing.T) {
 	}
 	out := buf.String()
 
-	// One row for the case, not one per cell.
 	if got := strings.Count(out, "supplies-leading-space"); got != 1 {
 		t.Errorf("assertion appears on %d rows, want exactly 1 (pivoted, not repeated per cell):\n%s", got, out)
 	}
-	// Both cells appear as columns.
 	for _, want := range []string{"groq/default", "codestral/default"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing cell column %q:\n%s", want, out)
 		}
 	}
-	// And the two cells' verdicts are both present and distinguishable.
 	if !strings.Contains(out, ". 80%") {
 		t.Errorf("missing passing cell verdict %q:\n%s", ". 80%", out)
 	}
@@ -227,10 +217,8 @@ func TestText_PivotsCellsIntoColumns(t *testing.T) {
 	}
 }
 
-// TestText_FooterReportsP50LatencyPerCell pins the latency-comparison column:
-// a cell's P50 is pooled across every case's successful samples (errored
-// samples excluded, since they never got a TTFT), and a cell with no
-// successful samples reports "n/a" rather than a misleading zero.
+// TestText_FooterReportsP50LatencyPerCell pins that a cell's P50 pools every
+// case's successful samples, and a cell with none reports "n/a".
 func TestText_FooterReportsP50LatencyPerCell(t *testing.T) {
 	results := []CaseResult{
 		{
@@ -265,10 +253,8 @@ func TestText_FooterReportsP50LatencyPerCell(t *testing.T) {
 	}
 }
 
-// TestText_TripWireNamesTheCell pins that a tripped wire says WHICH cell
-// tripped it: "A2 tripped" in a matrix run isn't actionable without it, and a
-// wire that trips on one provider but not another is a different bug from one
-// that trips on all of them.
+// TestText_TripWireNamesTheCell pins that a tripped wire names which cell
+// tripped it.
 func TestText_TripWireNamesTheCell(t *testing.T) {
 	results := []CaseResult{{
 		CaseID: "A2", Category: "syntax", Provider: "groq", PromptName: "default", Runs: 3,

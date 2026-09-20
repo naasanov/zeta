@@ -1,6 +1,4 @@
-// Package server implements the autopilotd process: a Unix-socket listener
-// speaking the protocol package's wire format, plus a per-connection request
-// coordinator that supersede-cancels stale work (design §3).
+// Package server implements the autopilotd process's Unix-socket listener and request coordinator.
 package server
 
 import (
@@ -17,12 +15,9 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// DefaultSocket is a fallback for hand-running the daemon; the zsh plugin always
-// passes an explicit -socket. Short because macOS caps socket paths at ~104 bytes.
+// DefaultSocket is a fallback default; macOS caps socket paths at ~104 bytes.
 const DefaultSocket = "/tmp/zsh-autopilot.sock"
 
-// DefaultDebounce is the quiet period before a buffered request dispatches, so a
-// keystroke burst costs one provider call instead of many.
 const DefaultDebounce = 100 * time.Millisecond
 
 // Server listens on a Unix domain socket and answers each request with a
@@ -43,12 +38,9 @@ type Server struct {
 	// record runs on the reader goroutine, so it must not block.
 	record func(req protocol.Request)
 
-	// notice is kept out of suggest so the metrics path (suggest.LLM) and the
-	// notice path classify errors independently.
 	notice func(err error) (text, kind string, ok bool)
 }
 
-// New returns a Server configured to listen on path. A nil log uses slog.Default().
 func New(path string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
@@ -64,30 +56,28 @@ func New(path string, log *slog.Logger) *Server {
 	}
 }
 
-// Overrides the suggest func. Should be called before Run
+// Must be called before Run.
 func (s *Server) SetSuggest(fn func(ctx context.Context, req protocol.Request) (protocol.Reply, error)) {
 	s.suggest = fn
 }
 
-// Overrides the record func. Should be called before Run
+// Must be called before Run.
 func (s *Server) SetRecord(fn func(req protocol.Request)) {
 	s.record = fn
 }
 
-// Overrides the notice func. Should be called before Run
+// Must be called before Run.
 func (s *Server) SetNotice(fn func(error) (string, string, bool)) {
 	s.notice = fn
 }
 
-// noSuggester is the default suggest func. main always installs a real one, so
-// reaching this means the server was wired wrong.
 func noSuggester(context.Context, protocol.Request) (protocol.Reply, error) {
 	return protocol.Reply{}, errors.New("server: no suggester configured")
 }
 
 // Run binds the socket and accepts connections until ctx is cancelled, then
-// closes the listener and in-flight connections and removes the socket file.
-// It errors if another daemon already owns SocketPath.
+// tears down and removes the socket file; it errors if another daemon
+// already owns SocketPath.
 func (s *Server) Run(ctx context.Context) error {
 	if err := s.claimSocket(); err != nil {
 		return err
@@ -97,12 +87,10 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Best-effort cleanup; also done explicitly below once accept loop exits.
 	defer os.Remove(s.SocketPath)
 
 	s.Log.Info("listening", "socket", s.SocketPath)
 
-	// Stop accepting and unblock Accept() when ctx is cancelled.
 	go func() {
 		<-ctx.Done()
 		s.Log.Debug("context cancelled, closing listener")
@@ -115,8 +103,8 @@ func (s *Server) Run(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				// Close before waiting: handlers parked in Decode never
-				// return otherwise, and Wait deadlocks.
+				// Close before waiting, or handlers parked in Decode never
+				// return and Wait deadlocks.
 				s.closeAllConns()
 				wg.Wait()
 				os.Remove(s.SocketPath)
@@ -135,8 +123,6 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// claimSocket is the single-instance guard: a socket that answers a dial belongs
-// to a live daemon, so refuse to start; one that doesn't is stale, so remove it.
 func (s *Server) claimSocket() error {
 	if _, err := os.Stat(s.SocketPath); err != nil {
 		if os.IsNotExist(err) {
@@ -156,8 +142,6 @@ func (s *Server) claimSocket() error {
 	return os.Remove(s.SocketPath)
 }
 
-// shortID trims the repeated "<session>." prefix from a request id so logs
-// carry only the sequence number.
 func shortID(id string) string {
 	if i := strings.LastIndexByte(id, '.'); i >= 0 {
 		return id[i+1:]
@@ -185,10 +169,6 @@ func (s *Server) closeAllConns() {
 	}
 }
 
-// handle owns one connection: a reader goroutine feeds it decoded requests,
-// which it debounces into one dispatch per quiet window, supersede-cancelling
-// the previous in-flight request (design §4). Dispatch and the timer stay in
-// this goroutine so teardown can wg.Wait without racing a wg.Add.
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	connCtx, connCancel := context.WithCancel(ctx)
 
@@ -196,9 +176,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	var wg sync.WaitGroup
 	var cancelPrev context.CancelFunc
 
-	// Defers run LIFO: connCancel stops in-flight work and unblocks the
-	// reader's send, wg.Wait lets writers exit, and only then is conn.Close
-	// safe. Close also unblocks the reader's Decode.
+	// Defers run LIFO: connCancel unblocks the reader, wg.Wait lets writers
+	// exit, then conn.Close is safe.
 	defer conn.Close()
 	defer wg.Wait()
 	defer connCancel()
@@ -212,7 +191,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 	reqCh := s.readRequests(connCtx, conn)
 
-	// Created stopped so it can't fire before the first request arrives.
 	timer := time.NewTimer(debounce)
 	timer.Stop()
 	defer timer.Stop()
@@ -236,8 +214,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			req := *pending
 			pending = nil
 
-			// Watching these against the per-keystroke "request" lines shows
-			// how much the debounce coalesced.
 			s.Log.Debug("dispatch", "id", shortID(req.ID), "kind", req.Kind, "buf", req.Buf)
 
 			if cancelPrev != nil {
@@ -257,9 +233,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// readRequests decodes requests off conn into the returned channel, closing
-// it on EOF or a decode error. KindRecord is served inline on the reader
-// goroutine, so it never reaches the coordinator or the debounce.
 func (s *Server) readRequests(connCtx context.Context, conn net.Conn) <-chan protocol.Request {
 	reqCh := make(chan protocol.Request)
 	go func() {
@@ -293,22 +266,14 @@ func (s *Server) readRequests(connCtx context.Context, conn net.Conn) <-chan pro
 	return reqCh
 }
 
-// respond runs one dispatched request through the suggester and writes what
-// comes back. ctx is the per-request context, cancelled when a newer request
-// supersedes this one.
 func (s *Server) respond(ctx context.Context, conn net.Conn, writeMu *sync.Mutex, req protocol.Request) {
 	reply, err := s.suggest(ctx, req)
 
-	// Checked before the cancellation gate below: a cancelled request
-	// classifies as ErrCanceled and yields no notice, so anything surfaced
-	// here is a real failure rather than a superseded one.
 	if err != nil {
 		s.reportSuggestErr(conn, writeMu, req, err)
 		return
 	}
 
-	// The client drops replies whose id isn't its current one, so writing
-	// anyway would be harmless; skipping is just as easy.
 	if ctx.Err() != nil {
 		return
 	}
@@ -316,8 +281,6 @@ func (s *Server) respond(ctx context.Context, conn net.Conn, writeMu *sync.Mutex
 	s.writeReply(conn, writeMu, reply)
 }
 
-// reportSuggestErr surfaces a non-recoverable suggest failure to the client
-// as a notice-only reply. Recoverable failures stay in the log.
 func (s *Server) reportSuggestErr(conn net.Conn, writeMu *sync.Mutex, req protocol.Request, err error) {
 	text, kind, ok := s.notice(err)
 	if !ok {

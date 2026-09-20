@@ -8,13 +8,8 @@ import (
 )
 
 // NoticeFor builds a classifier for the notice channel, closing over the
-// brand the user configured (e.g. "groq") and the env var its key comes
-// from, since a provider.Error only knows its adapter (e.g. "openai") which
-// is not what the user typed into config.toml.
-//
-// The returned func surfaces only the kinds a user can act on (auth,
-// bad_request). Everything else, including the recoverable ErrRateLimited,
-// returns ok == false.
+// user-configured brand and its key env var, since a provider.Error only
+// knows its adapter, not what the user typed into config.toml.
 func NoticeFor(brand, keyEnv string) func(error) (text, kind string, ok bool) {
 	return func(err error) (text, kind string, ok bool) {
 		var perr *provider.Error

@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// ANSI codes for the report. Kept to pass/fail signal only, gated on
-// NO_COLOR (https://no-color.org) — any non-empty value disables color.
+// ANSI codes for the report, gated on NO_COLOR (https://no-color.org): any
+// non-empty value disables color.
 const (
 	ansiReset  = "\x1b[0m"
 	ansiBold   = "\x1b[1m"
@@ -26,8 +26,6 @@ func noColor() bool {
 	return os.Getenv("NO_COLOR") != ""
 }
 
-// colorize wraps s in the given ANSI code(s), unless NO_COLOR is set or code
-// is empty (nothing to highlight).
 func colorize(code, s string) string {
 	if code == "" || noColor() {
 		return s
@@ -35,11 +33,6 @@ func colorize(code, s string) string {
 	return code + s + ansiReset
 }
 
-// ColorizeSymbol wraps a CaseSymbol glyph in the same color the scorecard
-// gives it, honoring NO_COLOR — exported so a live progress row (e.g. the
-// eval CLI's stderr stream, which prints CaseSymbol output directly rather
-// than through Text) can match the report's color semantics without
-// duplicating the ANSI codes or the NO_COLOR gate.
 func ColorizeSymbol(sym rune) string {
 	switch sym {
 	case '.':
@@ -53,14 +46,10 @@ func ColorizeSymbol(sym rune) string {
 	}
 }
 
-// ColorGood/ColorBad/ColorWarn wrap s in the report's green/red/yellow,
-// honoring NO_COLOR — exported for the same reason as ColorizeSymbol.
 func ColorGood(s string) string { return colorize(ansiGreen, s) }
 func ColorBad(s string) string  { return colorize(ansiRed, s) }
 func ColorWarn(s string) string { return colorize(ansiYellow, s) }
 
-// Meta describes one Runner invocation for a report's header/footer and for
-// the Part 4 JSON diff to key off of.
 type Meta struct {
 	Provider  string    `json:"provider"`
 	Model     string    `json:"model"`
@@ -69,30 +58,18 @@ type Meta struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// dump is the JSON wire shape for a full report: Meta plus every CaseResult.
-// It's what JSON writes and what a Part 4 -diff would read back.
 type dump struct {
 	Meta    Meta         `json:"meta"`
 	Results []CaseResult `json:"results"`
 }
 
-// JSON writes a machine-readable dump of results and meta to w, for the
-// Part 4 scorecard diff (`go run ./cmd/eval -diff old.json new.json`).
 func JSON(w io.Writer, results []CaseResult, meta Meta) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(dump{Meta: meta, Results: results})
 }
 
-// PrettyJSON writes the same document JSON writes, but easier to eyeball in
-// a terminal: embedded newlines render literally and HTML-sensitive
-// characters (<, >, &, common in shell commands) stay unescaped.
-//
-// The output is NOT valid JSON — -diff/LoadRun must always read what JSON()
-// wrote, never this. Newline rendering is a blunt find-and-replace of the
-// two-byte "\n" sequence, which misreads a literal backslash-n (e.g. a
-// prompt quoting a regex like '\n') as an escaped newline; a viewer
-// convenience, not a parser.
+// PrettyJSON's output is NOT valid JSON; LoadRun must never read it.
 func PrettyJSON(w io.Writer, results []CaseResult, meta Meta) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -105,8 +82,6 @@ func PrettyJSON(w io.Writer, results []CaseResult, meta Meta) error {
 	return err
 }
 
-// rate formats a k/N fraction as a percentage; "n/a" when n == 0 so a
-// zero-graded assertion doesn't print a misleading "0%".
 func rate(k, n int) string {
 	if n == 0 {
 		return "n/a"
@@ -114,14 +89,6 @@ func rate(k, n int) string {
 	return fmt.Sprintf("%.0f%%", 100*float64(k)/float64(n))
 }
 
-// Text writes an aligned scorecard to w: a trip-wire section (loudest,
-// printed first, only when something tripped), then one row per
-// (case, assertion) grouped by category, then a footer summarizing sampling
-// policy and totals.
-//
-// Category grouping preserves the order categories first appear in results
-// (== the order Cases were passed to Runner.Run, since Run writes results by
-// index), so the report's order is deterministic and matches the input.
 func Text(w io.Writer, results []CaseResult, meta Meta) error {
 	if err := writeHeader(w, meta); err != nil {
 		return err
@@ -157,10 +124,6 @@ func writeTripWires(w io.Writer, results []CaseResult) error {
 	for _, cr := range results {
 		for _, ar := range cr.Asserts {
 			if ar.Polarity == TripWire && !ar.Pass {
-				// The cell label is part of the identity: "A2 tripped" in a
-				// matrix run is not actionable until you know WHICH provider
-				// tripped it, and a wire that trips on one provider but not
-				// another is a different bug from one that trips on all.
 				hits = append(hits, hit{CellLabel(cr), cr.CaseID, ar.Label, ar.FirstOffending})
 			}
 		}
@@ -184,10 +147,7 @@ func writeTripWires(w io.Writer, results []CaseResult) error {
 	return err
 }
 
-// CellLabel identifies the (provider, prompt) cell a CaseResult belongs to
-// — the scorecard's column key. A flat list would be unreadable once there's
-// more than one cell: the same case ID would repeat with nothing
-// distinguishing the rows.
+// CellLabel is a CaseResult's (provider, prompt) cell: the scorecard's column key.
 func CellLabel(cr CaseResult) string {
 	provider := orNA(cr.Provider)
 	if cr.PromptName == "" {
@@ -196,8 +156,6 @@ func CellLabel(cr CaseResult) string {
 	return provider + "/" + cr.PromptName
 }
 
-// assertionKey identifies one scorecard ROW: a (case, assertion) pair, which
-// is compared across every cell column.
 type assertionKey struct {
 	Category string
 	CaseID   string
@@ -205,20 +163,13 @@ type assertionKey struct {
 }
 
 // writeScorecard renders the pivot: one row per (case, assertion), one
-// column per cell, so cells are read side by side rather than as repeated
-// blocks. Each cell renders as "<symbol> <rate>" — symbol first, so a column
-// of failures is visible by shape before any number is read. k/N stays in
-// the JSON dump; adding it here would triple the width of a wide matrix.
+// column per cell.
 func writeScorecard(w io.Writer, results []CaseResult) error {
 	cells := orderedCells(results)
 	rows, byCellRow := scorecardRows(results)
 
-	// Rendered into a buffer, not w directly: tabwriter sizes columns from
-	// raw byte length, so an ANSI-colored cell would look "wider" than a
-	// plain one and throw off alignment. cellVerdict emits same-width
-	// placeholder bytes instead of the real glyphs; decorateGlyphs swaps
-	// them for (optionally colored) glyphs AFTER Flush, once alignment is
-	// already fixed in stone and invisible escape bytes can't shift it.
+	// tabwriter sizes columns from raw byte length, so cellVerdict emits
+	// placeholder bytes; decorateGlyphs swaps in real glyphs after Flush.
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 4, 2, ' ', 0)
 
@@ -247,9 +198,7 @@ func writeScorecard(w io.Writer, results []CaseResult) error {
 		for _, c := range cells {
 			ar, ok := byCellRow[c][key]
 			if !ok {
-				// This cell never produced this (case, assertion) at all —
-				// distinct from a failure, and worth showing as a hole rather
-				// than an implied pass.
+				// Distinct from a failure: this cell never produced this (case, assertion).
 				line += "\t—"
 				continue
 			}
@@ -270,10 +219,7 @@ func writeScorecard(w io.Writer, results []CaseResult) error {
 	return err
 }
 
-// Placeholder bytes cellVerdict emits in place of the real pass/fail/
-// tripwire/error glyphs, swapped for (optionally colored) glyphs by
-// decorateGlyphs after tabwriter has already fixed column widths. Control
-// bytes, so they can't collide with real case/category text.
+// Control bytes, so they can't collide with real case/category text.
 const (
 	glyphPassPH byte = '\x01'
 	glyphFailPH byte = '\x02'
@@ -281,9 +227,6 @@ const (
 	glyphErrPH  byte = '\x04'
 )
 
-// decorateGlyphs replaces glyph placeholder bytes with their real —
-// optionally colored — glyph, after tabwriter has already computed and
-// applied column padding from the placeholders' plain byte widths.
 func decorateGlyphs(data []byte) []byte {
 	repl := map[byte]string{
 		glyphPassPH: colorize(ansiGreen, "."),
@@ -302,7 +245,6 @@ func decorateGlyphs(data []byte) []byte {
 	return out
 }
 
-// cellVerdict renders one cell of the pivot: a glyph plus the measured rate.
 func cellVerdict(ar AssertionResult) string {
 	if ar.Graded == 0 {
 		return string(glyphErrPH) + " n/a"
@@ -317,8 +259,6 @@ func cellVerdict(ar AssertionResult) string {
 	return string(ph) + " " + rate(ar.Present, ar.Graded)
 }
 
-// orderedCells lists the distinct cell labels in first-seen order, so column
-// order matches the order the cells were actually run rather than map order.
 func orderedCells(results []CaseResult) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -332,8 +272,8 @@ func orderedCells(results []CaseResult) []string {
 	return out
 }
 
-// scorecardRows returns the row keys in first-seen order (grouped by the
-// order categories first appear) plus a cell→row→result lookup for the pivot.
+// scorecardRows returns row keys in first-seen category order, plus a
+// cell->row->result lookup.
 func scorecardRows(results []CaseResult) ([]assertionKey, map[string]map[assertionKey]AssertionResult) {
 	byCell := map[string]map[assertionKey]AssertionResult{}
 
@@ -369,8 +309,6 @@ func scorecardRows(results []CaseResult) ([]assertionKey, map[string]map[asserti
 }
 
 func writeFooter(w io.Writer, results []CaseResult, meta Meta) error {
-	// Per-cell sampling summary — a flat list across a matrix run would print
-	// the same case ID once per cell, reading as a corpus bug.
 	cells := orderedCells(results)
 	type cellStats struct {
 		runs, errors, successes int
@@ -390,17 +328,14 @@ func writeFooter(w io.Writer, results []CaseResult, meta Meta) error {
 		st := stats[CellLabel(cr)]
 		st.runs += cr.Runs
 		st.errors += cr.Errors
-		// Pooled across every case in the cell, not per-case: the cell is the
-		// unit of comparison here (this provider/variant tuple vs. that one),
-		// and a per-case breakdown can be added later if it's ever needed.
+		// Pooled across every case in the cell, not per-case.
 		for _, s := range cr.Samples {
 			if s.Err == nil {
 				st.latencies = append(st.latencies, s.TTFT)
 			}
 		}
-		// Escalation is reported by the Runner, not inferred from
-		// Runs+Errors: that inference breaks the moment MinRuns is
-		// customised or a case errors out before reaching the threshold.
+		// Escalation is reported by the Runner directly; inferring it from
+		// Runs+Errors breaks under a custom MinRuns.
 		if cr.Escalated {
 			st.escalated = append(st.escalated, cr.CaseID)
 		}
@@ -409,9 +344,7 @@ func writeFooter(w io.Writer, results []CaseResult, meta Meta) error {
 				st.successes++
 			}
 			totalGraderErrors += ar.GraderErrors
-			// Graded == 0 means the assertion never ran; scored as a failure
-			// but called out separately since "failed" and "never
-			// evaluated" demand different fixes.
+			// Graded == 0 means the assertion never ran, distinct from failing.
 			if ar.Graded == 0 {
 				line := "[" + CellLabel(cr) + "] " + cr.CaseID + "/" + ar.Label
 				if ar.FirstGraderError != "" {
@@ -459,11 +392,7 @@ func writeFooter(w io.Writer, results []CaseResult, meta Meta) error {
 	return err
 }
 
-// p50Duration returns the median of durs. It's the report's stated latency
-// stat rather than mean: a single stalled call (cold connection, transient
-// rate limit) shouldn't be able to make a cell look slower than the latency
-// most of its runs actually experienced — exactly the eval-environment noise
-// a provider/variant tradeoff comparison should not be skewed by.
+// p50Duration: a single stalled call shouldn't skew a cell's reported latency.
 func p50Duration(durs []time.Duration) time.Duration {
 	if len(durs) == 0 {
 		return 0
@@ -477,10 +406,6 @@ func p50Duration(durs []time.Duration) time.Duration {
 	return (sorted[mid-1] + sorted[mid]) / 2
 }
 
-// formatLatency renders a P50 duration for the footer table; "n/a" when no
-// successful sample carried a TTFT (all errored, or a stub/test result that
-// never set one) so a real zero doesn't need to be distinguished from "no
-// data" by the reader.
 func formatLatency(d time.Duration, n int) string {
 	if n == 0 {
 		return "n/a"

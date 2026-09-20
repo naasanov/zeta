@@ -87,16 +87,14 @@ func TestDiffRuns_CleanRegression(t *testing.T) {
 }
 
 func TestDiffRuns_MustNotDirection(t *testing.T) {
-	// For MustNot, a LOWER present-rate is the improvement. Threshold<10%.
-	// before: 4/10 present (40%, fails <10% ceiling) -> after: 0/10 (0%, passes).
+	// For MustNot, a LOWER present-rate is the improvement.
 	before := []CaseResult{cr("B1", "fabrication", ar("no-invented-msg", MustNot, 4, 10, false))}
 	after := []CaseResult{cr("B1", "fabrication", ar("no-invented-msg", MustNot, 0, 10, true))}
 
 	rep := DiffRuns(run(baseMeta, before...), run(baseMeta, after...))
 	row := rep.Rows[0]
-	// This is a status flip (false->true), so it's classified via the flip
-	// path, not the noise-floor path — but it must land as "improved" not
-	// "regressed" even though the polarity is inverted.
+	// A status flip, classified via the flip path, not the noise floor; it
+	// must land as improved despite the inverted polarity.
 	if row.Class != RowImproved {
 		t.Fatalf("want RowImproved for a MustNot rate decrease, got %v", row.Class)
 	}
@@ -272,7 +270,7 @@ func TestDiffRuns_MetaDiffers(t *testing.T) {
 }
 
 func TestDiffRuns_NoiseFloorSuppressesSmallDeltaAtSmallN(t *testing.T) {
-	// The plan doc's own example: 7/10 -> 8/10 (10pp) is noise, not a change.
+	// 7/10 -> 8/10 (10pp) is noise, not a change, at this N.
 	before := []CaseResult{cr("E1", "context", ar("has-commit", Must, 7, 10, true))}
 	after := []CaseResult{cr("E1", "context", ar("has-commit", Must, 8, 10, true))}
 
@@ -298,10 +296,9 @@ func TestDiffRuns_NoiseFloorSuppressesSmallDeltaAtSmallN(t *testing.T) {
 }
 
 func TestDiffRuns_StatusFlipAtSmallNStillReported(t *testing.T) {
-	// Same tiny N as the noise-floor test above, but this time Pass itself
-	// flips (crossing the assertion's own threshold) — that must be reported
-	// as a flip regardless of how small the underlying N is, because flips
-	// are categorical, not statistical.
+	// Same tiny N as the noise-floor test above, but Pass itself flips; that
+	// must be reported regardless of how small N is, since flips are
+	// categorical, not statistical.
 	before := []CaseResult{cr("E1", "context", ar("has-commit", Must, 2, 3, false))} // 2/3=67%, below 80% threshold -> fail
 	after := []CaseResult{cr("E1", "context", ar("has-commit", Must, 3, 3, true))}   // 3/3=100% -> pass
 
@@ -408,10 +405,8 @@ func TestDiffRuns_RegressedTrueCases(t *testing.T) {
 }
 
 func TestDiffRuns_SuiteLevelMovementBeyondNoiseFloorRegresses(t *testing.T) {
-	// No single row flips Pass (each assertion individually stays within its
-	// own per-row noise floor at N=10), but pooled across enough assertions
-	// the SUITE pass rate moves by more than its own (much larger-N) floor.
-	// Suite N here is 20, floor = 200*sqrt(0.25/20) =~ 22.4pp.
+	// No single row flips Pass at its own noise floor, but pooled across
+	// enough assertions the SUITE rate moves past its own (larger-N) floor.
 	var before, after []CaseResult
 	for i := 0; i < 10; i++ {
 		before = append(before, cr("case", "cat", ar("a", Must, 9, 10, true)))
@@ -422,9 +417,8 @@ func TestDiffRuns_SuiteLevelMovementBeyondNoiseFloorRegresses(t *testing.T) {
 		after = append(after, cr("case2", "cat", ar("b", Must, 1, 10, false)))
 	}
 	rep := DiffRuns(run(baseMeta, before...), run(baseMeta, after...))
-	// This will also trip a per-row status flip (case2/b goes pass->fail),
-	// which is sufficient by itself — confirms Regressed() catches it via
-	// either path.
+	// This also trips a per-row status flip (case2/b pass->fail), confirming
+	// Regressed() catches it via either path.
 	if !rep.Regressed() {
 		t.Fatalf("want Regressed()==true for a real suite-level drop")
 	}
@@ -459,8 +453,7 @@ func TestLoadRun_RoundTripsWithJSON(t *testing.T) {
 		t.Fatalf("round-tripped result mismatch: %+v", got.Results[0])
 	}
 
-	// And LoadRun's output must be usable directly by DiffRuns (the whole
-	// point of the round trip) — diffing a run against itself.
+	// LoadRun's output must be usable directly by DiffRuns.
 	rep := DiffRuns(got, got)
 	if rep.Regressed() {
 		t.Fatalf("a run diffed against its own round-trip must not be Regressed()")

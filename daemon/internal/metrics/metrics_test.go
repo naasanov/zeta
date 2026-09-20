@@ -9,7 +9,6 @@ import (
 	"testing"
 )
 
-// readLines reads and returns all lines currently in path.
 func readLines(t *testing.T, path string) []string {
 	t.Helper()
 	f, err := os.Open(path)
@@ -61,9 +60,6 @@ func TestLogger_EmitWritesLine(t *testing.T) {
 	}
 }
 
-// TestLogger_EmitRequestStampsUser: EmitRequest must stamp User even when
-// the caller builds RequestEvent without one (internal/suggest has no
-// Logger to ask). Unstamped events fail silently as unattributable rows.
 func TestLogger_EmitRequestStampsUser(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 
@@ -91,9 +87,6 @@ func TestLogger_EmitRequestStampsUser(t *testing.T) {
 	}
 }
 
-// TestLogger_NoHTMLEscaping asserts '<', '>', '&' survive verbatim in the
-// written line — the same reason protocol.Encode disables HTML escaping:
-// shell text is full of these characters.
 func TestLogger_NoHTMLEscaping(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 
@@ -116,8 +109,6 @@ func TestLogger_NoHTMLEscaping(t *testing.T) {
 	}
 }
 
-// TestLogger_DropOnFull asserts Emit never blocks: filling the channel past
-// capacity drops events and the drop counter observes exactly how many.
 func TestLogger_DropOnFull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 
@@ -142,15 +133,11 @@ func TestLogger_DropOnFull(t *testing.T) {
 		t.Errorf("DropsSinceLast() = %d, want > 0 (channel of size %d should have overflowed with %d emits)", drops, chanBufSize, total)
 	}
 
-	// Reading again immediately should be 0 (read-and-reset semantics).
 	if again := l.DropsSinceLast(); again != 0 {
 		t.Errorf("second DropsSinceLast() = %d, want 0 (drops should reset after read)", again)
 	}
 }
 
-// TestLogger_CloseNoLeakOrPanic asserts Close stops the writer goroutine
-// cleanly and that a concurrent Emit racing Close does not panic (Emit must
-// lose gracefully, not send-on-closed-channel).
 func TestLogger_CloseNoLeakOrPanic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 
@@ -173,7 +160,6 @@ func TestLogger_CloseNoLeakOrPanic(t *testing.T) {
 	}
 	<-done
 
-	// Second Close must also be safe (sync.Once).
 	if err := l.Close(); err != nil {
 		t.Fatalf("second Close() err = %v", err)
 	}
@@ -181,7 +167,7 @@ func TestLogger_CloseNoLeakOrPanic(t *testing.T) {
 
 func TestLogger_NilIsSafeNoOp(t *testing.T) {
 	var l *Logger
-	l.Emit(map[string]any{"x": 1}) // must not panic
+	l.Emit(map[string]any{"x": 1})
 	if got := l.DropsSinceLast(); got != 0 {
 		t.Errorf("nil Logger DropsSinceLast() = %d, want 0", got)
 	}

@@ -3,7 +3,6 @@
 # Highlighting                                                       #
 #--------------------------------------------------------------------#
 
-# If there was a highlight, remove it
 _zsh_autopilot_highlight_reset() {
   typeset -g _ZSH_AUTOPILOT_LAST_HIGHLIGHT
 
@@ -13,7 +12,6 @@ _zsh_autopilot_highlight_reset() {
   fi
 }
 
-# If there's a suggestion, highlight it
 _zsh_autopilot_highlight_apply() {
   typeset -g _ZSH_AUTOPILOT_LAST_HIGHLIGHT
 

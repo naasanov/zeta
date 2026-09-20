@@ -1,9 +1,4 @@
-// Comparing two scorecard runs: `go run ./cmd/eval -diff old.json new.json`
-// answers "did that change help or hurt?" without eyeballing two tables.
-//
-// Deliberately does NOT require the two runs to share a case set (the corpus
-// grows over time) or report every per-case rate wobble as a "change" — at
-// N<=10, per-case rates are triage, not results (see noiseFloorPP).
+// Package eval compares two scorecard runs for regressions or improvements.
 package eval
 
 import (
@@ -14,28 +9,16 @@ import (
 	"text/tabwriter"
 )
 
-// Run is a scorecard dump, loaded back from what report.go's JSON wrote.
 type Run struct {
 	Meta    Meta
 	Results []CaseResult
 }
 
-// runDump mirrors the unexported `dump` struct JSON encodes in report.go
-// field-for-field (same JSON tags), so LoadRun is JSON's exact inverse
-// without report.go needing to export anything. JSON writes one document
-// via a single Encoder.Encode call (not a stream), so a single
-// json.Unmarshal is the correct inverse.
 type runDump struct {
 	Meta    Meta         `json:"meta"`
 	Results []CaseResult `json:"results"`
 }
 
-// LoadRun reads a scorecard JSON dump written by JSON() (report.go).
-//
-// An empty or corrupt document is an error, never a zero-value Run: a diff
-// against a silently-empty "before" run would report every current case as
-// "new" and every current pass as an "improvement", which is a worse failure
-// mode than refusing to diff at all.
 func LoadRun(r io.Reader) (Run, error) {
 	var d runDump
 	dec := json.NewDecoder(r)
@@ -58,9 +41,7 @@ const (
 	RowUnchanged     RowClass = "unchanged" // includes noise-floor-suppressed deltas
 )
 
-// Flip records a categorical Pass/Fail transition. Empty string means no
-// flip. Flips are categorical, not statistical: they bypass the noise floor
-// entirely, per the plan doc ("status flips are the headline").
+// Flip is "" for none; a set Flip bypasses the noise floor entirely.
 type Flip string
 
 const (
@@ -86,89 +67,56 @@ type RowDiff struct {
 	// Only meaningful when Class is not RowNew/RowRemoved/RowNotComparable.
 	DeltaPP float64
 
-	// NoiseFloorPP is the floor that was applied to this row (0 for rows
-	// where a floor doesn't apply: New/Removed/NotComparable/Measure, and
-	// rows resolved by a categorical Flip instead).
-	NoiseFloorPP float64
-	// BelowNoiseFloor marks a real-but-small delta that was deliberately
-	// reported as unchanged because it's statistically indistinguishable
-	// from sampling noise at this N. Kept visible (rather than silently
-	// folded into RowUnchanged) so the report can call out that this was a
-	// deliberate suppression, not "nothing happened".
+	// NoiseFloorPP is the floor applied to this row; 0 when no floor applies
+	// (New/Removed/NotComparable/Measure, or resolved via Flip).
+	NoiseFloorPP    float64
 	BelowNoiseFloor bool
 
-	// Flip is set whenever Pass toggled between runs — for TripWire
-	// assertions this is a trip/untrip transition. Flips are categorical:
-	// they are reported and count toward Regressed() regardless of N or
-	// rate magnitude.
+	// Flip is set whenever Pass toggled between runs (a trip/untrip transition for TripWire).
 	Flip Flip
 
-	// TripWireNewlyTripped is Flip==FlipPassToFail && Polarity==TripWire,
-	// pulled out as its own bool because it's the loudest thing in the
-	// report and Text/Regressed both need to test for it directly.
+	// TripWireNewlyTripped is Flip==FlipPassToFail && Polarity==TripWire.
 	TripWireNewlyTripped bool
-	// TripWireOffending is After's FirstOffending, populated only when
-	// TripWireNewlyTripped so the report can print the offending output
-	// inline (a trip-wire hit is meaningless without seeing what tripped it).
+	// TripWireOffending is After's FirstOffending, set only when TripWireNewlyTripped.
 	TripWireOffending string
 }
 
-// CategoryAggregate is a suite-level (or per-category) pass-rate summary: the
-// fraction of assertions PASSING, not a Present/Graded ratio — Must and
-// MustNot can't be summed on a common "presence rate", but each assertion's
-// own polarity-normalized Pass bool can. Measure assertions are excluded
-// (always Pass=true, so including them would inflate the rate with vacuous
-// passes).
-//
-// Before/After are computed independently from each Run's own results, not
-// matched (case,label) pairs, so a category's rate stays meaningful even
-// when the two runs' case sets differ.
+// CategoryAggregate is a per-category pass-rate summary. Measure assertions
+// are excluded; Before/After are computed independently, not as matched pairs.
 type CategoryAggregate struct {
 	Category                  string // "" / "ALL" for the suite-wide aggregate
 	BeforeTotal, BeforePassed int
 	AfterTotal, AfterPassed   int
-	BeforeRate, AfterRate     float64 // fraction in [0,1]; 0 when Total==0 (see Text's "n/a" handling)
+	BeforeRate, AfterRate     float64 // fraction in [0,1]; 0 when Total==0
 	DeltaPP                   float64 // AfterRate-BeforeRate in points; meaningful only when both totals>0
 }
 
 // DiffReport is the result of comparing two runs.
 type DiffReport struct {
 	Before, After Meta
-	// MetaWarnings lists every Meta field that differs between the two runs
-	// (provider/model/prompt/n-policy). Non-empty means the two runs may
-	// not be an apples-to-apples comparison (e.g. codestral vs anthropic) —
-	// still a legitimate diff to run, but one that must not print silently.
+	// MetaWarnings is non-empty when the two runs' metadata isn't apples-to-apples.
 	MetaWarnings []string
 
 	Suite      CategoryAggregate   // Category == "ALL"
 	Categories []CategoryAggregate // in first-appearance order (Before's, then After's)
 
 	// Rows is every (CaseID, Label) union across both runs, in
-	// category-then-case-then-assertion order (After's ordering, with
-	// Before-only cases/labels appended after what's already been seen).
+	// category-then-case-then-assertion order.
 	Rows []RowDiff
 }
 
-// noiseFloorPP is the minimum |delta| (percentage points) treated as a real
-// change for one (case, assertion) rate comparison, rather than sampling
-// noise. It's 2×SE at p=0.5 (the maximally noisy true rate), evaluated at
-// the SMALLER of the two runs' Graded counts. At N=10 (this harness's
-// sampling cap) that's ~31.6pp — deliberately conservative, so a smaller
-// per-N floor still compares well-saturated cases at their own precision.
+// noiseFloorPP is the minimum |delta|, in points, treated as real: 2*SE at
+// p=0.5 (the noisiest true rate).
 func noiseFloorPP(n int) float64 {
 	if n <= 0 {
-		return 100 // nothing clears this; callers route Graded==0 to "not comparable" before reaching here anyway
+		return 100 // nothing clears this floor
 	}
 	se := math.Sqrt(0.25 / float64(n))
-	return 200 * se // 2*SE, expressed in percentage points (SE is a fraction of 1.0)
+	return 200 * se
 }
 
-// rowKey identifies one (case, assertion) row.
 type rowKey struct{ caseID, label string }
 
-// caseAsserts flattens a Run's results into per-row lookups plus the
-// ordering metadata Text needs: which category each case belongs to, and in
-// what order cases/labels first appeared.
 type caseAsserts struct {
 	byRow      map[rowKey]*AssertionResult
 	caseOrder  []string
@@ -199,9 +147,6 @@ func flatten(results []CaseResult) caseAsserts {
 	return ca
 }
 
-// unionOrder returns a's elements in order, followed by any of b's elements
-// not already in a. Used to build a stable row order across two runs whose
-// case/assertion sets may only partially overlap.
 func unionOrder(a, b []string) []string {
 	seen := make(map[string]bool, len(a))
 	out := make([]string, 0, len(a)+len(b))
@@ -220,8 +165,6 @@ func unionOrder(a, b []string) []string {
 	return out
 }
 
-// passCounts sums Pass across every non-Measure assertion in results,
-// optionally restricted to one category ("" means all categories).
 func passCounts(results []CaseResult, category string) (total, passed int) {
 	for _, cr := range results {
 		if category != "" && cr.Category != category {
@@ -260,9 +203,7 @@ func aggregate(category string, before, after []CaseResult) CategoryAggregate {
 	return agg
 }
 
-// metaWarnings lists which Meta fields differ between two runs. Timestamp is
-// deliberately excluded — two runs always have different timestamps, and
-// that's not the kind of mismatch this is warning about.
+// metaWarnings excludes Timestamp: it always differs and isn't a real mismatch.
 func metaWarnings(before, after Meta) []string {
 	var warns []string
 	if before.Provider != after.Provider {
@@ -280,7 +221,6 @@ func metaWarnings(before, after Meta) []string {
 	return warns
 }
 
-// DiffRuns compares two runs, keyed by (CaseID, assertion Label).
 func DiffRuns(before, after Run) DiffReport {
 	bIdx := flatten(before.Results)
 	aIdx := flatten(after.Results)
@@ -346,11 +286,7 @@ func buildRow(caseID, category, label string, before, after *AssertionResult) Ro
 	row.Before = before
 	row.After = after
 
-	// Graded==0 on either side is "not comparable, never an improvement or
-	// regression" (plan doc constraint carried over from report.go's own
-	// "0 of 0 must never read as a pass" rule) — checked before flip/tripwire
-	// detection so an unevaluated assertion (Pass forced false by runner.go)
-	// can never masquerade as a FAIL->PASS or PASS->FAIL transition.
+	// Checked before flip detection: Graded==0 must never masquerade as a transition.
 	if before.Graded == 0 || after.Graded == 0 {
 		row.Class = RowNotComparable
 		return row
@@ -380,10 +316,7 @@ func buildRow(caseID, category, label string, before, after *AssertionResult) Ro
 		return row
 	}
 
-	// Pass matches on both sides. TripWire has no rate/threshold concept
-	// beyond Pass itself (it's a zero-tolerance trip-wire, not a percentage,
-	// per the plan doc), so an unchanged Pass is simply unchanged — no
-	// noise floor needed or meaningful.
+	// TripWire has no rate/threshold beyond Pass, so it needs no noise floor.
 	if row.Polarity == TripWire {
 		row.Class = RowUnchanged
 		return row
@@ -409,10 +342,8 @@ func buildRow(caseID, category, label string, before, after *AssertionResult) Ro
 	return row
 }
 
-// Regressed reports whether anything got worse, for use as a process exit
-// code. Deliberately conservative: keys off categorical signals (a status
-// flip to FAIL, a trip-wire newly tripped) and suite-level movement past the
-// noise floor, never an individual noisy per-case rate delta.
+// Regressed reports a status flip to FAIL, a newly tripped trip wire, or
+// suite movement past the noise floor.
 func (d DiffReport) Regressed() bool {
 	for _, row := range d.Rows {
 		if row.Flip == FlipPassToFail {
@@ -431,11 +362,6 @@ func (d DiffReport) Regressed() bool {
 	return false
 }
 
-// Text renders the human-readable diff. Order is deliberate: trip-wire
-// transitions first (loudest — a regression in shipped logic, not a quality
-// judgment), then the suite aggregate (the plan doc: "the suite aggregate is
-// where decisions get made"), then per-category, then the full row table,
-// then a footer explaining the noise floor and listing new/removed cases.
 func (d DiffReport) Text(w io.Writer) error {
 	if err := d.writeHeader(w); err != nil {
 		return err
@@ -605,7 +531,6 @@ func (d DiffReport) writeRows(w io.Writer) error {
 		class := string(row.Class)
 		switch row.Class {
 		case RowNew, RowRemoved:
-			// delta stays "-": there is nothing to subtract from/to.
 		case RowNotComparable:
 			delta = "n/a"
 		default:

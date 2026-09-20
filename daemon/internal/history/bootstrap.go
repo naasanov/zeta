@@ -14,14 +14,12 @@ import (
 const maxRecordBytes = 4 * 1024 * 1024
 
 // extendedPrefix matches zsh's EXTENDED_HISTORY line prefix,
-// ": <started>:<elapsed>;". Note it carries a timestamp but NO directory —
-// which is the whole reason cwd has to be captured going forward and why
-// everything bootstrapped here is permanently Cwd:"".
+// ": <started>:<elapsed>;", which carries a timestamp but no directory.
 var extendedPrefix = regexp.MustCompile(`^: (\d+):(\d+);`)
 
 // bootstrapFromHistfile parses path as a zsh history file, returning the last
 // max records oldest-first with Cwd and Session empty. On error it still
-// returns whatever parsed; the caller logs and continues with that.
+// returns whatever parsed.
 func bootstrapFromHistfile(path string, max int) ([]Entry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -36,10 +34,9 @@ func bootstrapFromHistfile(path string, max int) ([]Entry, error) {
 	return es, err
 }
 
-// parseHistfile turns a zsh history stream into entries. EXTENDED_HISTORY
-// prefixes a record's first line with ": <ts>:<elapsed>;"; an embedded newline
+// parseHistfile turns a zsh history stream into entries. An embedded newline
 // is a trailing backslash, escaped as two when literal, so a continuation is
-// an ODD trailing count.
+// an odd trailing count.
 func parseHistfile(r io.Reader) ([]Entry, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), maxRecordBytes)

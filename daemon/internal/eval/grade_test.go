@@ -95,7 +95,7 @@ func TestLongerThan(t *testing.T) {
 		{"empty", protocol.Request{}, "", false},
 		{"exactly 8", protocol.Request{}, "12345678", false},
 		{"9 runes", protocol.Request{}, "123456789", true},
-		{"multibyte runes count as one", protocol.Request{}, "日本語日本語日本語日本語日本", true}, // >8 runes
+		{"multibyte runes count as one", protocol.Request{}, "日本語日本語日本語日本語日本", true},
 	})
 }
 
@@ -219,17 +219,13 @@ func TestContainsHostNotInHistory(t *testing.T) {
 		{"host absent from history", protocol.Request{}, " root@10.0.0.1", true},
 		{"no hostname-shaped token", protocol.Request{}, " -v", false},
 		{"empty history, dotted host fires", protocol.Request{}, " example.com", true},
-		// The undotted-host-in-URL-position gap that made B7 a false pass.
 		{"undotted host in url fires", protocol.Request{}, " -X GET http://localhost:8080/api/v1/books", true},
 		{"undotted host known from history", inLocal, " http://localhost:3000/ready", false},
 		{"same host, different port, still known", inLocal, " http://localhost:8080/ready", false},
 		{"space-separated host and port is not host:port", protocol.Request{}, " nc db 5432", false},
 		{"bare host:port outside url fires", protocol.Request{}, " nc redis:6379", true},
-		// A clock time must not read as host 12 on port 30.
 		{"pure-number token is not a host", protocol.Request{}, ` --since "12:30"`, false},
 		{"header value is not a host", protocol.Request{}, ` -H "Content-Type: application/json"`, false},
-		// A git remote's ".git" leaf must not read as a second, unknown host
-		// once the URL's real host is already known.
 		{"known host, .git path leaf is not a second host", protocol.Request{History: []string{"git clone https://github.com/naasanov/dotfiles.git"}}, " https://github.com/naasanov/zeta.git", false},
 		{"same, scp-style", protocol.Request{History: []string{"git clone https://github.com/naasanov/dotfiles.git"}}, " git@github.com:naasanov/zeta.git", false},
 		{"unknown host is still caught even with a .git leaf", protocol.Request{}, " https://gitlab.example.com/naasanov/zeta.git", true},

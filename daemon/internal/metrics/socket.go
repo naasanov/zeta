@@ -13,15 +13,12 @@ import (
 )
 
 // DefaultSocket is the default path for the metrics-only Unix socket, kept
-// short for macOS's ~104-byte socket path cap (same constraint as
-// server.DefaultSocket).
+// short for macOS's ~104-byte socket path cap.
 const DefaultSocket = "/tmp/zsh-autopilot-metrics.sock"
 
 // Serve listens on socketPath for the zsh client's "shown"/"outcome" events
-// (newline-delimited JSON, write-only — no reply). Each line is stamped with
-// user and a derived session_id, then handed to log.Emit. Blocks until ctx
-// is cancelled. Teardown order (cancel -> close conns -> wg.Wait -> remove
-// socket) mirrors internal/server.Server.Run; reversed, it deadlocks.
+// (newline-delimited JSON, write-only, no reply), stamping each line with
+// user and a derived session_id before handing it to log.Emit.
 func Serve(ctx context.Context, socketPath string, log *Logger, slogger *slog.Logger) error {
 	if slogger == nil {
 		slogger = slog.Default()
@@ -42,7 +39,6 @@ func Serve(ctx context.Context, socketPath string, log *Logger, slogger *slog.Lo
 	var connsMu sync.Mutex
 	conns := make(map[net.Conn]struct{})
 
-	// Stop accepting and unblock Accept() when ctx is cancelled.
 	go func() {
 		<-ctx.Done()
 		ln.Close()
@@ -55,9 +51,8 @@ func Serve(ctx context.Context, socketPath string, log *Logger, slogger *slog.Lo
 			select {
 			case <-ctx.Done():
 				// Close in-flight connections first to unblock handlers
-				// parked in Decode, THEN wait for them. The reverse order
-				// deadlocks: Wait never returns while a handler is still
-				// blocked reading an open connection.
+				// parked in Decode, then wait for them; reversed, wg.Wait
+				// never returns.
 				connsMu.Lock()
 				for c := range conns {
 					c.Close()
@@ -87,9 +82,9 @@ func Serve(ctx context.Context, socketPath string, log *Logger, slogger *slog.Lo
 	}
 }
 
-// claimSocket mirrors server.claimSocket's stale-socket handling: if a live
-// listener already answers at socketPath, refuse to start; if the file is
-// stale (nothing answers), remove it so net.Listen can bind cleanly.
+// claimSocket refuses to start if a live listener already answers at
+// socketPath; if nothing answers, it removes the stale file so net.Listen
+// can bind cleanly.
 func claimSocket(socketPath string, slogger *slog.Logger) error {
 	if _, err := os.Stat(socketPath); err != nil {
 		if os.IsNotExist(err) {
@@ -109,17 +104,15 @@ func claimSocket(socketPath string, slogger *slog.Logger) error {
 	return os.Remove(socketPath)
 }
 
-// handleConn reads newline-delimited JSON events off conn until EOF, a
-// decode error, or ctx cancellation. Each event decodes loosely into a map
-// (passthrough, so additive fields survive), gets user/session_id stamped
-// in, then forwards to log.Emit. No reply is ever written.
+// handleConn reads newline-delimited JSON events off conn, decoding each
+// loosely into a map (so additive fields survive) before stamping
+// user/session_id and forwarding to log.Emit.
 func handleConn(ctx context.Context, conn net.Conn, log *Logger, slogger *slog.Logger) {
 	defer conn.Close()
 
 	scanner := bufio.NewScanner(conn)
 	// Event lines are small JSON objects; the default 64KiB scanner buffer
-	// is far more than enough and matches protocol's use of json.Decoder
-	// (unbounded) closely enough for this dev-only log.
+	// is far more than enough for this dev-only log.
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return

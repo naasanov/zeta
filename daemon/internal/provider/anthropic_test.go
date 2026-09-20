@@ -14,9 +14,8 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// newAnthropicTestClient builds a Provider whose requests are aimed at srv
-// via option.WithBaseURL, going through the unexported newAnthropicClient
-// constructor since NewAnthropic never sets a baseURL.
+// Goes through the unexported newAnthropicClient constructor since
+// NewAnthropic never sets a baseURL.
 func newAnthropicTestClient(t *testing.T, baseURL string) Provider {
 	t.Helper()
 	p, err := newAnthropicClient("test-model", "test-key", 48, baseURL, prompt.ShippedFor("anthropic").(prompt.ChatPrompt))
@@ -26,16 +25,14 @@ func newAnthropicTestClient(t *testing.T, baseURL string) Provider {
 	return p
 }
 
-// testReqAnthropic builds a provider.Request whose buffer renders into the
-// chat-append user turn; the mock servers in this file don't inspect the
-// request body, so only the buffer content is worth varying per test.
+// The mock servers in this file don't inspect the request body, so only
+// the buffer content is worth varying per test.
 func testReqAnthropic(buf string) Request {
 	return Request{Req: protocol.Request{Buf: buf}, MaxTokens: 48}
 }
 
-// sseEvent builds one SSE event with an explicit "event:" line: the SDK's
-// decoder reads the event type from that field, not the JSON payload's own
-// "type" key, so every event below carries both.
+// The SDK's decoder reads the event type from the "event:" line, not the
+// JSON payload's own "type" key, so every event below carries both.
 func sseEvent(t *testing.T, eventType string, data any) string {
 	t.Helper()
 	b, err := json.Marshal(data)
@@ -145,10 +142,6 @@ func TestAnthropicComplete_HappyPath(t *testing.T) {
 	}
 }
 
-// TestAnthropicComplete_FirstLineCutoff: a stream spans a newline partway
-// through, with a deliberately slow final chunk. Asserts only the text
-// before the newline comes back, and Complete returns before the late chunk
-// arrives — proving the client stopped reading early.
 func TestAnthropicComplete_FirstLineCutoff(t *testing.T) {
 	const lateDelay = 300 * time.Millisecond
 
@@ -165,9 +158,7 @@ func TestAnthropicComplete_FirstLineCutoff(t *testing.T) {
 		fmt.Fprint(w, sseEvent(t, "content_block_delta", textDeltaEvent(0, " bar\n")))
 		flusher.Flush()
 
-		// A later chunk that, if consumed, would change the result. The
-		// client must not wait for this: it already has a complete first
-		// line after the previous chunk.
+		// A later chunk that, if consumed, would change the result.
 		time.Sleep(lateDelay)
 		fmt.Fprint(w, sseEvent(t, "content_block_delta", textDeltaEvent(0, "baz-should-not-appear")))
 		flusher.Flush()
@@ -198,8 +189,6 @@ func TestAnthropicComplete_FirstLineCutoff(t *testing.T) {
 	}
 }
 
-// TestAnthropicComplete_Cancellation: a stream blocks indefinitely after its
-// first chunk; cancelling ctx must abort it promptly with a context error.
 func TestAnthropicComplete_Cancellation(t *testing.T) {
 	blockCh := make(chan struct{})
 
@@ -214,10 +203,9 @@ func TestAnthropicComplete_Cancellation(t *testing.T) {
 		flusher.Flush()
 		<-blockCh // simulate a stalled stream that never completes on its own
 	}))
-	// Cleanup order is load-bearing: srv.Close() blocks until in-flight
-	// handlers return, and the handler above is parked on <-blockCh, so the
-	// channel MUST be closed before srv.Close() runs. Defers are LIFO, so
-	// close(blockCh) is declared last to execute first.
+	// Cleanup order matters: srv.Close() blocks until in-flight handlers
+	// return, and the handler is parked on <-blockCh, so the channel must
+	// close first. Defers are LIFO, so close(blockCh) is declared last.
 	defer srv.Close()
 	defer close(blockCh)
 
@@ -265,8 +253,6 @@ func TestAnthropicComplete_HTTPError(t *testing.T) {
 			if perr.Provider != "anthropic" {
 				t.Errorf("Error.Provider = %q, want %q", perr.Provider, "anthropic")
 			}
-			// METRICS(§12): HTTPStatus must still be populated on the error
-			// return so the caller can log/emit the status of a failed call.
 			if got.HTTPStatus != status {
 				t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, status)
 			}
@@ -277,9 +263,7 @@ func TestAnthropicComplete_HTTPError(t *testing.T) {
 	}
 }
 
-// TestAnthropicComplete_UsageAndFinishReason: a stream ends (no newline, so
-// the cutoff doesn't fire) with a message_delta carrying usage and
-// stop_reason; both must decode onto the returned Completion.
+// No newline in the stream, so the cutoff never fires.
 func TestAnthropicComplete_UsageAndFinishReason(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

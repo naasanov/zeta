@@ -43,8 +43,6 @@ func TestRecall_SurfacesSameDirBeyondTheRecencyWindow(t *testing.T) {
 
 // The load-bearing property of the pool design: a cwd-blind prompt taking
 // tail-N of the pool must get exactly what it got before recall existed.
-// If recall could displace the tail, every baseline column in every report
-// would shift silently.
 func TestRecall_NeverDisplacesTheRecencyTail(t *testing.T) {
 	c := fill(t, 100,
 		"old1", "/dir", "old2", "/dir", "old3", "/dir",

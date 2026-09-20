@@ -6,21 +6,17 @@ import "slices"
 // policy may pull in behind the recency window.
 const DefaultRecallK = 20
 
-// DefaultPoolN is the default recency depth of the candidate pool. It is
-// deliberately well above any prompt's render count: retrieval returns a
-// POOL and each prompt truncates it, so widening retrieval never widens what
-// a cwd-blind prompt renders.
+// DefaultPoolN is the recency depth of the candidate pool, deliberately well
+// above any prompt's render count: retrieval returns a pool and each prompt
+// truncates it itself.
 const DefaultPoolN = 100
 
-// Retriever selects the candidate pool for one request. It is a plain
-// function so a policy can be swapped in the composition root with one line
-// and tested against a hand-built Corpus, matching how the rest of this
-// daemon does seams (server.SetSuggest, server.SetRecord).
+// Retriever selects the candidate pool for one request; a plain function so
+// a policy can be swapped in the composition root and tested standalone.
 type Retriever func(*Corpus, Query) []Entry
 
 // RecencyOnly returns the last q.N entries, oldest-first, ignoring q.Cwd
-// entirely. This is the pre-existing behavior, kept for tests and as the
-// fallback if shared-across-terminals history ever needs backing out.
+// entirely.
 func RecencyOnly(c *Corpus, q Query) []Entry {
 	es := c.Snapshot()
 	if q.N > 0 && len(es) > q.N {
@@ -30,9 +26,8 @@ func RecencyOnly(c *Corpus, q Query) []Entry {
 }
 
 // RecencyWithSameDirRecall returns the last q.N entries plus up to
-// DefaultRecallK older ones from q.Cwd, which is what gives a directory the
-// shell hasn't touched recently any same-dir candidates at all. Recalled
-// entries all predate the window, so they can never displace the tail.
+// DefaultRecallK older ones from q.Cwd. Recalled entries all predate the
+// window, so they never displace the tail.
 func RecencyWithSameDirRecall(c *Corpus, q Query) []Entry {
 	es := c.Snapshot()
 

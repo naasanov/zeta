@@ -14,9 +14,8 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// testReq builds a provider.Request whose buffer renders into the chat-append
-// user turn; the mock servers in this file don't inspect the request body,
-// so only the buffer content is worth varying per test.
+// The mock servers in this file don't inspect the request body, so only
+// the buffer content is worth varying per test.
 func testReq(buf string) Request {
 	return Request{Req: protocol.Request{Buf: buf}, MaxTokens: 48}
 }
@@ -74,9 +73,6 @@ func TestComplete_HappyPath(t *testing.T) {
 	}
 }
 
-// TestComplete_FirstLineCutoff: content spans a newline partway through, with
-// a deliberately slow final chunk. Asserts only the text before the newline
-// comes back, and Complete returns before the final chunk would arrive.
 func TestComplete_FirstLineCutoff(t *testing.T) {
 	const lateDelay = 300 * time.Millisecond
 
@@ -90,9 +86,7 @@ func TestComplete_FirstLineCutoff(t *testing.T) {
 		fmt.Fprint(w, sseChunk(t, " bar\n"))
 		flusher.Flush()
 
-		// A later chunk that, if consumed, would change the result. The
-		// client must not wait for this: it already has a complete first
-		// line after the previous chunk.
+		// A later chunk that, if consumed, would change the result.
 		time.Sleep(lateDelay)
 		fmt.Fprint(w, sseChunk(t, "baz-should-not-appear"))
 		flusher.Flush()
@@ -119,8 +113,6 @@ func TestComplete_FirstLineCutoff(t *testing.T) {
 	}
 }
 
-// TestComplete_Cancellation: a stream blocks indefinitely after its first
-// chunk; cancelling ctx must abort it promptly with a context error.
 func TestComplete_Cancellation(t *testing.T) {
 	blockCh := make(chan struct{})
 
@@ -131,10 +123,9 @@ func TestComplete_Cancellation(t *testing.T) {
 		flusher.Flush()
 		<-blockCh // simulate a stalled stream that never completes on its own
 	}))
-	// Cleanup order is load-bearing: srv.Close() blocks until in-flight
-	// handlers return, and the handler above is parked on <-blockCh, so the
-	// channel MUST be closed before srv.Close() runs. Defers are LIFO, so
-	// close(blockCh) is declared last to execute first.
+	// Cleanup order matters: srv.Close() blocks until in-flight handlers
+	// return, and the handler is parked on <-blockCh, so the channel must
+	// close first. Defers are LIFO, so close(blockCh) is declared last.
 	defer srv.Close()
 	defer close(blockCh)
 
@@ -167,8 +158,8 @@ func TestComplete_HTTPError(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				// The SDK decodes the body into *openai.Error, which requires
-				// the standard OpenAI error object shape under "error" — a
-				// flat {"error":"boom"} string fails that decode.
+				// the standard OpenAI error object shape under "error"; a flat
+				// {"error":"boom"} string fails that decode.
 				fmt.Fprint(w, `{"error":{"message":"boom","type":"invalid_request_error","code":"boom_code","param":""}}`)
 			}))
 			defer srv.Close()
@@ -178,8 +169,6 @@ func TestComplete_HTTPError(t *testing.T) {
 			if err == nil {
 				t.Fatalf("Complete() err = nil, want non-nil for status %d (got %q)", status, got.Text)
 			}
-			// METRICS(§12): HTTPStatus must still be populated on the error
-			// return so the caller can log/emit the status of a failed call.
 			if got.HTTPStatus != status {
 				t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, status)
 			}
@@ -187,9 +176,7 @@ func TestComplete_HTTPError(t *testing.T) {
 	}
 }
 
-// METRICS(§12): TestComplete_UsageAndFinishReason: a stream ends (no newline,
-// so the cutoff doesn't fire) with a trailing usage chunk and finish_reason,
-// asserting both decode onto the returned Completion.
+// No newline in the stream, so the cutoff never fires.
 func TestComplete_UsageAndFinishReason(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -309,9 +296,6 @@ func TestParseRateLimit(t *testing.T) {
 	}
 }
 
-// TestComplete_RateLimitHeaders_HappyPath exercises the common case: the
-// early-return cutoff path (a newline in the first chunk) must still carry
-// the rate-limit headers observed on the response.
 func TestComplete_RateLimitHeaders_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("x-ratelimit-limit-tokens", "6000")
@@ -335,8 +319,6 @@ func TestComplete_RateLimitHeaders_HappyPath(t *testing.T) {
 	}
 }
 
-// TestComplete_RateLimitHeaders_Absent asserts a response with no
-// rate-limit headers yields a nil RateLimit, not a zero-valued one.
 func TestComplete_RateLimitHeaders_Absent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -356,12 +338,9 @@ func TestComplete_RateLimitHeaders_Absent(t *testing.T) {
 	}
 }
 
-// TestComplete_RateLimitHeaders_429 asserts a 429's retry-after reaches the
-// caller through the error path, with no token fields fabricated.
 func TestComplete_RateLimitHeaders_429(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// retry-after:0 keeps the test fast; TestParseRateLimit already
-		// covers the "2" seconds-integer parse.
+		// retry-after:0 keeps the test fast.
 		w.Header().Set("retry-after", "0")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -380,11 +359,6 @@ func TestComplete_RateLimitHeaders_429(t *testing.T) {
 	}
 }
 
-// TestRateLimitHolder_Merge drives rateLimitHolder.merge directly with
-// synthetic observations (SDK retries are disabled, so Complete itself never
-// produces more than one attempt) to assert the new merge semantics: token
-// fields come from the most recent observation that carried them, and
-// RetryAfter is kept as the max seen across every merge.
 func TestRateLimitHolder_Merge(t *testing.T) {
 	t.Run("later token fields replace earlier ones", func(t *testing.T) {
 		h := &rateLimitHolder{}
@@ -434,9 +408,6 @@ func TestRateLimitHolder_Merge(t *testing.T) {
 	})
 }
 
-// TestComplete_NoRetryOnRateLimit asserts retries are disabled: a server
-// that always 429s must see exactly one HTTP attempt, and the returned error
-// still carries RateLimit.RetryAfter from that one attempt.
 func TestComplete_NoRetryOnRateLimit(t *testing.T) {
 	var attempts int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -456,8 +427,6 @@ func TestComplete_NoRetryOnRateLimit(t *testing.T) {
 	if attempts != 1 {
 		t.Errorf("server saw %d attempt(s), want exactly 1 (retries must be disabled)", attempts)
 	}
-	// METRICS(§12): HTTPStatus and RateLimit must both be populated on the
-	// HTTP-error return path.
 	if got.HTTPStatus != http.StatusTooManyRequests {
 		t.Errorf("Complete().HTTPStatus = %d, want %d", got.HTTPStatus, http.StatusTooManyRequests)
 	}

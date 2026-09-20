@@ -1,7 +1,4 @@
-// Package logging provides a compact slog.Handler for the daemon's dev logs:
-// "HH:MM:SS.mmm L msg key=val" instead of slog's verbose time=/level=/msg=
-// prefix, so the VS Code debug panel stays readable. It's presentation only —
-// no filtering or routing logic.
+// Package logging provides a compact slog.Handler: "HH:MM:SS.mmm L msg key=val".
 package logging
 
 import (
@@ -13,9 +10,7 @@ import (
 	"sync"
 )
 
-// compactHandler prints `HH:MM:SS.mmm L msg=... key=val ...` (level
-// shortened to one letter D/I/W/E), quoting a value Go-style when it
-// contains spaces, `=`, `"`, or is empty.
+// compactHandler shortens level to one letter: D/I/W/E.
 type compactHandler struct {
 	mu    *sync.Mutex // shared across WithAttrs/WithGroup clones so writes stay serialized
 	w     io.Writer
@@ -65,7 +60,6 @@ func (h *compactHandler) Handle(_ context.Context, r slog.Record) error {
 	return err
 }
 
-// appendAttr writes " key=value" (with group prefix), recursing into groups.
 func (h *compactHandler) appendAttr(b *strings.Builder, group string, a slog.Attr) {
 	a.Value = a.Value.Resolve()
 	if a.Equal(slog.Attr{}) {
@@ -87,8 +81,8 @@ func (h *compactHandler) appendAttr(b *strings.Builder, group string, a slog.Att
 	writeValue(b, a.Value.String())
 }
 
-// writeValue writes a value bare, or Go-quoted when it's empty or contains
-// characters (space, `=`, `"`, newline) that would blur field boundaries.
+// Quotes a value Go-style when empty or containing characters that would
+// blur field boundaries.
 func writeValue(b *strings.Builder, val string) {
 	if val == "" || strings.ContainsAny(val, " \t\n\"=") {
 		fmt.Fprintf(b, "%q", val)

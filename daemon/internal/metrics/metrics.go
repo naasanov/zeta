@@ -1,14 +1,4 @@
-// Package metrics implements the dev-only JSONL event log (design §12),
-// meant to be stripped in Phase 3 by deleting this package and reverting the
-// marked one-liners elsewhere. Nothing outside should depend on internals
-// beyond Logger, its constructor, Emit, Close, and the event types.
-//
-// Three event kinds land in one JSONL file, joined on request_id: "request"
-// (built by internal/suggest), and "shown"/"outcome" (sent by the zsh client
-// over a second write-only socket, see socket.go).
-//
-// Emit must never block or add latency: a non-blocking send to a single
-// writer goroutine, dropping and counting on a full channel.
+// Package metrics implements the dev-only JSONL event log, meant to be deleted later.
 package metrics
 
 import (
@@ -19,10 +9,6 @@ import (
 	"sync/atomic"
 )
 
-// chanBufSize is the writer channel's capacity. Sized generously (design
-// §12's "never block" rule) so ordinary bursts never hit the drop path;
-// dropping only kicks in under sustained overload, which should never happen
-// for a per-keystroke dev log.
 const chanBufSize = 1024
 
 // Logger owns the JSONL file and the single writer goroutine that appends to
@@ -32,7 +18,7 @@ type Logger struct {
 	user string
 
 	f   *os.File
-	mu  sync.Mutex // serializes writes to f (only the writer goroutine writes, but guards Close racing the last write)
+	mu  sync.Mutex // guards Close racing the writer goroutine's last write
 	enc *json.Encoder
 
 	ch        chan any
@@ -41,15 +27,13 @@ type Logger struct {
 	closeOnce sync.Once
 
 	// closeMu guards Emit racing Close: closing ch while a send is in flight
-	// panics. Emit takes RLock, Close takes Lock before closing ch.
+	// panics.
 	closeMu sync.RWMutex
 	closed  bool
 }
 
 // New opens (creating if needed) the JSONL log at path and starts the
-// writer goroutine. user is stamped onto directly-built "request" events;
-// passthrough events from the metrics socket are stamped there instead
-// (see socket.go).
+// writer goroutine. user is stamped onto directly-built "request" events.
 func New(path, user string) (*Logger, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -62,8 +46,7 @@ func New(path, user string) (*Logger, error) {
 	}
 
 	enc := json.NewEncoder(f)
-	// Same reason as protocol.Encode: shell text is full of '<' '>' '&', and
-	// we don't want them mangled into \uXXXX escapes in the log.
+	// Shell text is full of '<' '>' '&'; avoid \uXXXX-escaping them in the log.
 	enc.SetEscapeHTML(false)
 
 	l := &Logger{
@@ -77,8 +60,7 @@ func New(path, user string) (*Logger, error) {
 	return l, nil
 }
 
-// User returns the resolved username this Logger stamps onto events. Safe on
-// a nil Logger.
+// Safe on a nil Logger.
 func (l *Logger) User() string {
 	if l == nil {
 		return ""
@@ -86,8 +68,6 @@ func (l *Logger) User() string {
 	return l.user
 }
 
-// EmitRequest stamps the resolved user and pending drop count onto ev, then
-// emits it. An unstamped event fails silently as an unattributable row.
 func (l *Logger) EmitRequest(ev RequestEvent) {
 	if l == nil {
 		return
@@ -97,8 +77,8 @@ func (l *Logger) EmitRequest(ev RequestEvent) {
 	l.Emit(ev)
 }
 
-// Emit hands ev to the writer goroutine; never blocks (drops and counts on a
-// full channel). Safe no-op on a nil or Close'd Logger.
+// Never blocks: drops and counts on a full channel. Safe no-op on a nil or
+// closed Logger.
 func (l *Logger) Emit(ev any) {
 	if l == nil {
 		return
@@ -115,9 +95,7 @@ func (l *Logger) Emit(ev any) {
 	}
 }
 
-// DropsSinceLast returns the number of events dropped since the last call to
-// DropsSinceLast (it reads-and-resets), so the count is observable without
-// double-counting across calls.
+// Reads-and-resets, so the count is observable without double-counting across calls.
 func (l *Logger) DropsSinceLast() int64 {
 	if l == nil {
 		return 0
@@ -125,8 +103,7 @@ func (l *Logger) DropsSinceLast() int64 {
 	return l.drops.Swap(0)
 }
 
-// run is the single writer goroutine: it drains ch, marshaling and appending
-// one JSON line per event, until ch is closed (by Close) and drained.
+// run is the single writer goroutine; it drains ch until Close closes it.
 func (l *Logger) run() {
 	defer close(l.done)
 	for ev := range l.ch {
@@ -139,9 +116,8 @@ func (l *Logger) run() {
 	}
 }
 
-// Close stops the writer goroutine and closes the underlying file, draining
-// buffered events first. sync.Once makes repeated calls safe; nil Logger is
-// a safe no-op.
+// Close drains buffered events before stopping the writer goroutine and
+// closing the file. Repeated calls and a nil Logger are both safe.
 func (l *Logger) Close() error {
 	if l == nil {
 		return nil
@@ -161,8 +137,7 @@ func (l *Logger) Close() error {
 	return err
 }
 
-// RequestEvent is the "request" event, built and emitted by internal/suggest
-// after provider.Complete returns (see the wire contract in the plan doc).
+// RequestEvent is the "request" event, emitted after a provider call returns.
 type RequestEvent struct {
 	V         int     `json:"v"`
 	Event     string  `json:"event"` // always "request"
@@ -183,33 +158,29 @@ type RequestEvent struct {
 	HTTPStatus       int     `json:"http_status"`
 	StopReason       string  `json:"stop_reason"`
 
-	// CostUSD is a LOWER BOUND, not exact: a superseded call is billed for
+	// CostUSD is a lower bound, not exact: a superseded call is billed for
 	// its prefill but logs zero tokens/cost, since it never got a usage
-	// chunk. Filtering cancelled=false drops exactly the unmeasured rows —
-	// use this for relative comparisons, not "what did this cost me".
+	// chunk. Use only for relative comparisons, not absolute cost.
 	CostUSD float64 `json:"cost_usd"`
 
 	// PriceTableVersion identifies the price table cost_usd was computed
-	// under (see price.go), for telling rows apart after a price correction.
+	// under, for telling rows apart after a price correction.
 	PriceTableVersion int    `json:"price_table_version"`
 	Cancelled         bool   `json:"cancelled"`
 	CancelledAtStage  string `json:"cancelled_at_stage"` // "in_flight" | ""
 
 	EventsDroppedSinceLast int64 `json:"events_dropped_since_last"`
 
-	// METRICS(§12): Provider/Model let two adapters serving the same model
-	// name at different prices be told apart (see price.go's provider+model
-	// key). ErrorType is the unwrapped *provider.Error Kind, empty otherwise.
+	// Provider/Model let two adapters serving the same model name at
+	// different prices be told apart. ErrorType is the unwrapped
+	// provider error kind, empty otherwise.
 	Provider  string `json:"provider"`
 	Model     string `json:"model"`
 	Profile   string `json:"profile"`
 	ErrorType string `json:"error_type"`
 
-	// METRICS(§12): opt-in raw-text capture (see EnvRawText/Config.RawText),
-	// populated only when enabled; otherwise zero/absent (all omitempty).
-	// Buf+Cwd+GitBranch+GitDirty+LastExit+History+HistoryCwds+DirEntries reconstruct
-	// the originating protocol.Request verbatim. Suggestion is the FULL
-	// reply.Suggestion text and already starts with req.Buf — don't
+	// Opt-in raw-text capture; zero/absent when disabled. Suggestion is the
+	// FULL reply.Suggestion text and already starts with req.Buf: don't
 	// double-prepend Buf when replaying it as a case.
 	Buf         string   `json:"buf,omitempty"`
 	Suggestion  string   `json:"suggestion,omitempty"`
@@ -223,8 +194,8 @@ type RequestEvent struct {
 }
 
 // SessionID derives the session portion of a request id: everything before
-// the last '.' (ids are "<session>.<seq>"). Duplicated from server.shortID's
-// split point rather than imported, so this package stays removable.
+// the last '.' (ids are "<session>.<seq>"). Duplicated rather than imported,
+// so this package stays removable.
 func SessionID(requestID string) string {
 	for i := len(requestID) - 1; i >= 0; i-- {
 		if requestID[i] == '.' {

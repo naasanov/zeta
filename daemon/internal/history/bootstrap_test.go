@@ -27,9 +27,6 @@ func TestParseHistfile_ExtendedHistoryPrefix(t *testing.T) {
 	if es[0].Ts != 1772223958 || es[1].Ts != 1772223959 {
 		t.Fatalf("timestamps = %d,%d", es[0].Ts, es[1].Ts)
 	}
-	// EXTENDED_HISTORY carries a timestamp but NO directory. Everything
-	// bootstrapped is permanently unknown-cwd; that is the whole reason cwd
-	// has to be captured going forward.
 	for _, e := range es {
 		if e.Cwd != "" || e.Session != "" {
 			t.Fatalf("bootstrapped entry carries cwd/session: %+v", e)
@@ -59,7 +56,7 @@ func TestParseHistfile_MultilineContinuation(t *testing.T) {
 }
 
 // A command genuinely ending in a backslash is written as two, so "ends in a
-// backslash" is the wrong test — it must be an ODD count.
+// backslash" is the wrong test; it must be an odd count.
 func TestParseHistfile_EvenBackslashesAreNotContinuations(t *testing.T) {
 	es := mustParse(t, ": 1:0;echo ends-with-backslash\\\\\n: 2:0;ls\n")
 	if len(es) != 2 {
@@ -116,9 +113,8 @@ func TestBootstrapFromHistfile_MissingFileIsAnError(t *testing.T) {
 }
 
 func TestParseHistfile_ReportsScanError(t *testing.T) {
-	// One line past maxRecordBytes stops Scan early. The entries before it are
-	// still returned, but the error must surface — silently truncating the
-	// bootstrap is the failure this parser exists to avoid.
+	// One line past maxRecordBytes stops Scan early: entries before it are
+	// still returned, but the error must surface.
 	huge := strings.Repeat("x", maxRecordBytes+1)
 	es, err := parseHistfile(strings.NewReader(": 1:0;keep me\n" + huge + "\n"))
 	if err == nil {

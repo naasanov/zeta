@@ -28,8 +28,6 @@ func TestAccumulator_CutoffMidDelta(t *testing.T) {
 	if got, want := a.Text(), "foo bar"; got != want {
 		t.Errorf("Text() = %q, want %q", got, want)
 	}
-	// Raw() keeps everything past the newline that Text() drops — the codestral
-	// separator cutoff reads the pre-newline buffer through it.
 	if got, want := a.Raw(), "foo bar\nbaz-should-not-appear"; got != want {
 		t.Errorf("Raw() = %q, want %q", got, want)
 	}
@@ -66,7 +64,6 @@ func TestAccumulator_TTFTStampedOnFirstNonEmptyDelta(t *testing.T) {
 		t.Errorf("TTFT() = %v, want > 0", got)
 	}
 
-	// A second non-empty delta must not re-stamp TTFT.
 	ttft1 := a.TTFT()
 	time.Sleep(5 * time.Millisecond)
 	a.Push(" status")
@@ -81,8 +78,6 @@ func TestAccumulator_IdempotentStop(t *testing.T) {
 	if got, want := a.Text(), "foo"; got != want {
 		t.Fatalf("Text() = %q, want %q", got, want)
 	}
-	// Further pushes after stop are no-ops that keep returning stop=true and
-	// must not mutate the accumulated text.
 	stop := a.Push("more-should-not-appear")
 	if !stop {
 		t.Errorf("Push() after stop returned stop = false, want true")

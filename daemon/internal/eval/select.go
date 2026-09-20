@@ -7,16 +7,9 @@ import (
 	"strings"
 )
 
-// Select filters cases down to those matching a comma-separated selector
-// list, preserving the original corpus order. Each selector matches a case
-// (case-insensitively) if it equals the case ID ("A1"), equals the category
-// ("syntax"), or glob-matches the ID ("A*", "E[12]"). Cases matched by more
-// than one selector appear once.
-//
-// A selector that matches no case is a fatal error, not a silent narrowing:
-// a typo'd selector would otherwise exit 0 with a clean scorecard for a case
-// that never ran — the same "didn't run must never look like fine" failure
-// mode as a zero-graded assertion (AssertionResult.GraderErrors).
+// Select filters cases down to those matching a comma-separated,
+// case-insensitive selector list (case ID, category, or glob on the ID),
+// preserving corpus order. A selector matching no case is a fatal error.
 func Select(cases []Case, selectors string) ([]Case, error) {
 	sels := splitSelectors(selectors)
 	if len(sels) == 0 {
@@ -59,16 +52,14 @@ func matchCase(c Case, sel string) bool {
 	if strings.ToLower(c.ID) == sel || strings.ToLower(c.Category) == sel {
 		return true
 	}
-	// path.Match only errors on a malformed pattern (e.g. an unclosed "["),
-	// which we treat as "matches nothing" so the selector surfaces in the
-	// unmatched error alongside ordinary typos, rather than as a separate
-	// class of failure the caller has to handle differently.
+	// A malformed pattern (e.g. unclosed "[") is treated as "matches
+	// nothing", surfacing alongside ordinary typos in the unmatched error.
 	ok, err := path.Match(sel, strings.ToLower(c.ID))
 	return err == nil && ok
 }
 
 // splitSelectors splits a comma-separated selector list, trimming whitespace,
-// lowercasing, and dropping empties — so "A1, b*, " is three tokens, not four.
+// lowercasing, and dropping empties.
 func splitSelectors(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
@@ -88,8 +79,7 @@ func quoteAll(ss []string) []string {
 	return out
 }
 
-// knownIDs lists the corpus's case IDs for the error message, sorted so the
-// hint is stable and scannable when a selector typo needs correcting.
+// knownIDs lists the corpus's case IDs for the error message, sorted.
 func knownIDs(cases []Case) []string {
 	ids := make([]string, 0, len(cases))
 	for _, c := range cases {

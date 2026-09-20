@@ -1,23 +1,11 @@
 
 #--------------------------------------------------------------------#
-# Background self-update (TEMPORARY — dogfooding only)                #
+# Background self-update (TEMPORARY, dogfooding only)                #
 #--------------------------------------------------------------------#
-# While dogfooding we want friends to pick up new releases without re-running
-# the installer by hand. At shell startup — at most once per
-# ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL seconds — fork a fully-detached job that
-# re-runs the published install script. That script is version-aware: it exits
-# immediately when already on the latest release, and on a real update it swaps
-# the binary/bundle and stops the running daemon so the NEXT new terminal
-# lazy-spawns the new one; the pkill drops this shell's socket fd too, so its
-# very next request reconnects and spawns the new binary itself.
-#
-# Non-blocking by construction: the foreground shell never waits on the network
-# (the whole check is backgrounded). The throttle keeps many terminals from
-# hammering GitHub's unauthenticated API rate limit.
-#
-# Remove this fragment and its config block in 10_config.zsh before release —
-# real distribution updates go through brew / plugin managers, not curl|sh on
-# startup.
+
+# At most once per ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL seconds, forks a
+# detached job re-running the install script; a real update stops the
+# daemon so the next terminal lazy-spawns the new binary. TEMPORARY: remove.
 
 zmodload zsh/datetime 2>/dev/null
 

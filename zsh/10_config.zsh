@@ -3,34 +3,25 @@
 # Global Configuration Variables                                     #
 #--------------------------------------------------------------------#
 
-# Color to use when highlighting suggestion
-# Uses format of `region_highlight`
-# More info: http://zsh.sourceforge.net/Doc/Release/Zsh-Line-Editor.html#Zle-Widgets
+# region_highlight-style color spec, e.g. 'fg=8'.
 (( ! ${+ZSH_AUTOPILOT_HIGHLIGHT_STYLE} )) &&
 typeset -g ZSH_AUTOPILOT_HIGHLIGHT_STYLE='fg=8'
 
-# Prefix to use when saving original versions of bound widgets
 (( ! ${+ZSH_AUTOPILOT_ORIGINAL_WIDGET_PREFIX} )) &&
 typeset -g ZSH_AUTOPILOT_ORIGINAL_WIDGET_PREFIX=autopilot-orig-
 
-# Path to the autopilotd (or Phase 0 echo-server) Unix socket. Client and
-# daemon must agree; matches the echo-server default so no -socket flag is
-# needed. Kept short deliberately: macOS caps socket paths at ~104 bytes.
+# macOS caps Unix socket paths at ~104 bytes; keep this short.
 (( ! ${+ZSH_AUTOPILOT_SOCKET} )) &&
 typeset -g ZSH_AUTOPILOT_SOCKET=/tmp/zsh-autopilot.sock
 
-# Daemon binary to lazy-spawn (must be on $PATH) when the socket isn't up —
-# see 50_socket.zsh's _zsh_autopilot_spawn_daemon. Set to empty to disable
-# autostart and rely on the daemon being launched some other way (a launchd/
-# systemd unit, the VS Code debug launch, manual `autopilotd &`).
+# Daemon binary to lazy-spawn when the socket isn't up.
+# Empty disables autostart; something else must launch the daemon then.
 (( ! ${+ZSH_AUTOPILOT_DAEMON_BIN} )) &&
 typeset -g ZSH_AUTOPILOT_DAEMON_BIN=autopilotd
 
-# TEMPORARY (dogfooding): background self-update on shell startup — see
-# zsh/66_update.zsh. AUTOUPDATE=0 disables it; INTERVAL throttles how often the
-# check may run (seconds; 0 = every shell). URL is the install script it re-runs
-# (which no-ops when already on the latest release). Remove this block and the
-# 66_update.zsh fragment before release — real updates go via brew/plugin-manager.
+# TEMPORARY (dogfooding): background self-update on shell startup.
+# AUTOUPDATE=0 disables it; INTERVAL throttles the check (seconds, 0 = every shell).
+# Remove this block and 66_update.zsh before release.
 (( ! ${+ZSH_AUTOPILOT_AUTOUPDATE} )) &&
 typeset -g ZSH_AUTOPILOT_AUTOUPDATE=1
 (( ! ${+ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL} )) &&
@@ -44,10 +35,8 @@ typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/
 (( ! ${+ZSH_AUTOPILOT_FLAG_KEY} )) &&
 typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
 
-# Whether this shell reports the commands it runs to the daemon's history
-# store (47_context.zsh's _zsh_autopilot_record). 0 stops this shell
-# contributing — suggestions still work, but nothing run here is recorded or
-# cwd-tagged. Useful for keeping one shell's sensitive work out of history.
+# Whether this shell reports commands to the daemon's history store.
+# 0 keeps this shell's runs out of history entirely (suggestions still work).
 (( ! ${+ZSH_AUTOPILOT_RECORD} )) &&
 typeset -gi ZSH_AUTOPILOT_RECORD=1
 
@@ -56,7 +45,6 @@ typeset -gi ZSH_AUTOPILOT_RECORD=1
 (( ! ${+ZSH_AUTOPILOT_NOTICES} )) &&
 typeset -g ZSH_AUTOPILOT_NOTICES=1
 
-# Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_CLEAR_WIDGETS
   ZSH_AUTOPILOT_CLEAR_WIDGETS=(
@@ -77,7 +65,6 @@ typeset -g ZSH_AUTOPILOT_NOTICES=1
   )
 }
 
-# Widgets that accept the entire suggestion
 (( ! ${+ZSH_AUTOPILOT_ACCEPT_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_ACCEPT_WIDGETS
   ZSH_AUTOPILOT_ACCEPT_WIDGETS=(
@@ -89,14 +76,12 @@ typeset -g ZSH_AUTOPILOT_NOTICES=1
   )
 }
 
-# Widgets that accept the entire suggestion and execute it
 (( ! ${+ZSH_AUTOPILOT_EXECUTE_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_EXECUTE_WIDGETS
   ZSH_AUTOPILOT_EXECUTE_WIDGETS=(
   )
 }
 
-# Widgets that accept the suggestion as far as the cursor moves
 (( ! ${+ZSH_AUTOPILOT_PARTIAL_ACCEPT_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_PARTIAL_ACCEPT_WIDGETS
   ZSH_AUTOPILOT_PARTIAL_ACCEPT_WIDGETS=(
@@ -111,7 +96,7 @@ typeset -g ZSH_AUTOPILOT_NOTICES=1
   )
 }
 
-# Widgets that should be ignored (globbing supported but must be escaped)
+# Entries may be globs; a literal `*` must be escaped (e.g. `orig-\*`).
 (( ! ${+ZSH_AUTOPILOT_IGNORE_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_IGNORE_WIDGETS
   ZSH_AUTOPILOT_IGNORE_WIDGETS=(

@@ -9,10 +9,9 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// TestNoticeFor covers every provider.ErrKind and pins the surfaced/not-
-// surfaced verdict plus the exact kind string for the two kinds that do
-// surface. ErrRateLimited and ErrServer are explicitly asserted not-ok since
-// treating a recoverable rate limit as a notice would be a regression.
+// TestNoticeFor covers every provider.ErrKind and pins the surfaced vs
+// not-surfaced verdict; ErrRateLimited must stay not-ok since treating a
+// recoverable rate limit as a notice would be a regression.
 func TestNoticeFor(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -93,8 +92,6 @@ func TestNoticeFor(t *testing.T) {
 	}
 }
 
-// TestNoticeFor_OmitsZeroStatus confirms an HTTPStatus of 0 doesn't leak a
-// bogus "(0)" into the diagnostic text.
 func TestNoticeFor_OmitsZeroStatus(t *testing.T) {
 	text, _, ok := NoticeFor("codestral", "ZSH_AUTOPILOT_CODESTRAL_KEY")(&provider.Error{Kind: provider.ErrAuth, Provider: "codestral"})
 	if !ok {
@@ -121,9 +118,6 @@ func TestNoticeFor_BrandNotAdapter(t *testing.T) {
 	}
 }
 
-// TestNoticeFor_EmptyKeyEnvFallsBack asserts a brand needing no key (e.g.
-// ollama) gets the generic "check your API key" wording, not a dangling
-// "check $".
 func TestNoticeFor_EmptyKeyEnvFallsBack(t *testing.T) {
 	text, _, ok := NoticeFor("ollama", "")(&provider.Error{Kind: provider.ErrAuth, HTTPStatus: 401, Provider: "openai"})
 	if !ok {
@@ -134,8 +128,6 @@ func TestNoticeFor_EmptyKeyEnvFallsBack(t *testing.T) {
 	}
 }
 
-// TestNoticeFor_EmptyBrandOmitsClause asserts an empty brand drops the
-// "for <brand>" / "by <brand>" clause instead of leaving it dangling.
 func TestNoticeFor_EmptyBrandOmitsClause(t *testing.T) {
 	authText, _, ok := NoticeFor("", "ZSH_AUTOPILOT_GROQ_KEY")(&provider.Error{Kind: provider.ErrAuth, HTTPStatus: 401, Provider: "openai"})
 	if !ok {

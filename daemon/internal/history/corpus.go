@@ -3,14 +3,11 @@ package history
 import "sync"
 
 // DefaultCorpusMax is how many entries the in-memory corpus holds before it
-// halves. ~10k entries is on the order of a megabyte and keeps a full scan
-// in the microseconds, which is what every retrieval policy costs.
+// halves.
 const DefaultCorpusMax = 10000
 
-// Corpus is the in-memory entry list, held oldest-first as a plain slice (not
-// a ring buffer — halving amortizes the copy, and a flat slice scans without
-// wrap arithmetic). It performs no I/O and starts no goroutines, so retrieval
-// policies are testable against a hand-built one with no setup.
+// Corpus is the in-memory entry list, held oldest-first. It performs no I/O
+// and starts no goroutines.
 type Corpus struct {
 	mu  sync.RWMutex
 	max int
@@ -26,9 +23,7 @@ func NewCorpus(max int) *Corpus {
 	return &Corpus{max: max, es: make([]Entry, 0, min(max, 1024))}
 }
 
-// Append adds one entry. This is the ONLY path by which an entry enters the
-// corpus — that is deliberate, and it is one of the two places a future
-// Indexer would hook (the other is Replay).
+// Append is the only path by which an entry enters the corpus.
 func (c *Corpus) Append(e Entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -36,10 +31,9 @@ func (c *Corpus) Append(e Entry) {
 	c.trimLocked()
 }
 
-// Replay discards everything and re-seeds from es, oldest-first — the single
-// rebuild path for bootstrap, journal reload, and overflow-halving. That
-// keeps frequency counts EXACT: rebuilding from survivors can't drift the
-// way an incremental counter would once the older half is dropped.
+// Replay discards everything and re-seeds from es, oldest-first: the single
+// rebuild path for bootstrap, journal reload, and overflow-halving. This
+// keeps frequency counts exact, unlike an incremental counter would.
 func (c *Corpus) Replay(es []Entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -57,7 +51,6 @@ func (c *Corpus) Snapshot() []Entry {
 	return out
 }
 
-// Len reports how many entries the corpus currently holds.
 func (c *Corpus) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

@@ -13,37 +13,25 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// LLM adapts a provider.Provider into the server's suggest seam. The
-// provider renders its own prompt from req; LLM calls it and assembles the
-// reply so Suggestion always starts with req.Buf — the zsh client strips
-// that exact prefix before painting ghost text, so this is load-bearing.
-// Taking the Provider interface makes LLM testable with a stub instead of an
-// httptest.Server.
-//
-// METRICS(§12): emit, when non-nil, receives the "request" event after every
-// call. rawText gates opt-in raw-text capture (metrics.Config.RawText): when
-// true the event's raw-text fields are filled from req (and, on success,
-// reply.Suggestion) so it alone can reconstruct the request for eval-harness
-// replay; when false those fields stay zero/omitempty.
+// LLM adapts a provider.Provider into the server's suggest seam. Suggestion
+// always starts with req.Buf; the zsh client strips that exact prefix
+// before painting ghost text, so this is load-bearing.
 func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent), rawText bool) func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
 	return func(ctx context.Context, req protocol.Request) (protocol.Reply, error) {
-		// METRICS(§12): suggest_ms is wall time around the provider call.
+		// suggestMs is wall time around the provider call.
 		start := time.Now()
 		completion, err := p.Complete(ctx, provider.Request{Req: req})
 		suggestMs := float64(time.Since(start)) / float64(time.Millisecond)
 
 		if err != nil {
-			// METRICS(§12): error_type unwraps a *provider.Error to its Kind;
-			// empty string when the error isn't a *provider.Error (e.g. a
-			// bare ctx.Err() from somewhere else in the stack).
+			// errorType unwraps a *provider.Error to its Kind; empty when err
+			// isn't a *provider.Error (e.g. a bare ctx.Err()).
 			var errorType string
 			var perr *provider.Error
 			if errors.As(err, &perr) {
 				errorType = string(perr.Kind)
 			}
 
-			// METRICS(§12): a cancelled/superseded request gets its own event
-			// shape so it's distinguishable from a real provider error.
 			if emit != nil {
 				ev := metrics.RequestEvent{
 					V:                 1,
@@ -60,12 +48,14 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 					ErrorType:         errorType,
 					PriceTableVersion: metrics.PriceTableVersion,
 				}
+				// A cancelled/superseded request gets its own event shape,
+				// distinguishable from a real provider error.
 				if ctx.Err() != nil {
 					ev.Cancelled = true
 					ev.CancelledAtStage = "in_flight"
 				}
-				// METRICS(§12): error path — no Suggestion (the call failed),
-				// but request-side fields are still filled for eval replay.
+				// Error path: no Suggestion since the call failed, but
+				// request-side fields are still filled for eval replay.
 				if rawText {
 					ev.Buf = req.Buf
 					ev.Cwd = req.Cwd
@@ -78,8 +68,6 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 				}
 				emit(ev)
 			}
-			// Coordinator logs and skips the write on error — graceful
-			// degradation, no ghost text for this request.
 			return protocol.Reply{}, err
 		}
 		suffix := strings.TrimRight(completion.Text, " \t\r\n")
@@ -91,7 +79,6 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 			Suggestion: req.Buf + suffix,
 		}
 
-		// METRICS(§12): build + emit the "request" event on the success path.
 		if emit != nil {
 			ev := metrics.RequestEvent{
 				V:                 1,
@@ -115,8 +102,8 @@ func LLM(p provider.Provider, log *slog.Logger, emit func(metrics.RequestEvent),
 				CostUSD:           metrics.CostUSD(p.Name(), p.Model(), completion.InputTokens, completion.OutputTokens, completion.CachedTokens),
 				PriceTableVersion: metrics.PriceTableVersion,
 			}
-			// METRICS(§12): success path — reply.Suggestion plus the
-			// request-side fields, enough to replay req as an eval case.
+			// Success path fills reply.Suggestion plus request-side fields,
+			// enough to replay req as an eval case.
 			if rawText {
 				ev.Buf = req.Buf
 				ev.Suggestion = reply.Suggestion

@@ -1,8 +1,4 @@
-// Command eval is the live-provider suggestion-quality evaluation harness
-// (see .docs/eval_harness_plan.md). It is a `main` package, not a test,
-// precisely so it never runs under `go test ./...`: evals are slow, cost
-// money, hit live rate limits, and are non-deterministic by construction.
-// `go build ./...` still compile-checks it.
+// Command eval is the live-provider suggestion-quality evaluation harness.
 package main
 
 import (
@@ -24,10 +20,6 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// maxN is the hard cap on -n: adaptive sampling already escalates to at most
-// this many runs, so a fixed-N override above it wastes calls for no more
-// signal. Also stands in for the adaptive ceiling when estimating a
-// pre-flight worst-case call count below.
 const maxN = 10
 
 func main() {
@@ -48,10 +40,6 @@ func main() {
 	)
 	flag.Parse()
 
-	// setFlags is which flags were actually passed on the command line (as
-	// opposed to left at their default), so the terminal modes below (-diff,
-	// -import) can detect run-only flags that would otherwise be silently
-	// ignored rather than quietly dropping them — see runOnlyFlagNames.
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
@@ -104,9 +92,6 @@ func main() {
 
 	cases, err := eval.Select(eval.Cases(), *caseSel)
 	if err != nil {
-		// Fatal rather than "run what matched": a selector typo that quietly
-		// narrows the run exits 0 with a clean scorecard for cases that never
-		// executed. See eval.Select's doc comment.
 		log.Fatalf("eval: -cases=%q: %v", *caseSel, err)
 	}
 
@@ -132,8 +117,6 @@ func main() {
 
 	start := time.Now()
 
-	// rowLabel width, so multi-cell runs line their dots up in a column
-	// instead of ragged-right.
 	labelWidth := 0
 	for _, c := range cells {
 		if w := len(cellLabel(c)); w > labelWidth {
@@ -146,27 +129,14 @@ func main() {
 	for _, c := range cells {
 		p, limiter, err := buildCellProvider(c, *dryRun, cfg)
 		if err != nil {
-			// Fatal, not "skip this cell and keep going": a provider that
-			// silently dropped out of a matrix run would produce a report
-			// that looks like a smaller-but-clean matrix rather than a
-			// broken one. See newLiveProvider's doc comment on why a
-			// missing key must never fall back to a stub.
 			log.Fatalf("eval: provider %q: %v", c.Provider, err)
 		}
 
-		// One row per cell, symbols streaming out as cases finish. Progress
-		// goes to stderr so a piped or -out'd stdout stays a clean scorecard.
 		fmt.Fprintf(os.Stderr, "%-*s  ", labelWidth, cellLabel(c))
 		var passed, failed, tripped, errored int
 		runner := &eval.Runner{
 			Provider: p, Limiter: limiter, FixedN: *n,
-			// A shared rate limiter makes extra workers pure queuing latency
-			// (see Runner.Concurrency's doc comment) — run those cells
-			// single-worker so a cell's paced-out slots all go to whichever
-			// case is next in report order instead of scattering across
-			// several concurrent cases.
-			Concurrency: concurrencyFor(limiter),
-			// The BRAND, not p.Name() (the adapter) — see Runner.ProviderLabel.
+			Concurrency:   concurrencyFor(limiter),
 			ProviderLabel: c.Provider,
 			Progress: func(_ eval.Case, r eval.CaseResult) {
 				sym := eval.CaseSymbol(r)
@@ -202,7 +172,7 @@ func main() {
 		allResults = append(allResults, results...)
 
 		lastMeta = eval.Meta{
-			Provider:  c.Provider, // brand, matching the scorecard's column labels
+			Provider:  c.Provider,
 			Model:     p.Model(),
 			Prompt:    c.PromptName,
 			NPolicy:   nPolicy,
@@ -217,11 +187,6 @@ func main() {
 
 	elapsed := time.Since(start)
 
-	// Printed before the scorecard, so a terminal reads (top to bottom, in
-	// scroll order) live progress -> this detailed JSON dump -> the
-	// scorecard -> the summary footer: the more detailed a section, the
-	// further back it scrolls, so the "at a glance" verdict is always the
-	// last thing on screen.
 	if *printJSON {
 		if err := eval.PrettyJSON(os.Stdout, allResults, meta); err != nil {
 			log.Fatalf("eval: printing JSON report: %v", err)
@@ -250,9 +215,6 @@ func main() {
 	}
 }
 
-// defaultOutFilename builds the -out filename when it's pointed at a
-// directory: a timestamp prefix (alpha-sorts chronologically) plus the
-// provider x variant combo, so `ls` alone tells you what's inside.
 func defaultOutFilename(meta eval.Meta) string {
 	return fmt.Sprintf("%s_%s_%s.json",
 		meta.Timestamp.Format("20060102-150405"),
@@ -260,37 +222,20 @@ func defaultOutFilename(meta eval.Meta) string {
 		sanitizeForFilename(meta.Prompt))
 }
 
-// sanitizeForFilename turns a comma-joined meta field (e.g.
-// "codestral,anthropic") into a filename-safe segment ("codestral+anthropic").
 func sanitizeForFilename(s string) string {
 	return strings.ReplaceAll(s, ",", "+")
 }
 
-// cell is one (provider brand, resolved prompt name) combination — one row
-// of the matrix this command assembles from -profiles x -prompts.
-// PromptName is always a concrete registered name; "default" never survives
-// resolveCells.
+// cell is one (provider, prompt) row of the matrix; PromptName is never "default".
 type cell struct {
 	Provider   string // brand name; "stub" under -dry-run
 	PromptName string
 }
 
-// cellLabel is the row prefix for a cell's live progress line, e.g.
-// "codestral/fim-transcript-marker".
 func cellLabel(c cell) string { return c.Provider + "/" + c.PromptName }
 
-// dryRunAdapter is the adapter "default" resolves against under -dry-run,
-// where there is no real provider axis to key it to. Chosen to match the
-// shipped default provider (codestral/FIM), so a plain `-dry-run` smoke-tests
-// the same prompt shape a real default run would use.
 const dryRunAdapter = "codestral"
 
-// resolvePromptName resolves one -prompts entry to a concrete registered
-// prompt.Prompt. "default" is an INPUT ALIAS ONLY: it resolves per-adapter to
-// prompt.ShippedFor(adapter), and the returned prompt's own Name() — never
-// the literal string "default" — is what a caller may persist. Any other
-// name is validated via prompt.ByName, fatal on a typo (its error lists every
-// valid name).
 func resolvePromptName(name, adapter string) prompt.Prompt {
 	if name == "default" {
 		return prompt.ShippedFor(adapter)
@@ -302,8 +247,6 @@ func resolvePromptName(name, adapter string) prompt.Prompt {
 	return p
 }
 
-// promptShape reports which rendering shape p implements, for compatibility
-// checks and error messages.
 func promptShape(p prompt.Prompt) string {
 	_, chat := p.(prompt.ChatPrompt)
 	_, fim := p.(prompt.FIMPrompt)
@@ -317,8 +260,6 @@ func promptShape(p prompt.Prompt) string {
 	}
 }
 
-// shapeNeededBy returns the prompt shape adapter requires: "chat" for
-// openai/anthropic, "FIM" for codestral.
 func shapeNeededBy(adapter string) string {
 	if adapter == "codestral" {
 		return "FIM"
@@ -326,8 +267,6 @@ func shapeNeededBy(adapter string) string {
 	return "chat"
 }
 
-// promptCompatible reports whether p can render for a provider needing
-// shape.
 func promptCompatible(p prompt.Prompt, shape string) bool {
 	switch shape {
 	case "FIM":
@@ -339,8 +278,6 @@ func promptCompatible(p prompt.Prompt, shape string) bool {
 	}
 }
 
-// promptNamesWithShape lists every registered prompt.All() name matching
-// shape, for "here's what would work" error text.
 func promptNamesWithShape(shape string) []string {
 	var out []string
 	for _, p := range prompt.All() {
@@ -351,9 +288,8 @@ func promptNamesWithShape(shape string) []string {
 	return out
 }
 
-// resolveEvalConfig loads -config (missing is fatal), else
-// eval.DefaultEvalConfigPath if present, else presets only. It never reads the
-// daemon's config.toml. The returned line says which source won.
+// resolveEvalConfig loads -config if set (missing is fatal), else
+// eval.DefaultEvalConfigPath, else presets only.
 func resolveEvalConfig(configFlag string) (config.Config, string) {
 	if configFlag != "" {
 		cfg, err := config.Load(configFlag, true)
@@ -375,15 +311,6 @@ func resolveEvalConfig(configFlag string) (config.Config, string) {
 	return cfg, fmt.Sprintf("eval: config: %s (default)", eval.DefaultEvalConfigPath)
 }
 
-// resolveCells assembles the -profiles x -prompts matrix and applies the
-// shape-compatibility rule: an incompatible (provider, prompt) pairing is
-// SKIPPED (returned separately for the caller to report), but a requested
-// provider or prompt left with zero resulting cells is FATAL — same
-// principle as a -cases selector matching nothing: a silently narrowed
-// matrix must never be presentable as a clean one. Runs entirely before any
-// provider is constructed. Under -dry-run, -profiles is ignored entirely (a
-// single scripted stub, no provider axis, no incompatibility to check), but
-// -prompts still selects which prompt-building path the stub exercises.
 func resolveCells(dryRun bool, profilesFlag, promptsFlag string, cfg config.Config) ([]cell, []string) {
 	promptNames := splitCSV(promptsFlag)
 
@@ -439,8 +366,6 @@ func resolveCells(dryRun bool, profilesFlag, promptsFlag string, cfg config.Conf
 		if promptSeen[name] {
 			continue
 		}
-		// "default" resolves per-adapter to a prompt already shaped for that
-		// adapter, so it can only land here as a literal, incompatible name.
 		p, _ := prompt.ByName(name)
 		shape := promptShape(p)
 		errs = append(errs, fmt.Sprintf("prompt %q is %s-shaped, but none of -profiles=%q needs that shape (registered providers in this run: %s)",
@@ -453,10 +378,6 @@ func resolveCells(dryRun bool, profilesFlag, promptsFlag string, cfg config.Conf
 	return cells, skipped
 }
 
-// buildCellProvider constructs the provider.Provider and eval.Limiter for one
-// matrix cell. Under -dry-run it always returns a freshly scripted
-// StubProvider with a NoopLimiter, regardless of c.Provider. c.PromptName is
-// always a concrete registered name by the time it reaches here.
 func buildCellProvider(c cell, dryRun bool, cfg config.Config) (provider.Provider, eval.Limiter, error) {
 	if dryRun {
 		return eval.NewStubProvider(c.PromptName,
@@ -477,15 +398,6 @@ func buildCellProvider(c cell, dryRun bool, cfg config.Config) (provider.Provide
 	return prov, eval.LimiterForBrand(brand), nil
 }
 
-// newLiveProvider resolves name (a brand, the "openai" escape hatch, or a
-// profile from cfg) into a real provider.Provider, and also returns the
-// resolved BRAND (e.g. a "groq"-backed profile still reports "groq") for the
-// caller's rate-limiter selection. A different model means a different
-// profile in cfg, not a flag override here.
-//
-// A missing required API key is fatal here, unlike cmd/autopilotd's degrade
-// path: an eval that quietly measured a stub would produce numbers that look
-// real and aren't.
 func newLiveProvider(cfg config.Config, name string, maxTokens int, p prompt.Prompt) (provider.Provider, string, error) {
 	resolved, err := cfg.Resolve(name)
 	if err != nil {
@@ -507,10 +419,6 @@ func newLiveProvider(cfg config.Config, name string, maxTokens int, p prompt.Pro
 	return prov, resolved.Provider, nil
 }
 
-// concurrencyFor returns the Runner.Concurrency to use for a cell's limiter:
-// 1 for a real *eval.AdaptiveLimiter (spreading a shared token budget across
-// workers only adds queuing latency, never throughput), 0 (Runner's default)
-// otherwise.
 func concurrencyFor(limiter eval.Limiter) int {
 	if _, ok := limiter.(*eval.AdaptiveLimiter); ok {
 		return 1
@@ -518,9 +426,6 @@ func concurrencyFor(limiter eval.Limiter) int {
 	return 0
 }
 
-// combinedMeta builds the report Meta for a multi-cell run: Provider/Model/
-// Prompt become comma-joined summaries rather than silently picking the
-// last cell's, which would misrepresent a matrix run as single-provider.
 func combinedMeta(cells []cell, nPolicy string, ts time.Time) eval.Meta {
 	return eval.Meta{
 		Provider:  strings.Join(distinctProviders(cells), ","),
@@ -550,9 +455,6 @@ func distinctPrompts(cells []cell) []string {
 func countDistinctProviders(cells []cell) int { return len(distinctProviders(cells)) }
 func countDistinctPrompts(cells []cell) int   { return len(distinctPrompts(cells)) }
 
-// appendUnique appends v to ss unless it's already present, preserving
-// first-seen order — used to build the distinct provider/variant lists for
-// the pre-flight line and combinedMeta without a set type.
 func appendUnique(ss []string, v string) []string {
 	if slices.Contains(ss, v) {
 		return ss
@@ -560,8 +462,6 @@ func appendUnique(ss []string, v string) []string {
 	return append(ss, v)
 }
 
-// splitCSV splits a comma-separated flag value, trimming whitespace and
-// dropping empties, so "codestral, anthropic," is two entries not three.
 func splitCSV(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
@@ -573,14 +473,9 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// runOnlyFlagNames are the flags that only mean something for an actual run.
-// The terminal modes (-diff, -import, -judge-validate) exit before reaching
-// that code, so any of these being set alongside one is surfaced as an error
-// rather than silently dropped.
+// runOnlyFlagNames are flagged as errors, not silently dropped, when set alongside a terminal mode.
 var runOnlyFlagNames = []string{"n", "cases", "out", "print-json", "profiles", "prompts", "config"}
 
-// setRunOnlyFlags returns which of runOnlyFlagNames were explicitly passed on
-// the command line, each rendered as "-name", in flag-declaration order.
 func setRunOnlyFlags(setFlags map[string]bool) []string {
 	var ignored []string
 	for _, name := range runOnlyFlagNames {
@@ -591,8 +486,6 @@ func setRunOnlyFlags(setFlags map[string]bool) []string {
 	return ignored
 }
 
-// runDiff loads both scorecard dumps, renders the text diff to stdout, and
-// exit(1)s if anything regressed — the CI/pre-commit gate.
 func runDiff(beforePath, afterPath string) {
 	before, err := loadRunFile(beforePath)
 	if err != nil {
@@ -613,9 +506,6 @@ func runDiff(beforePath, afterPath string) {
 	}
 }
 
-// loadRunFile opens path and decodes it as a scorecard dump, wrapping any
-// failure with the path so a bad argument never resolves to a silent
-// zero-value Run that would misread as "nothing changed".
 func loadRunFile(path string) (eval.Run, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -630,10 +520,6 @@ func loadRunFile(path string) (eval.Run, error) {
 	return run, nil
 }
 
-// runImport reads a §12 metrics events.jsonl, prints one compilable case
-// stub per importable row to stdout, then prints ImportStats to stderr so a
-// near-total drop of the log is visible rather than looking like a small,
-// healthy import. Never runs any cases.
 func runImport(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -671,15 +557,8 @@ func runImport(path string) {
 	}
 }
 
-// judgeAgreementGate is the plan doc's non-negotiable bar ("The judge" ->
-// "Validate before trusting"): no judged number (C3/E3/E7/F2) may be quoted
-// until some candidate judge clears this on the hand-labeled set.
 const judgeAgreementGate = 0.90
 
-// runJudgeValidate resolves candidate judge models from -judges (default:
-// the configured judge), scores each against -labels, prints a ranked table
-// plus disagreements, and exit(1)s unless the best clears
-// judgeAgreementGate — a gate, not just a report.
 func runJudgeValidate(judgesFlag, labelsPath string) {
 	cfg := eval.JudgeConfigFromEnv()
 	if cfg.APIKey == "" {
@@ -749,8 +628,6 @@ func runJudgeValidate(judgesFlag, labelsPath string) {
 		bestAgreement*100, judgeAgreementGate*100)
 }
 
-// printJudgeScoreboard prints the ranked judge/agreement/kappa/errors/cost
-// table -judge-validate's spec calls for.
 func printJudgeScoreboard(w io.Writer, ranked []eval.JudgeScore) {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "judge\tagreement\tkappa\terrors\tcost_usd\tagreement/$")
@@ -778,9 +655,6 @@ func formatAgreementPerDollar(s eval.JudgeScore) string {
 	return fmt.Sprintf("%.1f", s.Agreement/s.CostUSD)
 }
 
-// printJudgeDisagreements prints every sample where a candidate's verdict
-// differed from the human label, with the judge's stated reason — needed to
-// tell whether the JUDGE is wrong or the RUBRIC is ambiguous.
 func printJudgeDisagreements(w io.Writer, ranked []eval.JudgeScore) {
 	for _, s := range ranked {
 		if len(s.Disagreements) == 0 {

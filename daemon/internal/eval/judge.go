@@ -1,16 +1,4 @@
-// judge.go is the LLM judge: a Judge interface backed by Gemini's
-// OpenAI-compatible endpoint, a JudgeGrader that plugs a Judge into the
-// ordinary Assertion/Grader seam, and a persistent on-disk verdict cache so
-// identical suggestions across the runner's N samples are judged once.
-//
-// Provider blinding (load-bearing): the judge must never see which
-// provider/model produced the suggestion it grades — self-preference bias
-// is real even with blinding, so the prompt is built ONLY from JudgeInput's
-// Rubric/Req/Suggestion. TestJudgePrompt_Blind scans for known tokens.
-//
-// Fail closed, never fail open: a judge that can't produce a clean verdict
-// returns an error, never a default Pass/Fail — a malformed response, an
-// unconfigured judge, or a cancelled ctx must all take the error path.
+// Package eval implements the LLM judge, including its verdict cache.
 package eval
 
 import (
@@ -44,44 +32,29 @@ const (
 	envJudgeCache      = "ZSH_AUTOPILOT_EVAL_JUDGE_CACHE"
 	envJudgeRatePerMin = "ZSH_AUTOPILOT_EVAL_JUDGE_RATE_PER_MIN"
 
-	// defaultJudgeRatePerMin paces calls against Gemini's ~15 req/min free
-	// tier for flash-lite-class models; 12/min leaves margin for
-	// -judge-validate's cache-bypass load and the harness's own concurrency.
 	defaultJudgeRatePerMin = 12
 
-	// defaultJudgeModel: mini-tier judges clear the >=90% agreement gate, and
-	// Flash-Lite is out-of-family against every candidate provider this
-	// harness tests, which is where blinding matters.
-	//
-	// Gemini model ids use DOTS, not dashes: a dashed variant
-	// ("gemini-3"+"-5-flash-lite") parses fine as a config value and 404s at
-	// request time in a way that reads like an auth failure, not a typo.
+	// defaultJudgeModel: Gemini model ids use dots, not dashes.
+	// A dashed variant is valid syntax but 404s at request time.
 	defaultJudgeModel = "gemini-3.5-flash-lite"
 
-	// defaultJudgeBaseURL is Gemini's OpenAI-compatible endpoint, reachable
-	// through the same openai-go SDK the provider adapters use.
 	defaultJudgeBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 )
 
-// judgeRetryBackoff is how long a single 429 retry waits before trying
-// again. Fixed, not retry-after parsing: Gemini's endpoint doesn't reliably
-// carry that header. A var, not const, so tests can shrink it.
+// judgeRetryBackoff is fixed: Gemini doesn't reliably set a retry-after header.
 var judgeRetryBackoff = 2 * time.Second
 
-// JudgeConfig is the judge's fully-resolved configuration. Build it once via
-// JudgeConfigFromEnv and pass it down; nothing else in this package reads
-// these env vars directly.
+// JudgeConfig is the judge's resolved configuration.
 type JudgeConfig struct {
-	APIKey     string // required to actually run a judged case
+	APIKey     string
 	Model      string
 	BaseURL    string
 	CacheDir   string
 	RatePerMin int // calls/minute; <=0 resolves to defaultJudgeRatePerMin
 }
 
-// JudgeConfigFromEnv resolves JudgeConfig from the environment, applying
-// defaults for everything except the API key (which has none — a judge with
-// no key is not "defaulted", it's unconfigured).
+// JudgeConfigFromEnv defaults every field except APIKey, which stays empty
+// to signal "unconfigured" rather than a valid value.
 func JudgeConfigFromEnv() JudgeConfig {
 	cfg := JudgeConfig{
 		APIKey:   os.Getenv(envJudgeKey),
@@ -107,9 +80,6 @@ func JudgeConfigFromEnv() JudgeConfig {
 	return cfg
 }
 
-// defaultJudgeCacheDir is $XDG_CACHE_HOME/autopilot/eval-judge, falling back
-// to ~/.cache/autopilot/eval-judge — the same XDG-with-fallback pattern
-// internal/metrics uses for its own default paths.
 func defaultJudgeCacheDir() string {
 	cacheHome := os.Getenv("XDG_CACHE_HOME")
 	if cacheHome == "" {
@@ -126,25 +96,18 @@ func defaultJudgeCacheDir() string {
 
 // ---- Judge interface --------------------------------------------------------
 
-// Judge grades one suggestion against a per-case rubric. Implementations
-// must never leak which provider/model produced the suggestion into their
-// own reasoning inputs beyond what JudgeInput already carries.
 type Judge interface {
-	Name() string // model id, for the scorecard + cache key
+	Name() string
 	Judge(ctx context.Context, in JudgeInput) (JudgeVerdict, error)
 }
 
-// JudgeInput is everything the judge is allowed to see: the rubric question,
-// the request context the completion was generated from, and the full
-// suggestion (Req.Buf + the model's output). It deliberately has no
-// provider/model field — see the package doc's "Provider blinding" section.
+// JudgeInput excludes a provider/model field; judges must stay blind to it.
 type JudgeInput struct {
-	Rubric     string           // the per-case question
-	Req        protocol.Request // context the model saw
-	Suggestion string           // the full command line: Req.Buf + output
+	Rubric     string
+	Req        protocol.Request
+	Suggestion string // the full command line: Req.Buf + output
 }
 
-// JudgeVerdict is the judge's structured answer.
 type JudgeVerdict struct {
 	Pass   bool
 	Reason string
@@ -152,23 +115,13 @@ type JudgeVerdict struct {
 
 // ---- Gemini (OpenAI-compatible) judge --------------------------------------
 
-// geminiJudge implements Judge via the openai-go SDK pointed at an
-// OpenAI-compatible endpoint (Gemini by default, but any such endpoint works
-// by construction — same portability property as internal/provider's
-// openai.go, just not sharing its code, since that package is shaped for
-// suggestion completions rather than chat grading with structured output).
 type geminiJudge struct {
 	client  openai.Client
 	model   string
-	limiter Limiter // paces the network call; never nil (see newGeminiJudge)
+	limiter Limiter // never nil
 }
 
-// NewGeminiJudge builds a Judge from cfg. It errors if cfg.APIKey is empty —
-// callers must surface that as a clear grader error, never a default verdict.
-//
-// The judge paces its own calls via a RateLimiter built from cfg.RatePerMin
-// here — the only construction site, so both -judge-validate and the normal
-// cache-miss grading path get identical pacing.
+// NewGeminiJudge errors if cfg.APIKey is empty.
 func NewGeminiJudge(cfg JudgeConfig) (Judge, error) {
 	ratePerMin := cfg.RatePerMin
 	if ratePerMin <= 0 {
@@ -181,10 +134,6 @@ func NewGeminiJudge(cfg JudgeConfig) (Judge, error) {
 	return j, nil
 }
 
-// newGeminiJudge is NewGeminiJudge's implementation with the limiter
-// injectable, so tests can observe Wait calls (or force a cancellation path)
-// without waiting on a real per-minute rate limiter. NewGeminiJudge is the
-// only exported entry point; production code always goes through it.
 func newGeminiJudge(cfg JudgeConfig, limiter Limiter) (*geminiJudge, error) {
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("eval: judge requires %s (see .docs/eval_harness_plan.md, \"The judge\")", envJudgeKey)
@@ -200,11 +149,8 @@ func newGeminiJudge(cfg JudgeConfig, limiter Limiter) (*geminiJudge, error) {
 	if limiter == nil {
 		limiter = NoopLimiter{}
 	}
-	// WithMaxRetries(0): the openai-go SDK retries transient errors
-	// (including 429) internally by default, which would retry silently
-	// underneath Judge's own retry-once-and-surface-errors logic below —
-	// hiding exactly the 429s this fix exists to make visible/counted. The
-	// judge owns retry policy itself; the SDK must not also own it.
+	// WithMaxRetries(0): the SDK's own retries would hide 429s from the
+	// retry-once logic below.
 	client := openai.NewClient(
 		option.WithBaseURL(baseURL),
 		option.WithAPIKey(cfg.APIKey),
@@ -215,11 +161,6 @@ func newGeminiJudge(cfg JudgeConfig, limiter Limiter) (*geminiJudge, error) {
 
 func (j *geminiJudge) Name() string { return j.model }
 
-// judgeSystemPrompt is the fixed instruction turn. It states the grading
-// contract and the output schema; it must never name a provider/model
-// (blinding applies to the judge's OWN identity too, not just the system
-// under test's — not that it would matter here, since this string never
-// varies by target provider).
 const judgeSystemPrompt = `You are grading a single shell command-line suggestion produced by an
 autocomplete system. You will be given:
   - a rubric: a short, specific question about the suggestion
@@ -236,11 +177,6 @@ suggestion; "fail" means it is absent. If the rubric says an empty or
 missing suggestion is itself a correct answer, judge it as such rather than
 failing it for being empty.`
 
-// judgeResponseSchema is the structured-output JSON schema requested via
-// response_format. strict:true asks the endpoint to always conform, but the
-// response is still parsed defensively (parseVerdict) since "asked for JSON"
-// and "got JSON" are not the same guarantee across every OpenAI-compatible
-// endpoint.
 var judgeResponseSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
@@ -256,11 +192,6 @@ var judgeResponseSchema = map[string]any{
 	"additionalProperties": false,
 }
 
-// renderJudgeUser renders the user turn: rubric, context, and suggestion.
-// This is the ONLY place request context reaches the judge prompt, and it
-// must never include a provider/model field from anywhere else in the
-// codebase — see the package doc's "Provider blinding" section and
-// TestJudgePrompt_Blind.
 func renderJudgeUser(in JudgeInput) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Rubric: %s\n\n", in.Rubric)
@@ -290,11 +221,7 @@ func renderJudgeUser(in JudgeInput) string {
 	return b.String()
 }
 
-// Judge sends the rubric+context+suggestion at temperature 0 (the judge is
-// measurement apparatus, so stability matters here unlike systems under
-// test) and requests the structured verdict schema. The call is paced by
-// j.limiter, and a single 429 is retried once after a short backoff; only a
-// second failure surfaces as an error.
+// Judge retries a 429 once after a backoff; a second failure surfaces as an error.
 func (j *geminiJudge) Judge(ctx context.Context, in JudgeInput) (JudgeVerdict, error) {
 	if err := j.limiter.Wait(ctx); err != nil {
 		return JudgeVerdict{}, fmt.Errorf("eval: judge: %w", err)
@@ -322,9 +249,6 @@ func (j *geminiJudge) Judge(ctx context.Context, in JudgeInput) (JudgeVerdict, e
 	return parseVerdict(resp.Choices[0].Message.Content)
 }
 
-// complete sends the actual chat-completion request. Split out of Judge so
-// the retry-once-on-429 logic above can call it twice without duplicating
-// the request construction.
 func (j *geminiJudge) complete(ctx context.Context, in JudgeInput) (*openai.ChatCompletion, error) {
 	params := openai.ChatCompletionNewParams{
 		Model: j.model,
@@ -346,11 +270,6 @@ func (j *geminiJudge) complete(ctx context.Context, in JudgeInput) (*openai.Chat
 	return j.client.Chat.Completions.New(ctx, params)
 }
 
-// isRateLimited reports whether err is a 429 from the openai-go SDK's own
-// error type (*openai.Error wraps the HTTP response; StatusCode is the
-// reliable signal — Gemini's OpenAI-compatible endpoint does not consistently
-// set a parseable Retry-After header, which is why judgeRetryBackoff is a
-// fixed short duration rather than header-driven).
 func isRateLimited(err error) bool {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
@@ -359,9 +278,6 @@ func isRateLimited(err error) bool {
 	return false
 }
 
-// sleepOrDone waits d, returning early with ctx.Err() if ctx is cancelled
-// first — the backoff before a 429 retry must stay cancellable like every
-// other blocking wait in this package.
 func sleepOrDone(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -373,17 +289,11 @@ func sleepOrDone(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// judgeResponse is the wire shape parseVerdict expects. Fields are required:
-// a missing verdict/reason is a parse failure, not a default.
 type judgeResponse struct {
 	Verdict string `json:"verdict"`
 	Reason  string `json:"reason"`
 }
 
-// parseVerdict parses the judge's raw text content defensively. Any
-// deviation from the exact expected shape — prose, malformed JSON, a missing
-// field, an unrecognized verdict value — is an ERROR, never a default
-// verdict (see the package doc's "Fail closed" note).
 func parseVerdict(raw string) (JudgeVerdict, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -396,9 +306,8 @@ func parseVerdict(raw string) (JudgeVerdict, error) {
 	if err := dec.Decode(&resp); err != nil {
 		return JudgeVerdict{}, fmt.Errorf("eval: judge: response is not valid JSON: %w", err)
 	}
-	// A JSON decoder happily stops after the first value even if trailing
-	// garbage follows (e.g. prose appended after a JSON blob) — reject that
-	// explicitly rather than silently accepting a partial parse.
+	// dec.More() catches trailing content after the first JSON value,
+	// which Decode alone ignores.
 	if dec.More() {
 		return JudgeVerdict{}, errors.New("eval: judge: trailing content after JSON value")
 	}
@@ -423,30 +332,15 @@ func parseVerdict(raw string) (JudgeVerdict, error) {
 
 // ---- Persistent verdict cache ----------------------------------------------
 
-// JudgeCache is a persistent, on-disk verdict cache keyed by
-// hash(caseID, rubric, judgeModel, suggestion) — see cacheKey. Identical
-// suggestions across a case's N samples, or across runs, cost one judge call.
-//
-// One file per key, JSON-encoded, named by the key's hex digest. A corrupt
-// or unreadable entry is a cache miss, never a fatal error.
 type JudgeCache struct {
 	dir    string
-	bypass bool // Get always misses when true; Set still writes (a "refresh" run)
+	bypass bool // Get always misses when true; Set still writes
 }
 
-// NewJudgeCache builds a cache rooted at dir. bypass forces every Get to
-// miss (so every case is re-judged against the live model) while Set keeps
-// writing, so a bypass run also refreshes the cache for subsequent normal
-// runs.
 func NewJudgeCache(dir string, bypass bool) *JudgeCache {
 	return &JudgeCache{dir: dir, bypass: bypass}
 }
 
-// cacheKey hashes the components the plan doc specifies: caseID, the rubric
-// text (a rubric change is a version change — editing a rubric must
-// invalidate its cached verdicts, and hashing the text itself achieves that
-// without a separately-tracked version counter to keep in sync), the judge's
-// model id, and the suggestion being graded.
 func cacheKey(caseID, rubric, judgeModel, suggestion string) string {
 	h := sha256.New()
 	for _, part := range []string{caseID, rubric, judgeModel, suggestion} {
@@ -460,10 +354,6 @@ func (c *JudgeCache) path(key string) string {
 	return filepath.Join(c.dir, key+".json")
 }
 
-// Get returns the cached verdict for key, if any. A missing file, an
-// unreadable file, or a file that fails to unmarshal are all reported as a
-// plain miss (ok == false) — never an error, per the plan doc's "a corrupt
-// or unreadable cache entry must be treated as a miss, never a fatal error".
 func (c *JudgeCache) Get(key string) (JudgeVerdict, bool) {
 	if c == nil || c.bypass {
 		return JudgeVerdict{}, false
@@ -479,10 +369,6 @@ func (c *JudgeCache) Get(key string) (JudgeVerdict, bool) {
 	return v, true
 }
 
-// Set persists v under key. Write failures (e.g. an unwritable cache dir)
-// are swallowed: caching is an optimization, and a cache that can't write
-// today must not fail the eval run that triggered it — the case still got
-// judged, it just won't be free next time.
 func (c *JudgeCache) Set(key string, v JudgeVerdict) {
 	if c == nil {
 		return
@@ -499,51 +385,29 @@ func (c *JudgeCache) Set(key string, v JudgeVerdict) {
 
 // ---- JudgeGrader: the Judge -> Grader adapter ------------------------------
 
-// judgeGrader adapts a Judge (plus an optional cache) to the Grader
-// interface, so a judged case is an ordinary Assertion like any other.
-// Semantics match every other grader in this package: it reports PRESENCE of
-// the shape the rubric describes, never polarity — the Assertion.Polarity
-// (Must, per the plan doc's judged cases) decides whether presence is good.
 type judgeGrader struct {
 	caseID string
 	label  string
 	rubric string
-	judge  Judge // nil means "unconfigured" — see unconfiguredErr
+	judge  Judge // nil means unconfigured
 	cache  *JudgeCache
 
-	// unconfiguredErr, when set, makes Grade return it immediately without
-	// touching judge/cache — how an unconfigured judge (no API key) surfaces
-	// as a clear grader error on every sample, never a panic or silent pass.
 	unconfiguredErr error
 }
 
-// NewJudgeGrader builds a Grader that calls judge (through cache, if
-// non-nil) to answer rubric for the given caseID. label names the assertion
-// for reporting, matching every other grader's Name() convention.
 func NewJudgeGrader(caseID, label, rubric string, judge Judge, cache *JudgeCache) Grader {
 	return &judgeGrader{caseID: caseID, label: label, rubric: rubric, judge: judge, cache: cache}
 }
 
-// NewUnconfiguredJudgeGrader builds a Grader that always fails with err —
-// used when no judge could be constructed (e.g. missing API key) so the
-// case still has a well-formed Grader (required by TestCases_WellFormed)
-// that fails loudly rather than a nil Grader that would panic the runner.
 func NewUnconfiguredJudgeGrader(caseID, label string, err error) Grader {
 	return &judgeGrader{caseID: caseID, label: label, unconfiguredErr: err}
 }
 
-// Name is stable across process runs regardless of whether a judge was
-// actually configured (TestCases_Deterministic compares Grader.Name() across
-// two Cases() calls within the same process/environment, so this must not
-// vary with e.g. a pointer address).
+// Name must stay stable across instances of the same case/label.
 func (g *judgeGrader) Name() string {
 	return "judge:" + g.caseID + ":" + g.label
 }
 
-// Grade forwards ctx to the underlying Judge (a cancelled ctx must surface
-// as an error here, not a verdict — the CtxGraderFunc/AnyOf/AllOf combinators
-// exist specifically so a judge nested anywhere in the assertion tree stays
-// cancellable; this is the leaf that must actually honor it).
 func (g *judgeGrader) Grade(ctx context.Context, in protocol.Request, out string) (bool, error) {
 	if g.unconfiguredErr != nil {
 		return false, g.unconfiguredErr
@@ -575,11 +439,6 @@ func (g *judgeGrader) Grade(ctx context.Context, in protocol.Request, out string
 	return verdict.Pass, nil
 }
 
-// defaultJudgeGrader resolves the judge and cache from the environment and
-// builds the Grader for a judged case. Never panics, never nil: with no API
-// key configured (the common case in -dry-run and unit tests), it returns a
-// Grader that fails loudly and identically on every sample, so Graded stays
-// 0 rather than a silent pass.
 func defaultJudgeGrader(caseID, label, rubric string) Grader {
 	cfg := JudgeConfigFromEnv()
 	judge, err := NewGeminiJudge(cfg)

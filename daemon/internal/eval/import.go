@@ -1,15 +1,4 @@
-// Importer that turns real dogfooding failures (the §12 metrics log) into
-// eval Cases: reads events.jsonl, reconstructs the protocol.Request behind
-// each "request" event, and recovers the completion suffix the model emitted.
-//
-// rawRequestEvent below is a local, minimal mirror of metrics.RequestEvent's
-// JSON shape rather than an import of internal/metrics — metrics must stay
-// deletable as one directory (see CLAUDE.md), so this package depends on the
-// wire format, not the Go type.
-//
-// SkipLikelySecrets is a best-effort heuristic filter, NOT redaction — it
-// will miss secrets with no distinguishing shape. A human MUST review every
-// rendered stub before pasting it into cases.go.
+// Package eval turns dogfooded §12 metrics events into eval Cases.
 package eval
 
 import (
@@ -26,9 +15,6 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// rawRequestEvent mirrors the JSON shape of metrics.RequestEvent, restricted
-// to the fields this importer needs. See the package-doc comment above for
-// why this is a local copy rather than an import of internal/metrics.
 type rawRequestEvent struct {
 	Event     string `json:"event"`
 	RequestID string `json:"request_id"`
@@ -36,9 +22,7 @@ type rawRequestEvent struct {
 	Provider  string `json:"provider"`
 	Model     string `json:"model"`
 
-	// Raw-text fields, present only when raw-text capture is on (all
-	// omitempty on the writer side, so a row missing all of them was
-	// captured without raw text and carries nothing to import).
+	// Raw-text fields, present only when raw-text capture is on.
 	Buf         string   `json:"buf,omitempty"`
 	Suggestion  string   `json:"suggestion,omitempty"`
 	Cwd         string   `json:"cwd,omitempty"`
@@ -52,8 +36,8 @@ type rawRequestEvent struct {
 
 // ImportedCase is one harvested request plus what the model actually said.
 type ImportedCase struct {
-	Case       Case   // Req reconstructed; Asserts empty — a human adds those
-	Suggestion string // the completion SUFFIX the model produced
+	Case       Case   // Req reconstructed; Asserts empty
+	Suggestion string // the completion suffix the model produced
 	Provider   string
 	Model      string
 	RequestID  string
@@ -63,19 +47,16 @@ type ImportedCase struct {
 // behavior.
 type ImportOptions struct {
 	// TriggerFilter restricts import to one trigger kind ("typing" or
-	// "next_command", matching protocol.KindTyping/KindNextCommand). Empty
-	// string means no filtering — import both kinds.
+	// "next_command"). Empty string means no filtering.
 	TriggerFilter string
 
 	// MaxCases caps the number of ImportedCase values returned (after
-	// dedup). Zero means unlimited. Rows beyond the cap are still counted in
-	// ImportStats (they're skipped, not silently truncated from the stats).
+	// dedup). Zero means unlimited; capped rows still count in ImportStats.
 	MaxCases int
 
 	// SkipLikelySecrets drops rows whose buf/suggestion/history match common
-	// secret shapes. Use DefaultImportOptions for the safe (skipped) default
-	// — a bare struct literal defaults this to false, Go having no "unset"
-	// state for a bool field.
+	// secret shapes. A bare struct literal defaults this to false; use
+	// DefaultImportOptions for the safe default.
 	SkipLikelySecrets bool
 
 	secretsExplicitlySet bool
@@ -87,9 +68,7 @@ func DefaultImportOptions() ImportOptions {
 	return ImportOptions{SkipLikelySecrets: true, secretsExplicitlySet: true}
 }
 
-// ImportStats reports what happened to every line read, so a near-total drop
-// of the log is visible rather than indistinguishable from a small, healthy
-// import.
+// ImportStats reports what happened to every line read.
 type ImportStats struct {
 	LinesRead int
 
@@ -103,12 +82,11 @@ type ImportStats struct {
 
 	Duplicates int // rows that hashed identical to an already-kept case
 
-	Imported int // len(result) — cases actually returned
+	Imported int // len(result): cases actually returned
 }
 
-// secretPatterns are best-effort shapes for common credential formats. See
-// the package doc: this is NOT redaction, and a human must review every
-// stub before it lands in a committed file.
+// secretPatterns are best-effort shapes for common credential formats, not
+// redaction; a human must review every stub before it lands in a commit.
 var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                                  // AWS access key id
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}`),                                           // OpenAI/Stripe-style secret key
@@ -137,10 +115,8 @@ func looksLikeSecret(ss ...string) bool {
 }
 
 // ImportEvents reads newline-delimited §12 metrics events from r, reconstructs
-// a protocol.Request plus the observed completion suffix for every importable
-// "request" row, deduplicates, and returns the harvested cases plus stats on
-// every row that did NOT make it in. Callers wanting the safe secret-skipping
-// default should build opts via DefaultImportOptions.
+// a protocol.Request and completion suffix per "request" row, deduplicates,
+// and returns the harvested cases plus stats on every row that didn't make it in.
 func ImportEvents(r io.Reader, opts ImportOptions) ([]ImportedCase, ImportStats, error) {
 	var stats ImportStats
 	var result []ImportedCase
@@ -251,9 +227,8 @@ func dedupKey(req protocol.Request, suggestion string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// historySegments groups req's aligned History/HistoryCwds entries (via
-// HistoryWithCwd, which already tolerates absent/short HistoryCwds) into
-// runs sharing one cwd, in order -- the shape SetHistory's segments expect.
+// historySegments groups req's aligned History/HistoryCwds entries into
+// runs sharing one cwd, in order.
 func historySegments(req protocol.Request) []protocol.HistorySegment {
 	var segs []protocol.HistorySegment
 	for _, e := range req.HistoryWithCwd() {
@@ -267,8 +242,7 @@ func historySegments(req protocol.Request) []protocol.HistorySegment {
 }
 
 // writeReqFields renders req's scalar and DirEntries fields at indent.
-// History/HistoryCwds are excluded here -- see writeHistorySegments, which
-// renders them as protocol.HistoryIn/HistoryUnknown calls instead.
+// History/HistoryCwds are rendered separately by writeHistorySegments.
 func writeReqFields(b *strings.Builder, req protocol.Request, indent string) {
 	if req.Kind != "" {
 		fmt.Fprintf(b, "%sKind: %s,\n", indent, kindConstant(req.Kind))
@@ -298,8 +272,7 @@ func writeReqFields(b *strings.Builder, req protocol.Request, indent string) {
 }
 
 // writeHistorySegments renders segs as chained protocol.HistoryIn/
-// HistoryUnknown calls feeding r.SetHistory(...), matching the hand-written
-// E9-E14 shape in cases.go rather than raw parallel array literals.
+// HistoryUnknown calls feeding r.SetHistory(...).
 func writeHistorySegments(b *strings.Builder, segs []protocol.HistorySegment, indent string) {
 	fmt.Fprintf(b, "%sr.SetHistory(\n", indent)
 	for _, seg := range segs {
@@ -318,10 +291,8 @@ func writeHistorySegments(b *strings.Builder, segs []protocol.HistorySegment, in
 	fmt.Fprintf(b, "%s)\n", indent)
 }
 
-// RenderCaseStub emits one Go composite-literal Case entry (not a full
-// source file) meant to be pasted into a []Case{...} slice in cases.go:
-// Req (an IIFE when history is present, since SetHistory is a method),
-// the observed suggestion in a comment, and a TODO for the assertions.
+// RenderCaseStub emits one Go composite-literal Case entry, not a full
+// source file: Req, the observed suggestion, and a TODO for assertions.
 func RenderCaseStub(w io.Writer, ic ImportedCase, id string) error {
 	var b strings.Builder
 
@@ -363,9 +334,8 @@ func RenderCaseStub(w io.Writer, ic ImportedCase, id string) error {
 	return err
 }
 
-// kindConstant renders a Kind string back to its symbolic constant name so
-// the stub matches hand-written cases.go entries, falling back to a quoted
-// literal for an unrecognized value.
+// kindConstant renders a Kind string back to its symbolic constant name,
+// falling back to a quoted literal for an unrecognized value.
 func kindConstant(kind string) string {
 	switch kind {
 	case protocol.KindTyping:
@@ -377,10 +347,7 @@ func kindConstant(kind string) string {
 	}
 }
 
-// verifyFormats is a tiny helper the test file uses to double-check a
-// rendered stub is syntactically valid Go by round-tripping it through
-// go/format. Kept here (not test-only) so cmd/eval's future "render and
-// validate" flow can reuse it without duplicating the wrapper shell.
+// verifyFormats round-trips src through go/format to check it's valid Go.
 func verifyFormats(src string) error {
 	_, err := format.Source([]byte(src))
 	return err

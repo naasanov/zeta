@@ -47,10 +47,9 @@ func TestLoadLabels_BlankAndCommentLinesSkipped(t *testing.T) {
 	}
 }
 
-// TestLoadLabels_PinnedFile_C3EmptyIsPass loads the pinned judge_labels.jsonl
-// and checks the C3 empty-suggestion entry is labeled "pass": abstention is
-// intended behaviour per prompt.systemPrompt, and c3Rubric states so
-// explicitly — guards that from silently reverting.
+// TestLoadLabels_PinnedFile_C3EmptyIsPass checks the pinned
+// judge_labels.jsonl labels C3's empty suggestion as "pass" (abstention
+// is intended behaviour), guarding against a silent regression.
 func TestLoadLabels_PinnedFile_C3EmptyIsPass(t *testing.T) {
 	f, err := os.Open("testdata/judge_labels.jsonl")
 	if err != nil {
@@ -92,9 +91,8 @@ func TestLoadLabels_UnknownCaseID(t *testing.T) {
 }
 
 func TestLoadLabels_NonJudgedCaseID(t *testing.T) {
-	// A1 is a real case, but it's deterministically graded, not judged — a
-	// label against it is a labeling mistake, not something that should
-	// silently score nothing.
+	// A1 is a real case but deterministically graded, not judged. A label
+	// against it is a labeling mistake, not something to silently score.
 	src := `{"case_id":"A1","suggestion":"x","verdict":"pass","note":""}`
 	_, err := LoadLabels(strings.NewReader(src), Cases())
 	if err == nil {
@@ -132,12 +130,8 @@ func TestLoadLabels_UnknownFieldRejected(t *testing.T) {
 // ---- Cohen's kappa ------------------------------------------------------------
 
 func TestCohenKappa_HandComputed(t *testing.T) {
-	// 10 labels, 5 pass / 5 fail (balanced). Judge agrees on 8/10:
-	// aa=4 (both pass), bb=1 (human pass, judge fail), cc=1 (human fail,
-	// judge pass), dd=4 (both fail).
-	// po = 8/10 = 0.8
-	// pe = (5*5 + 5*5) / 100 = 0.5
-	// kappa = (0.8-0.5)/(1-0.5) = 0.6
+	// 10 labels, 5 pass / 5 fail. The judge agrees on 8/10: aa=4, bb=1,
+	// cc=1, dd=4. kappa should work out to 0.6.
 	got := cohenKappa(4, 1, 1, 4)
 	want := 0.6
 	if math.Abs(got-want) > 1e-9 {
@@ -153,13 +147,8 @@ func TestCohenKappa_PerfectAgreement(t *testing.T) {
 }
 
 func TestCohenKappa_LopsidedLabelsAgreementHighKappaLow(t *testing.T) {
-	// 30 labels, 27 fail / 3 pass. A judge that ALWAYS says "fail":
-	// aa=0 (no true pass agreed), bb=3 (human pass, judge fail, all 3),
-	// cc=0, dd=27 (human fail, judge fail, all 27).
-	// po = 27/30 = 0.9 (looks great)
-	// pe = (3*0 + 27*30) / 900 = 810/900 = 0.9 (all of it is chance, because
-	//      the judge's marginal is degenerate — it never varies)
-	// kappa = (0.9-0.9)/(1-0.9) = 0
+	// 30 labels, 27 fail / 3 pass. A judge that always says "fail" gets a
+	// high raw agreement (0.9) that is purely chance; kappa should be ~0.
 	po := 27.0 / 30.0
 	kappa := cohenKappa(0, 3, 0, 27)
 	if po < 0.85 {
@@ -207,10 +196,9 @@ func TestLabelImbalance_Balanced(t *testing.T) {
 
 // ---- ValidateJudges: scriptedJudge, agreement/errors/disagreements ----------
 
-// scriptedJudge is a Judge test double that returns pre-scripted results in
-// call order (unlike judge_test.go's fakeJudge, which returns the same
-// verdict/err every time) — needed here because ValidateJudges tests need
-// different verdicts across different labels processed in one run.
+// scriptedJudge is a Judge test double that returns pre-scripted results
+// in call order, so a single run can exercise different verdicts across
+// different labels.
 type scriptedJudge struct {
 	name    string
 	results []scriptedResult
@@ -235,10 +223,6 @@ func (s *scriptedJudge) Judge(_ context.Context, _ JudgeInput) (JudgeVerdict, er
 
 func judgedCases(t *testing.T) []Case {
 	t.Helper()
-	// A configured (non-empty API key) judge grader is what gives
-	// judgedAssertion a real, non-empty rubric string to hand to the
-	// scriptedJudge's JudgeInput — matches how -judge-validate's real flow
-	// resolves Cases() only after confirming a key is set.
 	t.Setenv("ZSH_AUTOPILOT_EVAL_JUDGE_KEY", "test-key-for-validate-tests")
 	return Cases()
 }
@@ -333,9 +317,8 @@ func TestValidateJudges_ErrorsNotCountedAsDisagreements(t *testing.T) {
 }
 
 func TestValidateJudges_UsesProductionRubric(t *testing.T) {
-	// The JudgeInput handed to the judge must carry the SAME rubric text
-	// cases.go wired into C3's grader — not a re-typed copy that could
-	// drift. Assert this by capturing what the judge actually received.
+	// The JudgeInput handed to the judge must carry the same rubric text
+	// cases.go wired into C3's grader, not a re-typed copy that could drift.
 	cases := judgedCases(t)
 
 	var gotRubric string

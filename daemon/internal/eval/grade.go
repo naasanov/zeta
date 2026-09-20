@@ -9,35 +9,16 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// This file holds the deterministic grader primitives. A Grader NEVER
-// encodes polarity — every func here reports whether a SHAPE is present, and
-// the caller's Assertion.Polarity decides whether presence is good, bad, or
-// merely tracked (see types.go's Grader doc comment).
-//
-// out is always the completion SUFFIX (Sample.Output), never req.Buf+out.
-// Graders that need the full command line build it explicitly via
-// fullCommand — this distinction is the most likely source of a
-// silently-wrong grader.
-
-// fullCommand reconstructs the full command line a user would see:
-// req.Buf + out, with no separator inserted (mirrors the production
-// contract in prompt.systemPrompt — the model supplies its own spacing).
 func fullCommand(in protocol.Request, out string) string {
 	return in.Buf + out
 }
 
-// normalizeSpace collapses all runs of whitespace to a single space and
-// trims the ends, so "git  status\n" and "git status" compare equal.
 func normalizeSpace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
 // ---- Core graders ----------------------------------------------------
 
-// MatchesRegexp reports whether out matches pattern. pattern is compiled
-// once at construction time (init-time, effectively), so a malformed
-// pattern panics immediately at case-corpus construction rather than
-// surfacing as a per-sample grader error buried in a scorecard.
 func MatchesRegexp(name, pattern string) Grader {
 	re := regexp.MustCompile(pattern)
 	return GraderFunc{N: name, F: func(_ protocol.Request, out string) (bool, error) {
@@ -45,7 +26,6 @@ func MatchesRegexp(name, pattern string) Grader {
 	}}
 }
 
-// Contains reports whether out contains sub, case-insensitively.
 func Contains(sub string) Grader {
 	low := strings.ToLower(sub)
 	return GraderFunc{N: "contains:" + sub, F: func(_ protocol.Request, out string) (bool, error) {
@@ -53,7 +33,6 @@ func Contains(sub string) Grader {
 	}}
 }
 
-// ContainsAny reports whether out contains any of subs, case-insensitively.
 func ContainsAny(subs ...string) Grader {
 	lows := make([]string, len(subs))
 	for i, s := range subs {
@@ -70,71 +49,44 @@ func ContainsAny(subs ...string) Grader {
 	}}
 }
 
-// HasLeadingSpace reports whether out starts with a space character. This is
-// the exact spacing contract prompt.systemPrompt documents: a completion
-// starting a new word must supply its own leading space.
 func HasLeadingSpace() Grader {
 	return GraderFunc{N: "has-leading-space", F: func(_ protocol.Request, out string) (bool, error) {
 		return len(out) > 0 && out[0] == ' ', nil
 	}}
 }
 
-// IsEmpty reports whether out is empty once leading/trailing whitespace is
-// trimmed (Runner already trims trailing whitespace, but a case grading raw
-// stub scripts or future callers shouldn't rely on that).
 func IsEmpty() Grader {
 	return GraderFunc{N: "is-empty", F: func(_ protocol.Request, out string) (bool, error) {
 		return strings.TrimSpace(out) == "", nil
 	}}
 }
 
-// LongerThan reports whether out has more than n runes (not bytes — a
-// completion with multibyte characters must not be miscounted short).
 func LongerThan(n int) Grader {
 	return GraderFunc{N: "longer-than", F: func(_ protocol.Request, out string) (bool, error) {
 		return len([]rune(out)) > n, nil
 	}}
 }
 
-// ContainsNewline reports whether out contains a newline. This should almost
-// never fire in practice: provider.Complete's accumulator already cuts the
-// stream at the first newline (accum.go), so this grader exists to GUARD
-// that cutoff, not to catch routine multi-line output. Don't delete it as
-// dead weight if it never trips — a trip is the interesting case.
 func ContainsNewline() Grader {
 	return GraderFunc{N: "contains-newline", F: func(_ protocol.Request, out string) (bool, error) {
 		return strings.ContainsAny(out, "\n\r"), nil
 	}}
 }
 
-// fenceOrBacktickRe matches a single backtick, a triple-backtick fence, or a
-// tilde fence.
 var fenceOrBacktickRe = regexp.MustCompile("`|~~~")
 
-// ContainsBacktickOrFence reports whether out contains a backtick or a
-// markdown code fence — a sign the model reverted to chat-assistant
-// formatting instead of a raw shell completion.
 func ContainsBacktickOrFence() Grader {
 	return GraderFunc{N: "contains-backtick-or-fence", F: func(_ protocol.Request, out string) (bool, error) {
 		return fenceOrBacktickRe.MatchString(out), nil
 	}}
 }
 
-// proseMarkers are case-insensitive substrings that indicate the model
-// answered in prose instead of emitting a shell completion. "i " / " i " is
-// deliberately word-boundary matched (via proseIRe) so it doesn't fire
-// inside "git", "unix", etc.
 var proseSubstrMarkers = []string{
 	"sorry", "cannot", "not enough", "unable", "as an ai", "here is", "note:",
 }
 
-// proseIRe matches a standalone "I" (word-boundary), case-insensitively —
-// e.g. "I can't" — without matching the "i" inside "git" or "wait".
 var proseIRe = regexp.MustCompile(`(?i)\bi\b`)
 
-// LooksLikeProse reports whether out contains any of the plan's prose
-// markers (sorry, cannot, not enough, unable, as an ai, here is, note:) or a
-// standalone "I".
 func LooksLikeProse() Grader {
 	return GraderFunc{N: "looks-like-prose", F: func(_ protocol.Request, out string) (bool, error) {
 		low := strings.ToLower(out)
@@ -149,26 +101,16 @@ func LooksLikeProse() Grader {
 
 // ---- Context-aware graders --------------------------------------------
 
-// RestatesBuffer reports whether out, appended to req.Buf, merely repeats
-// req.Buf's text again — i.e. the suffix re-states the buffer instead of
-// extending it. Whitespace is normalized before comparing so "git status"
-// vs " git  status" still counts. Only fires when req.Buf is non-empty (an
-// empty buffer can't be "restated").
 func RestatesBuffer() Grader {
 	return GraderFunc{N: "restates-buffer", F: func(in protocol.Request, out string) (bool, error) {
 		buf := normalizeSpace(in.Buf)
 		if buf == "" {
 			return false, nil
 		}
-		// Prefix, not equality: the defect is the suffix BEGINNING with the
-		// buffer's own text ("git statusgit status --short" concatenated).
-		// Equality would miss the restate-then-continue form.
 		return strings.HasPrefix(normalizeSpace(out), buf), nil
 	}}
 }
 
-// lastToken returns the last whitespace-separated token of s, trimmed of
-// surrounding quotes and common trailing punctuation.
 func lastToken(s string) string {
 	fields := strings.Fields(s)
 	if len(fields) == 0 {
@@ -179,8 +121,6 @@ func lastToken(s string) string {
 	return tok
 }
 
-// NamesEntryInDirEntries reports whether the last whitespace-separated token
-// of out (quotes trimmed) is present in in.DirEntries.
 func NamesEntryInDirEntries() Grader {
 	return GraderFunc{N: "names-entry-in-dir-entries", F: func(in protocol.Request, out string) (bool, error) {
 		tok := lastToken(out)
@@ -196,15 +136,8 @@ func NamesEntryInDirEntries() Grader {
 	}}
 }
 
-// filenameShapedRe matches a bare-word token that looks like a filename or
-// path: has a dotted extension, or contains a path separator.
 var filenameShapedRe = regexp.MustCompile(`^[\w.\-/]*[\w\-]\.[A-Za-z0-9]{1,8}$|^[\w.\-]*/[\w.\-/]+$`)
 
-// NamesPathNotInDirEntries reports whether out contains a filename-shaped
-// token (has an extension, or looks like a path) that is NOT in
-// in.DirEntries. It only fires when in.DirEntries is non-empty: with no
-// listing at all there is nothing for the suggestion to contradict, so an
-// empty-context case must never be reported as a fabrication.
 func NamesPathNotInDirEntries() Grader {
 	return GraderFunc{N: "names-path-not-in-dir-entries", F: func(in protocol.Request, out string) (bool, error) {
 		if len(in.DirEntries) == 0 {
@@ -227,11 +160,7 @@ func NamesPathNotInDirEntries() Grader {
 	}}
 }
 
-// contextTokenAllowlist is shell keywords/flags/command names
-// ContainsTokenNotInContext must never flag as "invented" — otherwise every
-// suggestion trivially "invents" a token via ordinary shell vocabulary.
 var contextTokenAllowlist = map[string]bool{
-	// common commands
 	"git": true, "cd": true, "ls": true, "rm": true, "mv": true, "cp": true,
 	"mkdir": true, "cat": true, "echo": true, "npm": true, "go": true,
 	"docker": true, "curl": true, "ssh": true, "vim": true, "python": true,
@@ -239,32 +168,21 @@ var contextTokenAllowlist = map[string]bool{
 	"pip": true, "pip3": true, "yarn": true, "brew": true, "source": true,
 	"export": true, "chmod": true, "chown": true, "kill": true, "ps": true,
 	"tar": true, "touch": true, "less": true, "more": true, "man": true,
-	// common git subcommands
 	"add": true, "commit": true, "push": true, "pull": true, "status": true,
 	"diff": true, "log": true, "branch": true, "switch": true, "checkout": true,
 	"merge": true, "rebase": true, "clone": true, "fetch": true, "tag": true,
 	"stash": true, "remote": true, "init": true, "reset": true,
-	// docker/npm/go subcommands
 	"compose": true, "up": true, "down": true, "build": true, "run": true,
 	"install": true, "test": true, "start": true, "mod": true, "tidy": true,
-	// misc words that show up constantly and carry no invented content
 	"origin": true, "main": true, "master": true, "all": true, "true": true,
 	"false": true, "null": true, "and": true, "or": true, "not": true,
 }
 
-// identifierTokenRe extracts identifier-shaped words (letters/digits plus
-// _-.) from out for ContainsTokenNotInContext, skipping pure flags (leading
-// '-') and pure numbers. '/' is deliberately NOT a continuation character —
-// a path or URL splits into its segments (host, org, leaf) so a leaf that's
-// genuinely new (e.g. an invented repo name) doesn't hide an otherwise-known
-// host+org behind one compound token, and vice versa.
+// identifierTokenRe excludes '/' so a path or URL splits into segments.
 var identifierTokenRe = regexp.MustCompile(`[A-Za-z0-9_][A-Za-z0-9_.-]*`)
 
 var pureNumberRe = regexp.MustCompile(`^[0-9]+$`)
 
-// knownToken reports whether low is in known, tolerating a trailing ".git"
-// on low — a git remote leaf is conventionally the known repo/dir name plus
-// that suffix, not a separately-invented identifier.
 func knownToken(low string, known map[string]bool) bool {
 	if known[low] {
 		return true
@@ -273,19 +191,12 @@ func knownToken(low string, known map[string]bool) bool {
 	return ok && known[trimmed]
 }
 
-// ContainsTokenNotInContext reports whether out contains an identifier-shaped
-// token absent from ALL of in.History, in.DirEntries, in.GitBranch, and
-// in.Buf. Flags (leading '-') and pure numbers are skipped, and
-// contextTokenAllowlist excludes shell keywords / common flags / common
-// command names, so this fires on genuinely invented identifiers — e.g.
-// "git switch -c my-invented-feature" — not on ordinary vocabulary like
-// "git switch -c".
 func ContainsTokenNotInContext() Grader {
 	return GraderFunc{N: "contains-token-not-in-context", F: func(in protocol.Request, out string) (bool, error) {
 		known := contextVocabulary(in)
 		for _, field := range strings.Fields(out) {
 			if strings.HasPrefix(field, "-") {
-				continue // flags
+				continue
 			}
 			for _, tok := range identifierTokenRe.FindAllString(field, -1) {
 				low := strings.ToLower(tok)
@@ -304,9 +215,6 @@ func ContainsTokenNotInContext() Grader {
 	}}
 }
 
-// contextVocabulary collects every identifier-shaped token that appears
-// anywhere in in's history/dir_entries/branch/buf, lowercased, for
-// ContainsTokenNotInContext to compare against.
 func contextVocabulary(in protocol.Request) map[string]bool {
 	known := map[string]bool{}
 	add := func(s string) {
@@ -325,47 +233,26 @@ func contextVocabulary(in protocol.Request) map[string]bool {
 	return known
 }
 
-// urlRe matches an http(s) URL or an scp-style user@host: reference.
 var urlRe = regexp.MustCompile(`https?://\S+|[A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+:`)
 
-// ContainsURL reports whether out contains an http(s) URL or an scp-style
-// user@host: reference.
 func ContainsURL() Grader {
 	return GraderFunc{N: "contains-url", F: func(_ protocol.Request, out string) (bool, error) {
 		return urlRe.MatchString(out), nil
 	}}
 }
 
-// A host is recognized by the POSITION it occupies, not by looking
-// hostname-shaped on its own — a bare single-label word can't be matched as a
-// host without flagging every ordinary word in a command. Matching only
-// dotted tokens was the previous rule, and it let `http://localhost:8080/...`
-// through as a non-host: B7 reported a clean pass on a wholly invented
-// endpoint.
-
-// urlAuthorityRe captures the host of a scheme://[userinfo@]host[:port] URL.
-// The capture stops before ':' so the port is excluded.
+// urlAuthorityRe stops before ':' so the port is excluded.
 var urlAuthorityRe = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://(?:[^/@\s]*@)?([A-Za-z0-9_][A-Za-z0-9_.\-]*)`)
 
-// atHostRe captures the host after an '@' (ssh/scp user@host).
 var atHostRe = regexp.MustCompile(`@([A-Za-z0-9_][A-Za-z0-9_.\-]*)`)
 
-// hostPortRe captures a bare host:port outside a URL (localhost:8080,
-// db:5432). The 2-5 digit port is what keeps it off ordinary `key: value`
-// text.
 var hostPortRe = regexp.MustCompile(`\b([A-Za-z0-9_][A-Za-z0-9_.\-]*):[0-9]{2,5}\b`)
 
-// dottedHostRe matches a bare dotted hostname or IP (example.com,
-// 192.168.1.1) in no particular position.
 var dottedHostRe = regexp.MustCompile(`\b[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9][A-Za-z0-9\-]*)+\b`)
 
-// urlOrScpSpanRe matches a full URL or scp-style user@host:path, blanked
-// before dottedHostRe runs so a path leaf like "repo.git" isn't misread as a host.
 var urlOrScpSpanRe = regexp.MustCompile(`https?://\S+|[A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+:\S*`)
 
-// hostRefs extracts every host referenced by s, lowercased and deduped, with
-// ports and userinfo stripped. A pure number is never a host — otherwise a
-// clock time ("12:30") reads as host 12 on port 30.
+// hostRefs: a pure number is never a host (e.g. "12:30" would read as host 12, port 30).
 func hostRefs(s string) []string {
 	var hosts []string
 	seen := map[string]bool{}
@@ -382,20 +269,12 @@ func hostRefs(s string) []string {
 			add(m[1])
 		}
 	}
-	// dottedHostRe only scans OUTSIDE full URL/scp spans: their own host was
-	// already captured above via urlAuthorityRe/atHostRe, and their path
-	// segments (e.g. a repo's ".git" leaf) are not hostnames.
 	for _, m := range dottedHostRe.FindAllString(urlOrScpSpanRe.ReplaceAllString(s, " "), -1) {
 		add(m)
 	}
 	return hosts
 }
 
-// ContainsHostNotInHistory reports whether out references a host (see
-// hostRefs) that does not appear anywhere in in.History. The history side is
-// a plain substring test on purpose: being lenient about what counts as
-// "already seen" keeps this mustNot grader from reporting a grounded
-// suggestion as a fabrication.
 func ContainsHostNotInHistory() Grader {
 	return GraderFunc{N: "contains-host-not-in-history", F: func(in protocol.Request, out string) (bool, error) {
 		historyBlob := strings.ToLower(strings.Join(in.History, " "))
@@ -408,25 +287,14 @@ func ContainsHostNotInHistory() Grader {
 	}}
 }
 
-// closesQuoteRe matches a quoted span with at least one non-space character
-// inside it — i.e. a complete, non-empty quoted string, per the plan doc's
-// exact pattern.
 var closesQuoteRe = regexp.MustCompile(`"[^"]*\S[^"]*"`)
 
-// ClosesQuoteWithContent reports whether req.Buf+out contains a quoted span
-// with non-space content — the model invented free-form input (e.g. a commit
-// message) and closed the quote itself. Applied to the FULL command line so
-// an opening quote already present in the buffer (buf `git commit -m "`)
-// still counts once the suffix closes it.
 func ClosesQuoteWithContent() Grader {
 	return GraderFunc{N: "closes-quote-with-content", F: func(in protocol.Request, out string) (bool, error) {
 		return closesQuoteRe.MatchString(fullCommand(in, out)), nil
 	}}
 }
 
-// EqualsRecentHistory reports whether the full command (req.Buf+out,
-// trimmed and whitespace-normalized) equals one of the last n entries of
-// in.History.
 func EqualsRecentHistory(n int) Grader {
 	return GraderFunc{N: "equals-recent-history", F: func(in protocol.Request, out string) (bool, error) {
 		full := normalizeSpace(fullCommand(in, out))
@@ -446,8 +314,6 @@ func EqualsRecentHistory(n int) Grader {
 	}}
 }
 
-// InHistory reports whether the full command (req.Buf+out) equals ANY entry
-// in in.History.
 func InHistory() Grader {
 	return GraderFunc{N: "in-history", F: func(in protocol.Request, out string) (bool, error) {
 		full := normalizeSpace(fullCommand(in, out))
@@ -463,22 +329,12 @@ func InHistory() Grader {
 	}}
 }
 
-// digitRunRe matches a run of one or more digits, for
-// EqualsHistoryModuloNumber's normalization.
 var digitRunRe = regexp.MustCompile(`[0-9]+`)
 
-// normalizeDigits replaces every run of digits in s with a fixed
-// placeholder, so "v1.1.0" and "v1.2.0" normalize identically.
 func normalizeDigits(s string) string {
 	return digitRunRe.ReplaceAllString(s, "#")
 }
 
-// EqualsHistoryModuloNumber reports whether the full command equals a
-// history entry after normalizing every run of digits to a placeholder, BUT
-// is not byte-identical (whitespace-normalized) to that entry. This is the
-// "nonsense incrementing" check (C1/C2): git tag v1.1.0 -> git tag v1.2.0
-// fires (same shape, different number); git tag v1.1.0 -> git tag v1.1.0
-// does not (that's a plain repeat — category D's business, not this one).
 func EqualsHistoryModuloNumber() Grader {
 	return GraderFunc{N: "equals-history-modulo-number", F: func(in protocol.Request, out string) (bool, error) {
 		full := normalizeSpace(fullCommand(in, out))
@@ -491,7 +347,7 @@ func EqualsHistoryModuloNumber() Grader {
 			if normFull != normalizeDigits(normH) {
 				continue
 			}
-			if normH != full { // not a byte-identical repeat
+			if normH != full {
 				return true, nil
 			}
 		}
@@ -499,37 +355,22 @@ func EqualsHistoryModuloNumber() Grader {
 	}}
 }
 
-// topLevelSeparatorRe matches ';' or '&&' anywhere in the string. It does
-// not attempt real shell parsing (no quote-awareness) — the plan's category
-// A cases are short enough that this is deliberately simple; a
-// quote-aware version can be added if a false positive shows up.
 var topLevelSeparatorRe = regexp.MustCompile(`;|&&`)
 
-// ContainsSeparator reports whether out contains a top-level ';' or '&&'
-// anywhere — i.e. the model over-chained commands (A4).
 func ContainsSeparator() Grader {
 	return GraderFunc{N: "contains-separator", F: func(_ protocol.Request, out string) (bool, error) {
 		return topLevelSeparatorRe.MatchString(out), nil
 	}}
 }
 
-// startsWithSeparatorRe matches a leading (after optional whitespace) &&,
-// ||, |, or ; — the exact pattern the plan gives for A1.
 var startsWithSeparatorRe = regexp.MustCompile(`^\s*(&&|\|\|?|;)`)
 
-// StartsWithSeparator reports whether out starts (after optional leading
-// whitespace) with &&, ||, |, or ; — a next-command prediction that leads
-// with a separator instead of a bare command.
 func StartsWithSeparator() Grader {
 	return GraderFunc{N: "starts-with-separator", F: func(_ protocol.Request, out string) (bool, error) {
 		return startsWithSeparatorRe.MatchString(out), nil
 	}}
 }
 
-// topLevelCommandAllowlist is tokens that plausibly START a standalone shell
-// command. ContinuesLastHistoryCommand uses it to tell "the model emitted a
-// NEW command" from "the model emitted bare arguments that only make sense
-// concatenated onto the previous history line".
 var topLevelCommandAllowlist = map[string]bool{
 	"git": true, "cd": true, "ls": true, "rm": true, "mv": true, "cp": true,
 	"mkdir": true, "cat": true, "echo": true, "npm": true, "go": true,
@@ -540,23 +381,11 @@ var topLevelCommandAllowlist = map[string]bool{
 	"tar": true, "touch": true, "less": true, "more": true, "man": true,
 }
 
-// argumentlessGitSubcommands are git subcommands that are already complete,
-// valid commands with no positional arguments — exactly the shape whose
-// history line invites the FIM contiguity bug ContinuesLastHistoryCommand
-// guards against.
 var argumentlessGitSubcommands = map[string]bool{
 	"push": true, "pull": true, "fetch": true, "status": true, "log": true,
 	"diff": true, "add": true,
 }
 
-// ContinuesLastHistoryCommand reports whether out looks like bare arguments
-// continuing the LAST history entry rather than a standalone new command:
-// the entry's first two words are "git" plus an argumentless subcommand
-// (e.g. "git push", already complete on its own), yet out's first token is
-// not a recognized command word. This is the FIM contiguity failure mode:
-// with nothing marking the boundary between history and the predicted next
-// command, the model can treat "git push" as unfinished and append
-// "origin main" — fine concatenated, not a command on its own line.
 func ContinuesLastHistoryCommand() Grader {
 	return GraderFunc{N: "continues-last-history-command", F: func(in protocol.Request, out string) (bool, error) {
 		if len(in.History) == 0 {
@@ -576,10 +405,6 @@ func ContinuesLastHistoryCommand() Grader {
 
 // ---- cwd-aware graders (context, cwd-scoped prompts) --------------------
 
-// EchoesOtherCwdCommand reports whether out's leading tokens (first, plus
-// second when both sides have one) match a history entry tagged with a
-// DIFFERENT known cwd than in.Cwd. Inert when no entry has a known,
-// differing cwd, so it never fires on the untagged legacy corpus.
 func EchoesOtherCwdCommand() Grader {
 	return GraderFunc{N: "echoes-other-cwd-command", F: func(in protocol.Request, out string) (bool, error) {
 		outFields := strings.Fields(out)
@@ -603,13 +428,6 @@ func EchoesOtherCwdCommand() Grader {
 	}}
 }
 
-// ContainsOtherCwdOnlyToken reports whether out contains an identifier-shaped
-// token that appears in history ONLY under a cwd different from in.Cwd — a
-// value that belongs to a different project bleeding into this one, e.g. a
-// branch name that only ever shows up in a different repo's history.
-// ContainsTokenNotInContext can't see this: it flattens History across all
-// cwds, so a foreign token still reads as "known" there. Inert when no entry
-// has a known, differing cwd, same as EchoesOtherCwdCommand.
 func ContainsOtherCwdOnlyToken() Grader {
 	return GraderFunc{N: "contains-other-cwd-only-token", F: func(in protocol.Request, out string) (bool, error) {
 		local := map[string]bool{}
@@ -639,7 +457,7 @@ func ContainsOtherCwdOnlyToken() Grader {
 
 		for _, field := range strings.Fields(out) {
 			if strings.HasPrefix(field, "-") {
-				continue // flags
+				continue
 			}
 			for _, tok := range identifierTokenRe.FindAllString(field, -1) {
 				low := strings.ToLower(tok)
@@ -655,10 +473,6 @@ func ContainsOtherCwdOnlyToken() Grader {
 	}}
 }
 
-// OutputMentionsParentDirArtifact reports whether out mentions in.Cwd's
-// parent directory: its literal path, or a ".." token. Catches the leak a
-// cwd filter can produce when it drops the "cd" that actually separated
-// two interleaved same-dir runs.
 func OutputMentionsParentDirArtifact() Grader {
 	return GraderFunc{N: "output-mentions-parent-dir-artifact", F: func(in protocol.Request, out string) (bool, error) {
 		if in.Cwd == "" || out == "" {
@@ -677,12 +491,6 @@ func OutputMentionsParentDirArtifact() Grader {
 
 // ---- Composition --------------------------------------------------------
 
-// AnyOf reports whether ANY of gs is present, short-circuiting on the first
-// present result (in order) or the first grader error. Prefer separate
-// assertions over AnyOf/AllOf wherever the plan describes independent
-// checks — a compound grader that fails tells you less than two that fail
-// separately. Use AnyOf only for a genuine disjunction (e.g. F1's "empty or
-// short").
 func AnyOf(name string, gs ...Grader) Grader {
 	return CtxGraderFunc{N: name, F: func(ctx context.Context, in protocol.Request, out string) (bool, error) {
 		for _, g := range gs {
@@ -698,8 +506,6 @@ func AnyOf(name string, gs ...Grader) Grader {
 	}}
 }
 
-// AllOf reports whether ALL of gs are present. See AnyOf's doc comment on
-// when compound graders are (and mostly aren't) the right call.
 func AllOf(name string, gs ...Grader) Grader {
 	return CtxGraderFunc{N: name, F: func(ctx context.Context, in protocol.Request, out string) (bool, error) {
 		for _, g := range gs {
@@ -715,10 +521,6 @@ func AllOf(name string, gs ...Grader) Grader {
 	}}
 }
 
-// Not inverts g's presence: it reports true exactly when g does not. It's
-// small enough not to need its own bullet in the plan doc's grader list, but
-// F1 needs "not longer than 8 chars" as one leg of an AnyOf, and negating
-// LongerThan is more honest than adding a parallel NotLongerThan primitive.
 func Not(g Grader) Grader {
 	return CtxGraderFunc{N: "not-" + g.Name(), F: func(ctx context.Context, in protocol.Request, out string) (bool, error) {
 		ok, err := g.Grade(ctx, in, out)

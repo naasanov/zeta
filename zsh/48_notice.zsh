@@ -2,6 +2,7 @@
 #--------------------------------------------------------------------#
 # Notice Channel                                                     #
 #--------------------------------------------------------------------#
+
 # One-line diagnostics for non-recoverable failures (bad key, missing
 # daemon, etc), queued by producers running outside widget context and
 # printed once per shell per failure class from a precmd hook.

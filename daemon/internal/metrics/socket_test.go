@@ -22,11 +22,6 @@ func shortSocketPath(t *testing.T) string {
 	return p
 }
 
-// TestServe_PassthroughStampsUserAndSession drives one connection through
-// the metrics socket, sends a "shown" event, and asserts the written line in
-// the log has been stamped with user + a derived session_id while every
-// original field survives untouched (design: passthrough, don't drop
-// unknown/additive fields).
 func TestServe_PassthroughStampsUserAndSession(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "events.jsonl")
 	sockPath := shortSocketPath(t)
@@ -57,10 +52,8 @@ func TestServe_PassthroughStampsUserAndSession(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Mirrors the real zsh-side "shown" payload exactly (zsh/55_metrics.zsh).
-	// Deliberately no buffer_len: that field is unobtainable at paint time (the
-	// zsh emit runs in a `zle -F` callback with no $BUFFER) and lives on the
-	// daemon-built "request" event instead, joined via request_id.
+	// No buffer_len: that field is unobtainable at paint time and lives on
+	// the daemon-built "request" event instead, joined via request_id.
 	line := `{"v":1,"event":"shown","request_id":"sess-xyz.3","total_latency_ms":123.4,"suggestion_len":4,"ts":1750000000.123}` + "\n"
 	if _, err := conn.Write([]byte(line)); err != nil {
 		t.Fatalf("write: %v", err)
@@ -103,15 +96,11 @@ func TestServe_PassthroughStampsUserAndSession(t *testing.T) {
 	if decoded["request_id"] != "sess-xyz.3" {
 		t.Errorf("request_id = %v, want %q", decoded["request_id"], "sess-xyz.3")
 	}
-	// Additive field survives untouched: passthrough must not drop it.
 	if decoded["total_latency_ms"] != 123.4 {
 		t.Errorf("total_latency_ms = %v, want 123.4", decoded["total_latency_ms"])
 	}
 }
 
-// TestServe_ShutdownDoesNotHang asserts Serve tears down promptly (no
-// deadlock) when ctx is cancelled while a connection is open but idle,
-// mirroring internal/server's own close-conns-then-wait discipline.
 func TestServe_ShutdownDoesNotHang(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "events.jsonl")
 	sockPath := shortSocketPath(t)
@@ -139,9 +128,8 @@ func TestServe_ShutdownDoesNotHang(t *testing.T) {
 		t.Fatalf("dial %s: %v", sockPath, err)
 	}
 	defer conn.Close()
-	// Deliberately leave the connection open and idle (no write, no close)
-	// so the reader goroutine inside Serve is parked in a blocking read when
-	// shutdown starts.
+	// Leave the connection open and idle (no write, no close) so the reader
+	// goroutine inside Serve is parked in a blocking read when shutdown starts.
 
 	cancel()
 	select {

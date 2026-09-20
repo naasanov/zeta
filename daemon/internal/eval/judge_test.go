@@ -66,8 +66,7 @@ func (f *fakeJudge) callCount() int {
 
 // ---- Prompt rendering: blinding + content -----------------------------------
 
-// bannedProviderTokens are provider/model family names that must NEVER
-// appear anywhere in a rendered judge prompt (system or user turn) — the
+// bannedProviderTokens must never appear in a rendered judge prompt: the
 // judge must be blind to which system produced the suggestion it grades.
 var bannedProviderTokens = []string{
 	"codestral", "anthropic", "claude", "groq", "llama", "mistral", "openai", "gemini",
@@ -137,8 +136,8 @@ func TestJudgePrompt_ContainsRubricContextAndSuggestion(t *testing.T) {
 }
 
 func TestJudgePrompt_OmitsZeroFields(t *testing.T) {
-	// A Request with no context set (E8-shaped) should not print misleading
-	// zero-value context lines like "last exit code: 0" or an empty branch.
+	// A Request with no context set should not print misleading zero-value
+	// context lines like "last exit code: 0" or an empty branch.
 	in := JudgeInput{
 		Rubric:     "does it abstain",
 		Req:        protocol.Request{Kind: protocol.KindNextCommand},
@@ -438,10 +437,9 @@ func TestJudgeGrader_NameIsStableAndCaseScoped(t *testing.T) {
 	}
 }
 
-// TestDefaultJudgeModel_UsesDots guards a real bug: Gemini model ids use
-// dots, not dashes ("gemini-3"+"-5-flash-lite", split so this test isn't
-// itself a grep hit for the typo). The dashed form parses fine as a config
-// value and 404s at request time in a way that reads like an auth failure.
+// TestDefaultJudgeModel_UsesDots guards a real bug: a dashed model id
+// parses as a valid config value but 404s at request time in a way that
+// reads like an auth failure, not a typo.
 func TestDefaultJudgeModel_UsesDots(t *testing.T) {
 	if defaultJudgeModel != "gemini-3.5-flash-lite" {
 		t.Errorf("defaultJudgeModel = %q, want the dotted form %q", defaultJudgeModel, "gemini-3.5-flash-lite")
@@ -504,10 +502,8 @@ func TestNewGeminiJudge_RequiresAPIKey(t *testing.T) {
 
 // ---- Wire shape: exercised via httptest, never the real network ------------
 
-// TestGeminiJudge_WireShape drives geminiJudge.Judge against a local
-// httptest.Server standing in for the OpenAI-compatible endpoint, to check
-// the request/response shape (structured output, temperature 0, model id)
-// without ever hitting a real network.
+// TestGeminiJudge_WireShape checks the request/response shape (structured
+// output, temperature 0, model id) against a local httptest.Server.
 func TestGeminiJudge_WireShape(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -610,10 +606,9 @@ func TestGeminiJudge_HTTPErrorPropagates(t *testing.T) {
 
 // ---- Rate limiting + 429 retry ------------------------------------------
 
-// fakeLimiter is a Limiter test double: Wait is instant (never blocks on
-// wall-clock time) but records how many times it was called, so a test can
-// assert the judge actually paces its network path through the injected
-// limiter rather than calling straight through.
+// fakeLimiter is a Limiter test double: Wait is instant but records how
+// many times it was called, so a test can assert the judge actually paces
+// calls through the injected limiter.
 type fakeLimiter struct {
 	mu    sync.Mutex
 	calls int
@@ -689,9 +684,8 @@ func TestGeminiJudge_LimiterErrorSurfacesBeforeNetworkCall(t *testing.T) {
 	}
 }
 
-// TestGeminiJudge_RetriesOnce429ThenSucceeds is the retry-behaviour half of
-// the rate-limiter fix: a 429 followed by a success on retry must NOT
-// surface as an error to the caller.
+// TestGeminiJudge_RetriesOnce429ThenSucceeds: a 429 followed by a success
+// on retry must not surface as an error to the caller.
 func TestGeminiJudge_RetriesOnce429ThenSucceeds(t *testing.T) {
 	orig := judgeRetryBackoff
 	judgeRetryBackoff = time.Millisecond
@@ -727,14 +721,13 @@ func TestGeminiJudge_RetriesOnce429ThenSucceeds(t *testing.T) {
 		t.Errorf("network was hit %d times, want exactly 2 (initial 429 + one retry)", got)
 	}
 	// The limiter must be re-consulted before the retry too, not just the
-	// first attempt — otherwise a retry loop could bypass pacing entirely.
+	// first attempt, or a retry loop could bypass pacing entirely.
 	if got := lim.callCount(); got != 2 {
 		t.Errorf("limiter.Wait called %d times, want exactly 2 (initial + retry)", got)
 	}
 }
 
-// TestGeminiJudge_SecondConsecutive429IsError is the "must not paper over
-// persistent 429s" half: two 429s in a row (initial + the one retry) must
+// TestGeminiJudge_SecondConsecutive429IsError: two 429s in a row must
 // surface as an error, not be silently swallowed.
 func TestGeminiJudge_SecondConsecutive429IsError(t *testing.T) {
 	orig := judgeRetryBackoff
@@ -789,11 +782,8 @@ func TestJudgeConfigFromEnv_RatePerMinInvalidFallsBackToDefault(t *testing.T) {
 
 // ---- Rubric empty-suggestion coverage ------------------------------------
 
-// TestRubrics_StateEmptySuggestionHandling guards the sentence each judged
-// rubric now carries about how to treat an empty/whitespace-only suggestion
-// — calibration surfaced a real disagreement (C3) that traced back to this
-// being unstated, so it must not silently regress back out of the rubric
-// text.
+// TestRubrics_StateEmptySuggestionHandling guards that each judged rubric
+// states how to treat an empty or whitespace-only suggestion.
 func TestRubrics_StateEmptySuggestionHandling(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

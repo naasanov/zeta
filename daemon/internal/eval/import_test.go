@@ -11,9 +11,8 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/protocol"
 )
 
-// requestLineJSON builds a well-formed "request" event JSON line with the
-// given buf/suggestion, JSON-escaping them properly (tests below embed
-// quotes/special shell syntax that would corrupt hand-built JSON strings).
+// requestLineJSON builds a well-formed "request" event JSON line, escaping
+// buf/suggestion properly for tests embedding quotes or shell syntax.
 func requestLineJSON(t *testing.T, buf, suggestion string) string {
 	t.Helper()
 	ev := struct {
@@ -36,10 +35,9 @@ func requestLineJSON(t *testing.T, buf, suggestion string) string {
 	return string(b)
 }
 
-// realisticRequestLine is a "request" event with raw-text capture on, shaped
-// like a real dogfooding row: next-command mode, git context, history, and a
-// suggestion that is buf+suffix (buf is empty here, since next-command mode
-// always starts from an empty buffer).
+// realisticRequestLine is a "request" event with raw-text capture on: next-
+// command mode, git context, history. buf is empty since next-command mode
+// always starts from an empty buffer.
 const realisticRequestLine = `{"v":1,"event":"request","ts":100.0,"session_id":"s1","request_id":"s1.1","user":"nick","trigger":"next_command","buffer_len":0,"suggestion_len":11,"source":"llm","provider":"codestral","model":"codestral-latest","buf":"","suggestion":"git commit","cwd":"/x/proj","git_branch":"main","git_dirty":true,"history":["git add ."],"dir_entries":["README.md","main.go"]}`
 
 func TestImportEvents_RoundTrip(t *testing.T) {
@@ -61,11 +59,8 @@ func TestImportEvents_RoundTrip(t *testing.T) {
 		History:    []string{"git add ."},
 		DirEntries: []string{"README.md", "main.go"},
 	}
-	// Deep-compare the whole struct rather than field-by-field: the previous
-	// form checked only len(DirEntries), so reordered or corrupted entries
-	// would have round-tripped "successfully". Reconstruction fidelity is the
-	// entire contract of this function — a partial check is worse than none,
-	// because it reads as thorough.
+	// Deep-compares the whole struct rather than field-by-field:
+	// reconstruction fidelity is the entire contract of this function.
 	got := ic.Case.Req
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("reconstructed request mismatch:\n got %+v\nwant %+v", got, want)
@@ -368,10 +363,9 @@ func TestHistorySegments_AllEmpty(t *testing.T) {
 
 // ---- RenderCaseStub -----------------------------------------------------
 
-// wrapAsFile wraps a rendered stub fragment in a minimal but complete Go
-// source file so it can be checked with go/parser: RenderCaseStub emits a
-// single composite-literal statement meant to be pasted inside a []Case{...}
-// slice, not a standalone file.
+// wrapAsFile wraps a rendered stub fragment in a minimal Go source file so
+// go/parser can check it: RenderCaseStub itself emits a composite-literal
+// fragment, not a standalone file.
 func wrapAsFile(fragment string) string {
 	return "package p\n\nimport \"github.com/naasanov/zsh-autopilot/daemon/internal/protocol\"\n\nvar cases = []Case{\n" + fragment + "\n}\n"
 }

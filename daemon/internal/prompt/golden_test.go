@@ -9,7 +9,6 @@ import (
 
 // TestGoldenRenderings pins every registered prompt's rendering byte for
 // byte; a whitespace change here is a behavior change, not a style change.
-// fim-commented-history has its own test below instead.
 func TestGoldenRenderings(t *testing.T) {
 	cases := []struct {
 		name string
@@ -183,9 +182,9 @@ func TestFIMCommentedHistory(t *testing.T) {
 	}
 }
 
-// TestFIMNoMarkerIsMarkerWithoutMarkers pins the relationship between the two
-// prompts that used to share defaultFIMShape: fim-no-marker renders exactly
-// what fim-transcript-marker renders with every "$ " marker stripped out.
+// TestFIMNoMarkerIsMarkerWithoutMarkers pins the relationship between the
+// two prompts: fim-no-marker renders exactly what fim-transcript-marker
+// renders with every "$ " marker stripped out.
 func TestFIMNoMarkerIsMarkerWithoutMarkers(t *testing.T) {
 	reqs := []protocol.Request{
 		{

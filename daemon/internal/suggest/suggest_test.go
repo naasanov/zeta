@@ -14,8 +14,7 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// newOpenAI is a small test helper around provider.NewOpenAI, which now
-// returns an error (the Provider constructor signature added in T1).
+// newOpenAI is a small test helper around provider.NewOpenAI.
 func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) provider.Provider {
 	t.Helper()
 	p, err := provider.NewOpenAI(baseURL, model, apiKey, maxTokens, prompt.ShippedFor("openai").(prompt.ChatPrompt))
@@ -25,11 +24,6 @@ func newOpenAI(t *testing.T, baseURL, model, apiKey string, maxTokens int) provi
 	return p
 }
 
-// METRICS(§12): TestLLM_EmitsRequestEvent drives suggest.LLM against a fake
-// OpenAI-compatible server and asserts the "request" event handed to emit
-// carries the expected field mapping from the request + the provider's
-// Completion stats. It also asserts existing (pre-metrics) behavior is
-// unchanged: the reply's Suggestion is req.Buf + suffix.
 func TestLLM_EmitsRequestEvent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -123,9 +117,6 @@ func TestLLM_EmitsRequestEvent(t *testing.T) {
 	}
 }
 
-// METRICS(§12): TestLLM_NilEmitDoesNotPanic asserts the pre-metrics call
-// shape (emit == nil) still works, matching main.go's echo-mode/metrics-off
-// wiring.
 func TestLLM_NilEmitDoesNotPanic(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -148,10 +139,8 @@ func TestLLM_NilEmitDoesNotPanic(t *testing.T) {
 	}
 }
 
-// METRICS(§12): TestLLM_CancelledEmitsCancelledEvent asserts an in-flight
-// cancellation (ctx.Err() != nil at the time Complete returns) produces an
-// event with cancelled=true, cancelled_at_stage="in_flight", and that the
-// original error is still returned unchanged.
+// TestLLM_CancelledEmitsCancelledEvent: cancellation is detected via
+// ctx.Err() at the time Complete returns, not before.
 func TestLLM_CancelledEmitsCancelledEvent(t *testing.T) {
 	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,8 +180,7 @@ func TestLLM_CancelledEmitsCancelledEvent(t *testing.T) {
 }
 
 // stubProvider is a minimal provider.Provider for testing suggest.LLM
-// without spinning up an httptest.Server — the payoff of taking the
-// interface instead of a concrete *provider client (T1's whole point).
+// without an httptest.Server.
 type stubProvider struct {
 	completion provider.Completion
 	err        error
@@ -210,10 +198,6 @@ func (s stubProvider) RenderPrompt(req provider.Request) string {
 	return provider.RenderChatPrompt(prompt.ShippedFor("openai").(prompt.ChatPrompt).RenderChat(req.Req))
 }
 
-// TestLLM_StubProvider demonstrates the new seam: suggest.LLM works against
-// any provider.Provider, not just the httptest-backed openai client, and
-// still preserves the req.Buf + suffix reply invariant and correctly
-// forwards Name()/Model() into the emitted "request" event.
 func TestLLM_StubProvider(t *testing.T) {
 	stub := stubProvider{
 		completion: provider.Completion{
@@ -251,8 +235,6 @@ func TestLLM_StubProvider(t *testing.T) {
 	}
 }
 
-// TestLLM_StubProviderErrorSetsErrorType asserts a *provider.Error on the
-// failure path is unwrapped into the "request" event's ErrorType field.
 func TestLLM_StubProviderErrorSetsErrorType(t *testing.T) {
 	stub := stubProvider{
 		err:   &provider.Error{Kind: provider.ErrRateLimited, HTTPStatus: 429, Provider: "codestral"},
@@ -278,8 +260,7 @@ func TestLLM_StubProviderErrorSetsErrorType(t *testing.T) {
 	}
 }
 
-// rawTextReq is a protocol.Request with every raw-text-relevant field set,
-// shared by the two raw-text capture tests below.
+// rawTextReq is a protocol.Request with every raw-text-relevant field set.
 func rawTextReq() protocol.Request {
 	return protocol.Request{
 		V:          protocol.Version,
@@ -295,11 +276,6 @@ func rawTextReq() protocol.Request {
 	}
 }
 
-// METRICS(§12): TestLLM_RawTextDisabledLeavesFieldsZero asserts that with
-// rawText=false (the default), none of the opt-in raw-text fields are
-// populated on the emitted event even though the originating request carries
-// values for all of them — this is what keeps the emitted JSON
-// byte-identical to before the raw-text capture feature existed.
 func TestLLM_RawTextDisabledLeavesFieldsZero(t *testing.T) {
 	stub := stubProvider{
 		completion: provider.Completion{Text: " status", HTTPStatus: 200, StopReason: "stop"},
@@ -326,11 +302,6 @@ func TestLLM_RawTextDisabledLeavesFieldsZero(t *testing.T) {
 	}
 }
 
-// METRICS(§12): TestLLM_RawTextEnabledRoundTripsRequest asserts that with
-// rawText=true, the emitted event's raw-text fields round-trip everything
-// needed to reconstruct the originating protocol.Request, on both the
-// success path (where Suggestion is also captured) and the error path (where
-// Suggestion stays empty but the request-side fields are still filled).
 func TestLLM_RawTextEnabledRoundTripsRequest(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		stub := stubProvider{

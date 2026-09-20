@@ -30,34 +30,25 @@
 # Global Configuration Variables                                     #
 #--------------------------------------------------------------------#
 
-# Color to use when highlighting suggestion
-# Uses format of `region_highlight`
-# More info: http://zsh.sourceforge.net/Doc/Release/Zsh-Line-Editor.html#Zle-Widgets
+# region_highlight-style color spec, e.g. 'fg=8'.
 (( ! ${+ZSH_AUTOPILOT_HIGHLIGHT_STYLE} )) &&
 typeset -g ZSH_AUTOPILOT_HIGHLIGHT_STYLE='fg=8'
 
-# Prefix to use when saving original versions of bound widgets
 (( ! ${+ZSH_AUTOPILOT_ORIGINAL_WIDGET_PREFIX} )) &&
 typeset -g ZSH_AUTOPILOT_ORIGINAL_WIDGET_PREFIX=autopilot-orig-
 
-# Path to the autopilotd (or Phase 0 echo-server) Unix socket. Client and
-# daemon must agree; matches the echo-server default so no -socket flag is
-# needed. Kept short deliberately: macOS caps socket paths at ~104 bytes.
+# macOS caps Unix socket paths at ~104 bytes; keep this short.
 (( ! ${+ZSH_AUTOPILOT_SOCKET} )) &&
 typeset -g ZSH_AUTOPILOT_SOCKET=/tmp/zsh-autopilot.sock
 
-# Daemon binary to lazy-spawn (must be on $PATH) when the socket isn't up —
-# see 50_socket.zsh's _zsh_autopilot_spawn_daemon. Set to empty to disable
-# autostart and rely on the daemon being launched some other way (a launchd/
-# systemd unit, the VS Code debug launch, manual `autopilotd &`).
+# Daemon binary to lazy-spawn when the socket isn't up.
+# Empty disables autostart; something else must launch the daemon then.
 (( ! ${+ZSH_AUTOPILOT_DAEMON_BIN} )) &&
 typeset -g ZSH_AUTOPILOT_DAEMON_BIN=autopilotd
 
-# TEMPORARY (dogfooding): background self-update on shell startup — see
-# zsh/66_update.zsh. AUTOUPDATE=0 disables it; INTERVAL throttles how often the
-# check may run (seconds; 0 = every shell). URL is the install script it re-runs
-# (which no-ops when already on the latest release). Remove this block and the
-# 66_update.zsh fragment before release — real updates go via brew/plugin-manager.
+# TEMPORARY (dogfooding): background self-update on shell startup.
+# AUTOUPDATE=0 disables it; INTERVAL throttles the check (seconds, 0 = every shell).
+# Remove this block and 66_update.zsh before release.
 (( ! ${+ZSH_AUTOPILOT_AUTOUPDATE} )) &&
 typeset -g ZSH_AUTOPILOT_AUTOUPDATE=1
 (( ! ${+ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL} )) &&
@@ -71,10 +62,8 @@ typeset -g ZSH_AUTOPILOT_INSTALL_URL=https://raw.githubusercontent.com/naasanov/
 (( ! ${+ZSH_AUTOPILOT_FLAG_KEY} )) &&
 typeset -g ZSH_AUTOPILOT_FLAG_KEY='^Xf'
 
-# Whether this shell reports the commands it runs to the daemon's history
-# store (47_context.zsh's _zsh_autopilot_record). 0 stops this shell
-# contributing — suggestions still work, but nothing run here is recorded or
-# cwd-tagged. Useful for keeping one shell's sensitive work out of history.
+# Whether this shell reports commands to the daemon's history store.
+# 0 keeps this shell's runs out of history entirely (suggestions still work).
 (( ! ${+ZSH_AUTOPILOT_RECORD} )) &&
 typeset -gi ZSH_AUTOPILOT_RECORD=1
 
@@ -83,7 +72,6 @@ typeset -gi ZSH_AUTOPILOT_RECORD=1
 (( ! ${+ZSH_AUTOPILOT_NOTICES} )) &&
 typeset -g ZSH_AUTOPILOT_NOTICES=1
 
-# Widgets that clear the suggestion
 (( ! ${+ZSH_AUTOPILOT_CLEAR_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_CLEAR_WIDGETS
   ZSH_AUTOPILOT_CLEAR_WIDGETS=(
@@ -104,7 +92,6 @@ typeset -g ZSH_AUTOPILOT_NOTICES=1
   )
 }
 
-# Widgets that accept the entire suggestion
 (( ! ${+ZSH_AUTOPILOT_ACCEPT_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_ACCEPT_WIDGETS
   ZSH_AUTOPILOT_ACCEPT_WIDGETS=(
@@ -116,14 +103,12 @@ typeset -g ZSH_AUTOPILOT_NOTICES=1
   )
 }
 
-# Widgets that accept the entire suggestion and execute it
 (( ! ${+ZSH_AUTOPILOT_EXECUTE_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_EXECUTE_WIDGETS
   ZSH_AUTOPILOT_EXECUTE_WIDGETS=(
   )
 }
 
-# Widgets that accept the suggestion as far as the cursor moves
 (( ! ${+ZSH_AUTOPILOT_PARTIAL_ACCEPT_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_PARTIAL_ACCEPT_WIDGETS
   ZSH_AUTOPILOT_PARTIAL_ACCEPT_WIDGETS=(
@@ -138,7 +123,7 @@ typeset -g ZSH_AUTOPILOT_NOTICES=1
   )
 }
 
-# Widgets that should be ignored (globbing supported but must be escaped)
+# Entries may be globs; a literal `*` must be escaped (e.g. `orig-\*`).
 (( ! ${+ZSH_AUTOPILOT_IGNORE_WIDGETS} )) && {
   typeset -ga ZSH_AUTOPILOT_IGNORE_WIDGETS
   ZSH_AUTOPILOT_IGNORE_WIDGETS=(
@@ -172,7 +157,6 @@ _zsh_autopilot_bind_widget() {
 
   local -i bind_count
 
-  # Save a reference to the original widget
   case $widgets[$widget] in
     # Already bound
     user:_zsh_autopilot_(bound|orig)_*)
@@ -199,21 +183,16 @@ _zsh_autopilot_bind_widget() {
       ;;
   esac
 
-  # Pass the original widget's name explicitly into the autopilot
-  # function. Use this passed in widget name to call the original
-  # widget instead of relying on the $WIDGET variable being set
-  # correctly. $WIDGET cannot be trusted because other plugins call
-  # zle without the `-w` flag (e.g. `zle self-insert` instead of
-  # `zle self-insert -w`).
+  # $WIDGET can't be trusted: other plugins call zle without -w (e.g. plain
+  # `zle self-insert`), so the original widget name is passed explicitly
+  # instead.
   eval "_zsh_autopilot_bound_${bind_count}_${(q)widget}() {
     _zsh_autopilot_widget_$autopilot_action $prefix$bind_count-${(q)widget} \$@
   }"
 
-  # Create the bound widget
   zle -N -- $widget _zsh_autopilot_bound_${bind_count}_$widget
 }
 
-# Map all configured widgets to the right autopilot widgets
 _zsh_autopilot_bind_widgets() {
   emulate -L zsh
 
@@ -228,7 +207,6 @@ _zsh_autopilot_bind_widgets() {
     $ZSH_AUTOPILOT_IGNORE_WIDGETS
   )
 
-  # Find every widget we might want to bind and bind it appropriately
   for widget in ${${(f)"$(builtin zle -la)"}:#${(j:|:)~ignore_widgets}}; do
     if [[ -n ${ZSH_AUTOPILOT_CLEAR_WIDGETS[(r)$widget]} ]]; then
       _zsh_autopilot_bind_widget $widget clear
@@ -245,9 +223,7 @@ _zsh_autopilot_bind_widgets() {
   done
 }
 
-# Given the name of an original widget and args, invoke it, if it exists
 _zsh_autopilot_invoke_original_widget() {
-  # Do nothing unless called with at least one arg
   (( $# )) || return 0
 
   local original_widget_name="$1"
@@ -263,7 +239,6 @@ _zsh_autopilot_invoke_original_widget() {
 # Highlighting                                                       #
 #--------------------------------------------------------------------#
 
-# If there was a highlight, remove it
 _zsh_autopilot_highlight_reset() {
   typeset -g _ZSH_AUTOPILOT_LAST_HIGHLIGHT
 
@@ -273,7 +248,6 @@ _zsh_autopilot_highlight_reset() {
   fi
 }
 
-# If there's a suggestion, highlight it
 _zsh_autopilot_highlight_apply() {
   typeset -g _ZSH_AUTOPILOT_LAST_HIGHLIGHT
 
@@ -289,9 +263,7 @@ _zsh_autopilot_highlight_apply() {
 # Autopilot Widget Implementations                                   #
 #--------------------------------------------------------------------#
 
-# Clear the suggestion
 _zsh_autopilot_clear() {
-  # Remove the suggestion
   POSTDISPLAY=
 
   # METRICS(§12): outcome cleared
@@ -300,21 +272,17 @@ _zsh_autopilot_clear() {
   _zsh_autopilot_invoke_original_widget $@
 }
 
-# Modify the buffer and get a new suggestion
 _zsh_autopilot_modify() {
   local -i retval
 
   # Only available in zsh >= 5.4
   local -i KEYS_QUEUED_COUNT
 
-  # Save the contents of the buffer/postdisplay
   local orig_buffer="$BUFFER"
   local orig_postdisplay="$POSTDISPLAY"
 
-  # Clear suggestion while waiting for next one
   POSTDISPLAY=
 
-  # Original widget may modify the buffer
   _zsh_autopilot_invoke_original_widget $@
   retval=$?
 
@@ -333,7 +301,7 @@ _zsh_autopilot_modify() {
   fi
 
   # METRICS(§12): buffer diverged from the shown suggestion (a real edit, not
-  # just typing into it) — the suggestion was dropped instead of accepted.
+  # just typing into it), so the suggestion was dropped instead of accepted.
   whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome typed_over
 
   # Bail out if suggestions are disabled (latent kill-switch: set
@@ -342,7 +310,6 @@ _zsh_autopilot_modify() {
     return $?
   fi
 
-  # Get a new suggestion if the buffer is not empty after modification
   if (( $#BUFFER > 0 )); then
     if [[ -z "$ZSH_AUTOPILOT_BUFFER_MAX_SIZE" ]] || (( $#BUFFER <= $ZSH_AUTOPILOT_BUFFER_MAX_SIZE )); then
       _zsh_autopilot_fetch
@@ -352,33 +319,20 @@ _zsh_autopilot_modify() {
   return $retval
 }
 
-# Fetch a new suggestion for the current buffer by asking the daemon.
-#
-# Unlike zsh-autosuggestions (which forks a subshell to run a local strategy),
-# we hand the buffer to the socket transport, which ships it to autopilotd and
-# paints the async reply via `zle autopilot-suggest`. `_zsh_autopilot_send`
-# lives in the socket transport fragment (50_socket.zsh); until that is
-# implemented this degrades to a no-op so the widget/ghost-text loop still runs.
+# Falls back to a no-op if the socket transport isn't loaded.
 _zsh_autopilot_fetch() {
   whence -w _zsh_autopilot_send &>/dev/null && _zsh_autopilot_send "$BUFFER" typing
   return 0
 }
 
-# Offer a suggestion. Invoked as `zle autopilot-suggest -- "$source" "$suggestion"`
-# by the socket transport when the daemon's reply arrives. This is the seam
-# where the daemon's string becomes ghost text. $source (llm|history) is carried
-# through from the protocol's source tag; Phase 1 paints regardless of source,
-# but the seam is here so the Phase 4a history/upgrade rendering rules slot in
-# without touching the widget's caller.
 _zsh_autopilot_suggest() {
   emulate -L zsh
 
   local source="$1"
   local suggestion="$2"
 
-  # Paint whenever we have a suggestion — including on an empty buffer, which
-  # is the next-command (precmd) case. With an empty BUFFER the prefix strip
-  # is a no-op, so POSTDISPLAY becomes the whole suggested command.
+  # Paints on an empty buffer too (the next-command case): the prefix strip
+  # is then a no-op, so POSTDISPLAY becomes the whole suggested command.
   if [[ -n "$suggestion" ]]; then
     POSTDISPLAY="${suggestion#$BUFFER}"
   else
@@ -386,42 +340,34 @@ _zsh_autopilot_suggest() {
   fi
 }
 
-# Accept the entire suggestion
 _zsh_autopilot_accept() {
   local -i retval max_cursor_pos=$#BUFFER
 
-  # When vicmd keymap is active, the cursor can't move all the way
-  # to the end of the buffer
+  # vicmd keymap can't move the cursor all the way to the end of the buffer.
   if [[ "$KEYMAP" = "vicmd" ]]; then
     max_cursor_pos=$((max_cursor_pos - 1))
   fi
 
-  # If we're not in a valid state to accept a suggestion, just run the
-  # original widget and bail out
+  # Bail to the original widget unless the cursor is at the end with a
+  # suggestion showing.
   if (( $CURSOR != $max_cursor_pos || !$#POSTDISPLAY )); then
     _zsh_autopilot_invoke_original_widget $@
     return
   fi
 
-  # Only accept if the cursor is at the end of the buffer
   # METRICS(§12): capture the accepted length before POSTDISPLAY is blanked.
   local _zsh_autopilot_metrics_accepted_chars=$#POSTDISPLAY
 
-  # Add the suggestion to the buffer
   BUFFER="$BUFFER$POSTDISPLAY"
-
-  # Remove the suggestion
   POSTDISPLAY=
 
   # METRICS(§12): outcome accepted
   whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome accepted "$_zsh_autopilot_metrics_accepted_chars"
 
-  # Run the original widget before manually moving the cursor so that the
-  # cursor movement doesn't make the widget do something unexpected
+  # Runs before the cursor move below so the move doesn't affect the widget.
   _zsh_autopilot_invoke_original_widget $@
   retval=$?
 
-  # Move the cursor to the end of the buffer
   if [[ "$KEYMAP" = "vicmd" ]]; then
     CURSOR=$(($#BUFFER - 1))
   else
@@ -431,30 +377,25 @@ _zsh_autopilot_accept() {
   return $retval
 }
 
-# Accept the entire suggestion and execute it
 _zsh_autopilot_execute() {
-  # Add the suggestion to the buffer
   BUFFER="$BUFFER$POSTDISPLAY"
-
-  # Remove the suggestion
   POSTDISPLAY=
 
-  # Call the original `accept-line` to handle syntax highlighting or
-  # other potential custom behavior
+  # Invokes accept-line explicitly, not the passed-in widget, for its
+  # highlighting and other side effects.
   _zsh_autopilot_invoke_original_widget "accept-line"
 }
 
-# Partially accept the suggestion
 _zsh_autopilot_partial_accept() {
   local -i retval cursor_loc
 
-  # Save the contents of the buffer so we can restore later if needed
   local original_buffer="$BUFFER"
 
-  # Temporarily accept the suggestion.
+  # Temporarily accepts the suggestion so the original widget's cursor math
+  # runs against the full buffer; restored below if the cursor didn't move
+  # into it.
   BUFFER="$BUFFER$POSTDISPLAY"
 
-  # Original widget moves the cursor
   _zsh_autopilot_invoke_original_widget $@
   retval=$?
 
@@ -464,26 +405,21 @@ _zsh_autopilot_partial_accept() {
     cursor_loc=$((cursor_loc + 1))
   fi
 
-  # If we've moved past the end of the original buffer
   if (( $cursor_loc > $#original_buffer )); then
-    # Set POSTDISPLAY to text right of the cursor
     POSTDISPLAY="${BUFFER[$(($cursor_loc + 1)),$#BUFFER]}"
-
-    # Clip the buffer at the cursor
     BUFFER="${BUFFER[1,$cursor_loc]}"
 
     # METRICS(§12): outcome partial_accepted, accepted_chars = chars actually taken
     whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome partial_accepted "$(( cursor_loc - $#original_buffer ))"
   else
-    # Restore the original buffer
     BUFFER="$original_buffer"
   fi
 
   return $retval
 }
 
-# METRICS(§12): flag the on-screen suggestion as a bad-output eval candidate.
-# Must not touch BUFFER/POSTDISPLAY or emit an `outcome` — flagging isn't a
+# METRICS(§12): flags the on-screen suggestion as a bad-output candidate.
+# Must not touch BUFFER/POSTDISPLAY or emit an outcome; flagging isn't a
 # thing the user did with the suggestion, so it must stay on screen.
 _zsh_autopilot_flag() {
   whence -w _zsh_autopilot_metric_flag &>/dev/null && _zsh_autopilot_metric_flag
@@ -493,15 +429,9 @@ _zsh_autopilot_flag() {
 () {
   typeset -ga _ZSH_AUTOPILOT_BUILTIN_ACTIONS
 
-  # Actions that get a registered `autopilot-<action>` ZLE widget. `suggest`
-  # is here because the socket transport calls `zle autopilot-suggest`; the
-  # rest are here so users can bind keys directly to them. `modify` and
-  # `partial_accept` deliberately get widget *functions* (below) but no ZLE
-  # widget — they are invoked through the bind trampoline, not by name.
-  #
-  # Also doubles as the ignore list in _zsh_autopilot_bind_widgets
-  # (20_bind.zsh) — omitting an autopilot widget here gets it rebound as
-  # `modify`, clearing the suggestion whenever it's invoked.
+  # `suggest` needs a ZLE widget since the socket transport calls it by name;
+  # the rest let users bind keys directly. Omitting an action here makes
+  # _zsh_autopilot_bind_widgets treat it as `modify`.
   _ZSH_AUTOPILOT_BUILTIN_ACTIONS=(
     clear
     suggest
@@ -539,18 +469,10 @@ _zsh_autopilot_flag() {
 #--------------------------------------------------------------------#
 # Minimal JSON helpers                                               #
 #--------------------------------------------------------------------#
-# The wire protocol (daemon/internal/protocol) is newline-delimited JSON. zsh
-# has no JSON tooling, and forking jq on every keystroke is exactly the
-# fork-per-request cost the daemon exists to avoid (design §48). These two
-# pure-zsh helpers cover what the client needs: escape a string into a JSON
-# request, and pull a flat string field out of a one-line JSON reply.
-#
-# Scope/limits (documented, adequate for shell command lines):
-#  - Encoding escapes " \ and the \n \t \r control chars. Other control bytes
-#    (< 0x20) are passed through; command buffers don't contain them.
-#  - Decoding understands the \" \\ \/ \n \t \r escapes. It does NOT decode
-#    \uXXXX — which is why the daemon MUST encode with HTML escaping disabled so
-#    shell metacharacters (< > &) stay literal (see the protocol package doc).
+
+# Pure-zsh JSON: forking jq on every keystroke defeats the daemon's purpose.
+# Decoding does not handle \uXXXX, so the daemon must encode with HTML
+# escaping off so shell metacharacters (< > &) stay literal.
 
 # Escape $1 as a JSON string body (no surrounding quotes) into $REPLY.
 # Backslash is replaced first so the escapes we introduce aren't re-escaped.
@@ -565,11 +487,9 @@ _zsh_autopilot_json_escape() {
   REPLY=$s
 }
 
-# Extract the string value of flat key $2 from one-line JSON object $1 into
-# $REPLY. Returns non-zero if the key is absent. The regex tolerates escaped
-# quotes inside the value ((\\.|[^"\\])*), then the escapes are undone. A
-# sentinel byte (0x01) protects literal "\\" so a following n/t/r isn't misread
-# as a control escape.
+# Extracts the string value of flat key $2 from one-line JSON $1 into $REPLY;
+# returns non-zero if absent. A sentinel byte (0x01) protects literal "\\" so
+# a following n/t/r isn't misread as a control escape.
 _zsh_autopilot_json_str_field() {
   emulate -L zsh
   local json=$1 key=$2
@@ -594,12 +514,10 @@ _zsh_autopilot_json_str_field() {
 #--------------------------------------------------------------------#
 # Context Capture (cwd / git / last exit / recent history)           #
 #--------------------------------------------------------------------#
-# Cheap, hook-driven context the socket transport (50_socket.zsh) rides along
-# on every request. Nothing here runs per-keystroke: git state is computed on
-# precmd/chpwd only and cached in globals; `_zsh_autopilot_send` just reads
-# the cache. Running `git` on every keystroke would reintroduce the
-# fork/exec-per-request cost this whole daemon architecture exists to avoid
-# (design §7).
+
+# Git/dir state is cached from precmd/chpwd hooks, never computed per
+# keystroke; running git on every keystroke would reintroduce the
+# fork-per-request cost the daemon exists to avoid.
 
 zmodload zsh/datetime 2>/dev/null
 
@@ -610,17 +528,16 @@ typeset -g _ZSH_AUTOPILOT_GIT_BRANCH=
 typeset -g _ZSH_AUTOPILOT_GIT_DIRTY=false
 typeset -ga _ZSH_AUTOPILOT_DIR_ENTRIES
 
-# precmd hook: capture the previous command's exit status. This MUST be the
-# very first statement of this function (and this function should be
-# registered as early as possible in the precmd chain) so nothing — not even
-# a harmless-looking builtin — clobbers $? before we read it.
+# precmd hook: captures the previous command's exit status. Must be the very
+# first statement here, and this hook must run first in the precmd chain, so
+# nothing clobbers $? before it's read.
 _zsh_autopilot_capture_exit() {
   typeset -gi _ZSH_AUTOPILOT_LAST_EXIT=$?
 }
 
-# precmd + chpwd hook: refresh the cached git branch/dirty state. Two cheap
-# git invocations, but only ever on a fresh prompt or directory change — never
-# in the per-keystroke send path.
+# precmd + chpwd hook: refreshes the cached git branch/dirty state. Two cheap
+# git invocations, but only on a fresh prompt or directory change, never in
+# the per-keystroke send path.
 _zsh_autopilot_refresh_git() {
   emulate -L zsh
 
@@ -628,9 +545,8 @@ _zsh_autopilot_refresh_git() {
   typeset -g _ZSH_AUTOPILOT_GIT_DIRTY=false
 
   local branch
-  # No branch (not a repo, or detached with no symbolic ref) -> leave the
-  # cache cleared; the socket transport treats an empty branch as "not a repo"
-  # and omits both git_branch and git_dirty.
+  # No branch (not a repo, or detached HEAD) leaves the cache cleared; an
+  # empty git_branch means "not a repo" downstream.
   branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || return
   _ZSH_AUTOPILOT_GIT_BRANCH=$branch
 
@@ -638,11 +554,9 @@ _zsh_autopilot_refresh_git() {
     _ZSH_AUTOPILOT_GIT_DIRTY=true
 }
 
-# precmd + chpwd hook: refresh the cached listing of the current directory's
-# entries. Cheap glob, no fork — but only ever on a fresh prompt or directory
-# change, same cadence as git state above. precmd (not just chpwd) is
-# intentional: it also catches files created within the directory (e.g. after
-# `touch foo`).
+# precmd + chpwd hook: refreshes the cached directory listing. precmd (not
+# just chpwd) is required so files created in the current dir (e.g. after
+# `touch foo`) still show up.
 _zsh_autopilot_refresh_dir() {
   emulate -L zsh
 
@@ -654,10 +568,9 @@ _zsh_autopilot_refresh_dir() {
   (( ${#e} >= 1 && ${#e} <= 50 )) && _ZSH_AUTOPILOT_DIR_ENTRIES=("${e[@]}")
 }
 
-# preexec hook: report the about-to-run command to the daemon's history store.
-# $1 is the raw line as typed, needed unexpanded for hist_ignore_space. $PWD
-# here is the dir the command runs IN, so `cd ..` is tagged with the pre-cd
-# directory.
+# preexec hook: reports the about-to-run command to the daemon's history
+# store. $1 is unexpanded (needed for hist_ignore_space); $PWD is the dir the
+# command runs IN, so `cd ..` is tagged with the pre-cd directory.
 _zsh_autopilot_record() {
   emulate -L zsh
 
@@ -670,8 +583,8 @@ _zsh_autopilot_record() {
   (( ZSH_AUTOPILOT_RECORD )) || return
 
   # A leading space under hist_ignore_space means "keep this out of history"
-  # (e.g. `  export TOKEN=...`) — recording it would leak it to a third-party
-  # LLM. Space only, not tab; `emulate -L zsh` does not reset this option.
+  # (e.g. `  export TOKEN=...`), avoiding a leak to a third-party LLM. Space
+  # only, not tab; `emulate -L zsh` does not reset this option.
   [[ -o hist_ignore_space && $cmd == ' '* ]] && return
 
   _zsh_autopilot_send_record "$cmd" "$PWD" "$EPOCHSECONDS"
@@ -679,10 +592,9 @@ _zsh_autopilot_record() {
 
 autoload -Uz add-zsh-hook
 
-# Registered here (fragment 55, before 60_start.zsh's precmd hooks) so that
-# by the time _zsh_autopilot_precmd (the next-command request) fires, $?/git
-# are already fresh. add-zsh-hook runs hooks in registration order, and
-# source order across the numbered fragments is what fixes that order.
+# add-zsh-hook runs hooks in registration order; this file's source position
+# fixes that $?/git are fresh before _zsh_autopilot_precmd's next-command
+# request fires.
 add-zsh-hook precmd _zsh_autopilot_capture_exit
 add-zsh-hook precmd _zsh_autopilot_refresh_git
 add-zsh-hook chpwd _zsh_autopilot_refresh_git
@@ -702,6 +614,7 @@ _zsh_autopilot_refresh_dir
 #--------------------------------------------------------------------#
 # Notice Channel                                                     #
 #--------------------------------------------------------------------#
+
 # One-line diagnostics for non-recoverable failures (bad key, missing
 # daemon, etc), queued by producers running outside widget context and
 # printed once per shell per failure class from a precmd hook.
@@ -746,31 +659,23 @@ add-zsh-hook precmd _zsh_autopilot_drain_notices
 #--------------------------------------------------------------------#
 # Daemon Socket Transport                                            #
 #--------------------------------------------------------------------#
-# Talks to autopilotd over the persistent Unix-domain socket: opens the
-# warm connection, sends the current buffer/context on each modify, and
-# registers a `zle -F` handler that paints the reply as ghost text.
-# Replaces zsh-autosuggestions' async.zsh (forked-pipe) model.
-#
 
-# Per-shell identity for request IDs. The session id is minted once; each fetch
-# bumps a sequence counter, and the id we most recently sent is the "current"
-# request. Replies whose id != current are stale (the user typed on) and are
-# dropped — this is the supersede-by-request-ID contract (protocol package doc).
+# Talks to autopilotd over the persistent Unix-domain socket, painting
+# replies as ghost text via a zle -F handler.
+
+# The most recently sent request id is current; a reply with a different id
+# is stale and dropped.
 typeset -g ZSH_AUTOPILOT_SESSION_ID=${ZSH_AUTOPILOT_SESSION_ID:-$$-$RANDOM}
 typeset -gi _ZSH_AUTOPILOT_SEQ=0
 typeset -g _ZSH_AUTOPILOT_REQ_ID=
 
 zmodload zsh/datetime 2>/dev/null
 
-# Seconds a shell tolerates an absent daemon before saying so, when autostart
-# is off and something else owns the daemon's lifecycle. A shell launched
-# alongside its daemon would otherwise pin a false alarm for the session.
+# Seconds a shell tolerates an absent daemon before reporting one, when
+# autostart is off.
 typeset -gi _ZSH_AUTOPILOT_CONNECT_GRACE=10
 typeset -gi _ZSH_AUTOPILOT_FIRST_CONNECT_FAIL=0
 
-# Queues a notice only once this shell has been unable to reach a daemon for
-# longer than the grace window. A cold start outlasts the retry loop in
-# _zsh_autopilot_connect, and a notice pinned on that first miss is a false alarm.
 _zsh_autopilot_notice_after_grace() {
   if (( ! _ZSH_AUTOPILOT_FIRST_CONNECT_FAIL )); then
     _ZSH_AUTOPILOT_FIRST_CONNECT_FAIL=$EPOCHSECONDS
@@ -781,9 +686,6 @@ _zsh_autopilot_notice_after_grace() {
   return 0
 }
 
-# True when ZSH_AUTOPILOT_DAEMON_BIN names a runnable daemon. A value holding a
-# slash is a path and is tested directly; $commands only ever holds bare names,
-# so a path would always miss there.
 _zsh_autopilot_daemon_bin_present() {
   [[ -n $ZSH_AUTOPILOT_DAEMON_BIN ]] || return 1
   if [[ $ZSH_AUTOPILOT_DAEMON_BIN == */* ]]; then
@@ -793,14 +695,6 @@ _zsh_autopilot_daemon_bin_present() {
   fi
 }
 
-# Fork the daemon in a subshell so it outlives this shell (no job-table entry
-# to disown — the subshell itself exits right after backgrounding; nohup
-# guards against SIGHUP on the off chance one is delivered first).
-# Only tried once per shell session (_ZSH_AUTOPILOT_SPAWN_TRIED) — if the
-# daemon is crash-looping, hammering fork on every connect attempt would make
-# it worse, not better. The daemon's own single-instance guard (server.go)
-# makes concurrent spawns from multiple shells race-safe: only one wins the
-# socket bind, the rest exit immediately.
 _zsh_autopilot_spawn_daemon() {
   (( _ZSH_AUTOPILOT_SPAWN_TRIED )) && return 1
   typeset -g _ZSH_AUTOPILOT_SPAWN_TRIED=1
@@ -810,45 +704,37 @@ _zsh_autopilot_spawn_daemon() {
   local log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/autopilot"
   mkdir -p "$log_dir" 2>/dev/null
 
-  # zsh does not export $HISTFILE, so it is passed explicitly. The assignment
-  # prefix scopes it to this child alone; empty is fine, the daemon then falls
-  # back to its own default.
+  # zsh does not export $HISTFILE; it is passed explicitly here.
   ( ZSH_AUTOPILOT_HISTFILE=$HISTFILE nohup "$ZSH_AUTOPILOT_DAEMON_BIN" -socket "$ZSH_AUTOPILOT_SOCKET" >>"$log_dir/daemon.log" 2>&1 & )
 }
 
 _zsh_autopilot_connect() {
   zmodload zsh/net/socket 2>/dev/null || return 1
 
-  # Drop any stale fd before opening a new one.
   [[ -n $ZSH_AUTOPILOT_SOCKET_FD ]] && exec {ZSH_AUTOPILOT_SOCKET_FD}<&- 2>/dev/null
 
   if ! zsocket $ZSH_AUTOPILOT_SOCKET 2>/dev/null; then
     unset ZSH_AUTOPILOT_SOCKET_FD
 
-    # Checked directly (not derived from spawn_daemon's return code, which is
-    # also 1 for the once-per-shell guard and for a missing binary alike) so
-    # the notice kind actually names what's wrong.
+    # Checked directly, not from spawn_daemon's return code: that code is 1
+    # for both the once-per-shell guard and a missing binary.
     local -i bin_present=0
     _zsh_autopilot_daemon_bin_present && bin_present=1
 
     if (( ! bin_present )); then
-      # A named binary we can't run is a broken install: permanent, and worth
-      # saying immediately.
       if [[ -n $ZSH_AUTOPILOT_DAEMON_BIN ]]; then
+        # A missing/unrunnable named binary is a permanent, broken install:
+        # report immediately, no grace.
         _zsh_autopilot_notice no_daemon_bin \
           "daemon binary '$ZSH_AUTOPILOT_DAEMON_BIN' not found or not executable; reinstall zsh-autopilot or fix \$ZSH_AUTOPILOT_DAEMON_BIN"
         return 1
       fi
-      # Empty means autostart was turned off deliberately, so someone else owns
-      # the daemon's lifecycle and may still be starting it.
+      # Empty means autostart is off; someone else may own the daemon's lifecycle.
       _zsh_autopilot_notice_after_grace no_daemon \
         "nothing listening on $ZSH_AUTOPILOT_SOCKET and autostart is off (ZSH_AUTOPILOT_DAEMON_BIN is empty); start autopilotd yourself"
       return 1
     fi
 
-    # Daemon not up (or not up yet) — spawn it once and give it a moment to
-    # bind the socket, then retry. Short/bounded so a broken binary doesn't
-    # stall shell startup.
     if _zsh_autopilot_spawn_daemon; then
       local -i tries=0
       while (( tries++ < 10 )); do
@@ -860,9 +746,6 @@ _zsh_autopilot_connect() {
         sleep 0.05
       done
     fi
-    # Reached whether the spawn just fired or already fired earlier this shell,
-    # so a daemon that never comes up is still reported once the grace window
-    # closes. The caller degrades gracefully until then.
     _zsh_autopilot_notice_after_grace daemon_unreachable \
       "autopilotd is not responding; check ${XDG_STATE_HOME:-$HOME/.local/state}/autopilot/daemon.log"
     return 1
@@ -872,14 +755,10 @@ _zsh_autopilot_connect() {
   zle -F $ZSH_AUTOPILOT_SOCKET_FD _zsh_autopilot_receive
 }
 
-# true if $ZSH_AUTOPILOT_SOCKET_FD is a currently-open fd
 _zsh_autopilot_socket_alive() {
   [[ -n $ZSH_AUTOPILOT_SOCKET_FD ]] && { true <&$ZSH_AUTOPILOT_SOCKET_FD } 2>/dev/null
 }
 
-# Write one already-serialized JSON line to the daemon: connect lazily if
-# needed, and reconnect once on a write failure (half-open peer) before
-# giving up.
 _zsh_autopilot_write_line() {
   local line="$1"
 
@@ -891,10 +770,7 @@ _zsh_autopilot_write_line() {
   fi
 }
 
-# Send a request to the daemon. $1 = buffer, $2 = kind (typing|next_command).
-# Mints a fresh request id, records it as current, ships one JSON line with
-# cwd/git_branch/git_dirty/last_exit when meaningful. Git state comes from
-# 47_context.zsh's cache — forking git on the keystroke path would defeat it.
+# $1 = buffer, $2 = kind (typing|next_command).
 _zsh_autopilot_send() {
   local buffer="$1" kind="${2:-typing}"
 
@@ -907,7 +783,7 @@ _zsh_autopilot_send() {
 
   local REPLY
   _zsh_autopilot_json_escape "$buffer"
-  # v:2 — `history` is daemon-filled (see protocol.Version), not sent here.
+  # v:2; history is daemon-filled, not sent here.
   local line='{"v":2,"id":"'${_ZSH_AUTOPILOT_REQ_ID}'","kind":"'${kind}'","buf":"'${REPLY}'"'
 
   _zsh_autopilot_json_escape "$PWD"
@@ -920,9 +796,7 @@ _zsh_autopilot_send() {
 
   (( _ZSH_AUTOPILOT_LAST_EXIT != 0 )) && line+=',"last_exit":'${_ZSH_AUTOPILOT_LAST_EXIT}
 
-  # Distinct loop var (entry): re-declaring an already-`local` name across two
-  # loops (e.g. both doing `local ... item`) makes zsh print `item=...` to
-  # stdout — garbage on the prompt. Invisible to `zsh -n` and code review.
+  # Distinct loop var: reusing an already-local name here prints `item=...` to stdout.
   if (( ${#_ZSH_AUTOPILOT_DIR_ENTRIES} > 0 )); then
     local de_json='' entry
     for entry in "${_ZSH_AUTOPILOT_DIR_ENTRIES[@]}"; do
@@ -937,9 +811,8 @@ _zsh_autopilot_send() {
   _zsh_autopilot_write_line "$line"
 }
 
-# Fire-and-forget record: $1 = cmd, $2 = cwd, $3 = ts. Draws an id from the
-# shared _ZSH_AUTOPILOT_SEQ counter so the daemon can split out the session,
-# but must not set _ZSH_AUTOPILOT_REQ_ID — there is no reply to supersede.
+# $1 = cmd, $2 = cwd, $3 = ts. Must not set _ZSH_AUTOPILOT_REQ_ID: there is
+# no reply to supersede.
 _zsh_autopilot_send_record() {
   local cmd="$1" cwd="$2" ts="$3"
 
@@ -956,37 +829,31 @@ _zsh_autopilot_send_record() {
   _zsh_autopilot_write_line "$line"
 }
 
-# precmd hook: at a fresh, empty prompt, ask the daemon what to run next. The
-# reply is painted on the empty line by the zle -F handler once the editor
-# becomes active.
 _zsh_autopilot_precmd() {
   _zsh_autopilot_send '' next_command
 }
 
-# zle -F callback: fires while the line editor is active whenever the socket
-# fd is readable (or errors). $1 = the fd; $2 = an error condition ("hup",
-# "err", "nval") or empty on normal, readable data.
+# zle -F callback. $1 = fd; $2 = error condition (hup/err/nval) or empty
+# when data is readable.
 _zsh_autopilot_receive() {
   emulate -L zsh
   local fd=$1
 
-  # Connection error or peer hangup: tear down so the next send reconnects.
   if [[ -n "$2" ]]; then
-    zle -F $fd                # deregister this handler
-    exec {fd}<&- 2>/dev/null   # close our end
+    zle -F $fd
+    exec {fd}<&- 2>/dev/null
     [[ $fd == $ZSH_AUTOPILOT_SOCKET_FD ]] && unset ZSH_AUTOPILOT_SOCKET_FD
     return
   fi
 
-  # Normal path: read one newline-framed JSON reply. The handler stays
-  # registered (persistent warm socket).
+  # Reads one newline-framed JSON reply; the zle -F handler stays registered.
   local line
   IFS= read -r -u $fd line || return
 
   local REPLY
 
-  # Parsed before the id/suggestion gates below: a notice is about the
-  # session, not one keystroke, and must survive a superseded reply.
+  # Parsed before the id check: a notice is session-level and must survive
+  # a superseded reply.
   local notice notice_kind
   if _zsh_autopilot_json_str_field "$line" notice && [[ -n $REPLY ]]; then
     notice=$REPLY
@@ -994,7 +861,6 @@ _zsh_autopilot_receive() {
     _zsh_autopilot_notice "${notice_kind:-unknown}" "$notice"
   fi
 
-  # Correlate by id: ignore replies for a request we've already superseded.
   _zsh_autopilot_json_str_field "$line" id || return
   [[ $REPLY == $_ZSH_AUTOPILOT_REQ_ID ]] || return
   local reply_source
@@ -1002,9 +868,8 @@ _zsh_autopilot_receive() {
   _zsh_autopilot_json_str_field "$line" source && reply_source=$REPLY
   _zsh_autopilot_json_str_field "$line" suggestion && suggestion=$REPLY || return
 
-  # METRICS(§12): the reply matched our current request and is about to be
-  # painted — this is the "shown" event's paint anchor. A notice-carrying
-  # reply paints nothing, so counting it would inflate the shown denominator.
+  # METRICS(§12): paint anchor for the shown event; skipped when the reply
+  # carries a notice, since nothing is painted then.
   if [[ -z $notice ]]; then
     whence -w _zsh_autopilot_metric_shown &>/dev/null && _zsh_autopilot_metric_shown "$_ZSH_AUTOPILOT_REQ_ID" "$suggestion"
   fi
@@ -1015,32 +880,18 @@ _zsh_autopilot_receive() {
 #--------------------------------------------------------------------#
 # Dev Metrics Event Log (§12, dogfooding only)                       #
 #--------------------------------------------------------------------#
-# Fire-and-forget instrumentation: one JSON line per "shown" (a suggestion got
-# painted) and per "outcome" (what the user did with it), written to a
-# write-only Unix socket the daemon side ingests. TEMPORARY dogfooding
-# default-ON (inverts the §12 default-OFF invariant so friends' installs emit
-# without editing .zshrc; revert before the Phase-3 metrics strip) — set
-# ZSH_AUTOPILOT_METRICS=0 to disable. Every helper below gates on
-# _zsh_autopilot_metrics_enabled first and returns immediately, so the disabled
-# path is a cheap no-op.
-#
-# Removability: this fragment is meant to be deleted wholesale later. Every
-# call site elsewhere in the plugin is a single guarded line of the form
-#   whence -w _zsh_autopilot_metric_X &>/dev/null && _zsh_autopilot_metric_X ...
-# so deleting this file turns each of those into a harmless no-op — no other
-# fragment needs to change.
-#
-# Timing is computed entirely from zsh's own clock ($EPOCHREALTIME) at both
-# ends; we never mix in a daemon-side timestamp (different process, clock
-# skew would corrupt the advertised latency number).
+
+# TEMPORARY dogfooding default-ON (inverts the real default-OFF invariant);
+# ZSH_AUTOPILOT_METRICS=0 disables it. Revert before the Phase-3 metrics strip.
+# Every call site is a guarded `whence -w` check, so deleting this file no-ops them.
 
 zmodload zsh/datetime 2>/dev/null
 
 (( ! ${+ZSH_AUTOPILOT_METRICS_SOCKET} )) &&
 typeset -g ZSH_AUTOPILOT_METRICS_SOCKET=/tmp/zsh-autopilot-metrics.sock
 
-# Distinct fd var from the request socket's ZSH_AUTOPILOT_SOCKET_FD — this is
-# a separate, write-only connection and must never be confused with it.
+# Distinct fd var from the request socket's ZSH_AUTOPILOT_SOCKET_FD: a
+# separate, write-only connection that must never be confused with it.
 typeset -g _ZSH_AUTOPILOT_METRICS_SOCKET_FD=
 
 # t0: send anchor, set at request-id mint in _zsh_autopilot_send.
@@ -1093,11 +944,9 @@ _zsh_autopilot_metrics_send() {
   fi
 }
 
-# JSON builder for the "outcome" event — exactly one row per painted
-# suggestion (see _zsh_autopilot_metric_outcome). Whether the accepted command
-# actually ran is NOT a field here: that isn't known until preexec, long after
-# this row is sent. It's a separate "executed" event instead (see
-# _zsh_autopilot_metric_executed).
+# JSON builder for the "outcome" event: exactly one row per painted
+# suggestion. Whether the command actually ran isn't known until preexec,
+# so that's a separate "executed" event, not a field here.
 _zsh_autopilot_metrics_emit_outcome() {
   local request_id="$1" outcome="$2" accepted_chars="$3" time_to_accept_ms="$4"
 
@@ -1112,7 +961,6 @@ _zsh_autopilot_metrics_emit_outcome() {
   _zsh_autopilot_metrics_send "$line"
 }
 
-# Called from _zsh_autopilot_send (50_socket.zsh) right at request-id mint.
 # One overwritten global is the correct anchor: zsh mints a new id per send
 # and only ever paints the reply matching the *current* id.
 _zsh_autopilot_metric_t0() {
@@ -1120,9 +968,8 @@ _zsh_autopilot_metric_t0() {
   typeset -g _ZSH_AUTOPILOT_REQ_T0=$EPOCHREALTIME
 }
 
-# Called from _zsh_autopilot_receive (50_socket.zsh) once the id-match check
-# has passed and the reply is about to be painted. $1 = request_id (the
-# already-matched $_ZSH_AUTOPILOT_REQ_ID), $2 = suggestion text.
+# $1 = request_id (already matched against $_ZSH_AUTOPILOT_REQ_ID by the
+# caller), $2 = suggestion text.
 _zsh_autopilot_metric_shown() {
   _zsh_autopilot_metrics_enabled || return 0
   (( _ZSH_AUTOPILOT_REQ_T0 == 0 )) && return 0
@@ -1139,26 +986,17 @@ _zsh_autopilot_metric_shown() {
 
   local REPLY
   _zsh_autopilot_json_escape "$request_id"
-  # No buffer_len here: this fires from _zsh_autopilot_receive's `zle -F`
-  # fd callback, which runs OUTSIDE ZLE widget context, so $BUFFER is unset
-  # and ${#BUFFER} would silently read 0 on every event. buffer_len already
-  # lives on the daemon's "request" event and is joinable via request_id -
-  # don't re-add it here.
+  # No buffer_len here: this fires outside ZLE widget context, so $BUFFER is
+  # unset and ${#BUFFER} would silently read 0. It's already on the daemon's
+  # "request" event, joinable via request_id.
   local line='{"v":1,"event":"shown","request_id":"'${REPLY}'","total_latency_ms":'${latency_fmt}',"suggestion_len":'${#suggestion}',"ts":'${ts_fmt}'}'
 
   _zsh_autopilot_metrics_send "$line"
 }
 
-# Called from the accept/partial_accept/clear/modify widgets in
-# 40_widgets.zsh. $1 = outcome (accepted|partial_accepted|typed_over|
-# cleared), $2 = accepted_chars (default 0).
-#
-# Correctness: only fires when a suggestion is actually showing
-# (_ZSH_AUTOPILOT_SHOWN_ID non-empty), and clears that id immediately as part
-# of emitting — so a subsequent widget invocation for the same keystroke
-# (e.g. accept-line falling through the ZSH_AUTOPILOT_CLEAR_WIDGETS path
-# right after an accept) finds SHOWN_ID already empty and is a no-op. This
-# guarantees at most one outcome row per request_id.
+# $1 = outcome (accepted|partial_accepted|typed_over|cleared), $2 =
+# accepted_chars. Clears _ZSH_AUTOPILOT_SHOWN_ID immediately so a second
+# widget invocation for the same keystroke is a no-op: one row per request.
 _zsh_autopilot_metric_outcome() {
   _zsh_autopilot_metrics_enabled || return 0
   [[ -z $_ZSH_AUTOPILOT_SHOWN_ID ]] && return 0
@@ -1176,17 +1014,9 @@ _zsh_autopilot_metric_outcome() {
   _zsh_autopilot_metrics_emit_outcome "$request_id" "$outcome" "$accepted_chars" "$time_to_accept_ms"
 }
 
-# Called from the preexec hook (47_context.zsh) right before a command runs.
-# Emits its OWN event type rather than a second "outcome" row for the same
-# request_id: acceptance rate is an advertised number, computed as
-# count(outcome='accepted') / count(shown), and a follow-up "accepted" row
-# would double-count every accepted-and-executed suggestion and inflate it.
-# Keeping "executed" a distinct event preserves exactly one outcome row per
-# request_id, and the executed rate is still recoverable by joining on
-# request_id. The daemon ingests these as loose passthrough maps, so a new
-# event type costs it nothing.
-#
-# Clears _ZSH_AUTOPILOT_ACCEPTED_ID so it only ever fires once per accept.
+# A distinct event type, not a second "outcome" row: reusing "outcome" would
+# double-count accepted suggestions in the acceptance-rate metric. Clears
+# _ZSH_AUTOPILOT_ACCEPTED_ID so it fires once per accept.
 _zsh_autopilot_metric_executed() {
   _zsh_autopilot_metrics_enabled || return 0
   [[ -z $_ZSH_AUTOPILOT_ACCEPTED_ID ]] && return 0
@@ -1201,11 +1031,9 @@ _zsh_autopilot_metric_executed() {
   _zsh_autopilot_metrics_send '{"v":1,"event":"executed","request_id":"'${REPLY}'","ts":'${ts_fmt}'}'
 }
 
-# Marks the current request as a bad-output eval candidate. A pointer row
-# only (no buf/suggestion text — join on request_id against "request" rows,
-# see CLAUDE.md "Metrics"). Falls back to REQ_ID when nothing is painted,
-# since an empty reply is itself worth flagging. Does NOT clear
-# _ZSH_AUTOPILOT_SHOWN_ID — flagging isn't an outcome and must not consume it.
+# A pointer row only (no buf/suggestion text; join on request_id). Falls
+# back to REQ_ID when nothing is painted. Doesn't clear SHOWN_ID: flagging
+# isn't an outcome and must not consume it.
 _zsh_autopilot_metric_flag() {
   if ! _zsh_autopilot_metrics_enabled; then
     zle -M "autopilot: metrics disabled, nothing flagged (unset ZSH_AUTOPILOT_METRICS)"
@@ -1233,14 +1061,10 @@ _zsh_autopilot_metric_flag() {
 # Start                                                              #
 #--------------------------------------------------------------------#
 
-# Start the autopilot widgets
 _zsh_autopilot_start() {
-  # By default we re-bind widgets on every precmd to ensure we wrap other
-  # wrappers. Specifically, highlighting breaks if our widgets are wrapped by
-  # zsh-syntax-highlighting widgets. This also allows modifications to the
-  # widget list variables to take effect on the next precmd. However this has
-  # a decent performance hit, so users can set ZSH_AUTOPILOT_MANUAL_REBIND
-  # to disable the automatic re-binding.
+  # Re-binds on every precmd so we stay wrapped around other plugins (e.g.
+  # zsh-syntax-highlighting) and pick up widget-list changes. Costs
+  # performance; ZSH_AUTOPILOT_MANUAL_REBIND disables it.
   if (( ${+ZSH_AUTOPILOT_MANUAL_REBIND} )); then
     add-zsh-hook -d precmd _zsh_autopilot_start
   fi
@@ -1248,37 +1072,21 @@ _zsh_autopilot_start() {
   _zsh_autopilot_bind_widgets
 }
 
-# Mark the functions that we use for autoloading
 autoload -Uz add-zsh-hook
 
-# Start the autopilot widgets on the next precmd
 add-zsh-hook precmd _zsh_autopilot_start
-
-# Request a next-command suggestion on each fresh prompt (Phase 0 goal d).
 add-zsh-hook precmd _zsh_autopilot_precmd
 
 # Open the warm socket now so the first prompt already has a connection.
 _zsh_autopilot_connect
 
 #--------------------------------------------------------------------#
-# Background self-update (TEMPORARY — dogfooding only)                #
+# Background self-update (TEMPORARY, dogfooding only)                #
 #--------------------------------------------------------------------#
-# While dogfooding we want friends to pick up new releases without re-running
-# the installer by hand. At shell startup — at most once per
-# ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL seconds — fork a fully-detached job that
-# re-runs the published install script. That script is version-aware: it exits
-# immediately when already on the latest release, and on a real update it swaps
-# the binary/bundle and stops the running daemon so the NEXT new terminal
-# lazy-spawns the new one; the pkill drops this shell's socket fd too, so its
-# very next request reconnects and spawns the new binary itself.
-#
-# Non-blocking by construction: the foreground shell never waits on the network
-# (the whole check is backgrounded). The throttle keeps many terminals from
-# hammering GitHub's unauthenticated API rate limit.
-#
-# Remove this fragment and its config block in 10_config.zsh before release —
-# real distribution updates go through brew / plugin managers, not curl|sh on
-# startup.
+
+# At most once per ZSH_AUTOPILOT_AUTOUPDATE_INTERVAL seconds, forks a
+# detached job re-running the install script; a real update stops the
+# daemon so the next terminal lazy-spawns the new binary. TEMPORARY: remove.
 
 zmodload zsh/datetime 2>/dev/null
 
@@ -1334,6 +1142,7 @@ _zsh_autopilot_autoupdate
 #--------------------------------------------------------------------#
 # CLI                                                                 #
 #--------------------------------------------------------------------#
+
 # User-facing `autopilot` command. Not an alias to autopilotd: version,
 # log tailing, kill+respawn, and env-based level toggling are all shell-side
 # operations the daemon binary has no flags for.
@@ -1347,9 +1156,8 @@ _zsh_autopilot_version_path() {
 }
 
 # Kills the running daemon and respawns it, waiting out both transitions
-# instead of racing them. A level change needs a live daemon to pick it up,
-# since there's no config reload, so `log-level` reuses this too. Returns 1
-# if the daemon never comes back reachable.
+# instead of racing them. `log-level` reuses this too since there's no
+# config reload. Returns 1 if the daemon never comes back reachable.
 _zsh_autopilot_restart_daemon() {
   emulate -L zsh
   zmodload zsh/net/socket 2>/dev/null
@@ -1358,7 +1166,7 @@ _zsh_autopilot_restart_daemon() {
 
   [[ -n $ZSH_AUTOPILOT_SOCKET_FD ]] && exec {ZSH_AUTOPILOT_SOCKET_FD}<&- 2>/dev/null
   unset ZSH_AUTOPILOT_SOCKET_FD
-  # Once-per-shell latch (50_socket.zsh) would otherwise skip this respawn.
+  # Otherwise the once-per-shell spawn latch would skip this respawn.
   unset _ZSH_AUTOPILOT_SPAWN_TRIED
 
   local -i tries=0

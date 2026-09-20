@@ -18,11 +18,8 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/suggest"
 )
 
-// testSocketPath returns a short, unique socket path inside a per-test temp
-// dir. We root the temp dir at "/tmp" explicitly rather than using t.TempDir():
-// on macOS the latter lives under a long /var/folders/... path that, plus a
-// filename, exceeds the ~104-byte Unix socket path cap. os.MkdirTemp gives real
-// isolation (unique per run, parallel-safe, auto-cleaned) while staying short.
+// testSocketPath uses /tmp, not t.TempDir(): its /var/folders/... path
+// exceeds the ~104-byte macOS Unix socket path cap.
 func testSocketPath(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "zap")
@@ -33,14 +30,8 @@ func testSocketPath(t *testing.T) string {
 	return filepath.Join(dir, "d.sock")
 }
 
-// testDebounce is the debounce duration used by the test helpers below: small
-// enough to keep the suite fast, large enough to give a "burst" of rapid
-// sends (no sleeps between them) a real window to coalesce in without
-// flaking on a loaded CI box.
 const testDebounce = 25 * time.Millisecond
 
-// stubSuggestion is what startServer's suggester replies with. Its callers
-// check plumbing, not content.
 const stubSuggestion = "stub reply"
 
 func stubSuggest(_ context.Context, req protocol.Request) (protocol.Reply, error) {
@@ -52,17 +43,11 @@ func stubSuggest(_ context.Context, req protocol.Request) (protocol.Reply, error
 	}, nil
 }
 
-// startServer runs a Server in the background with a trivial suggester and
-// returns a cancel func that shuts it down. It waits for the socket file to
-// appear so callers can dial immediately.
 func startServer(t *testing.T, path string) (cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	return startServerWithSuggest(t, path, stubSuggest)
 }
 
-// startServerWithSuggest is like startServer but installs the caller's suggest
-// stub, the seam the coordinator tests use to create deterministic
-// cancellation windows. Debounce is set to testDebounce.
 func startServerWithSuggest(t *testing.T, path string, suggest func(ctx context.Context, req protocol.Request) (protocol.Reply, error)) (cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -151,16 +136,10 @@ func TestEmptyBufferRequest(t *testing.T) {
 	}
 }
 
-// TestShutdownWithOpenConnection guards against a shutdown deadlock: the zsh
-// client holds a persistent warm connection, so at shutdown a handler is
-// blocked in Decode. Run must close in-flight connections before waiting for
-// their handlers, or it hangs forever.
 func TestShutdownWithOpenConnection(t *testing.T) {
 	path := testSocketPath(t)
 	cancel, done := startServer(t, path)
 
-	// Dial and keep the connection open without sending a request, mirroring
-	// the client's warm socket parked in Decode.
 	conn, err := net.Dial("unix", path)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -199,9 +178,6 @@ func TestShutdownRemovesSocket(t *testing.T) {
 	}
 }
 
-// TestSupersedeCancelsInFlightRequest dispatches A (blocks until cancelled),
-// then B on the same connection, and asserts A's ctx is cancelled and only
-// B's reply is written (A must observe ctx.Err() and skip its write).
 func TestSupersedeCancelsInFlightRequest(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -271,8 +247,6 @@ func TestSupersedeCancelsInFlightRequest(t *testing.T) {
 	}
 }
 
-// TestCancelOnConnectionClose: with no superseding request, closing the
-// client connection must still cancel whatever is in flight.
 func TestCancelOnConnectionClose(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -315,10 +289,6 @@ func TestCancelOnConnectionClose(t *testing.T) {
 	}
 }
 
-// TestDebounceCoalescesBurst: a burst faster than the debounce window must
-// produce exactly ONE call into suggest, for the LAST buffered request —
-// every superseded buffer must never even be sent, not merely cancelled
-// after being sent.
 func TestDebounceCoalescesBurst(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -346,7 +316,6 @@ func TestDebounceCoalescesBurst(t *testing.T) {
 		}
 	}
 
-	// Wait comfortably past the debounce window for dispatch to happen.
 	time.Sleep(testDebounce * 4)
 
 	mu.Lock()
@@ -360,8 +329,6 @@ func TestDebounceCoalescesBurst(t *testing.T) {
 		t.Errorf("suggest called with buf %q, want %q (the last buffered request)", got[0], "git")
 	}
 
-	// The reply for the dispatched (last) request should be waiting on the
-	// wire.
 	var reply protocol.Reply
 	if err := protocol.NewDecoder(conn).Decode(&reply); err != nil {
 		t.Fatalf("decode reply: %v", err)
@@ -371,8 +338,6 @@ func TestDebounceCoalescesBurst(t *testing.T) {
 	}
 }
 
-// TestDebounceFiresAfterQuiet: a single request with nothing superseding it
-// must still get answered after the quiet period.
 func TestDebounceFiresAfterQuiet(t *testing.T) {
 	path := testSocketPath(t)
 	cancel, _ := startServer(t, path)
@@ -390,9 +355,6 @@ func TestDebounceFiresAfterQuiet(t *testing.T) {
 	}
 }
 
-// TestSupersedeAfterDebounceStillWorks: once a request has cleared debounce
-// and is in flight, a new request (after its own debounce window) must still
-// cancel it.
 func TestSupersedeAfterDebounceStillWorks(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -423,7 +385,6 @@ func TestSupersedeAfterDebounceStillWorks(t *testing.T) {
 		t.Fatalf("encode A: %v", err)
 	}
 
-	// Let A clear debounce and actually dispatch (block in suggest).
 	select {
 	case id := <-started:
 		if id != "A" {
@@ -433,8 +394,6 @@ func TestSupersedeAfterDebounceStillWorks(t *testing.T) {
 		t.Fatal("request A did not start in time")
 	}
 
-	// Now send B; it must go through its own debounce window before
-	// dispatch, at which point it supersedes A.
 	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "B", Kind: protocol.KindTyping, Buf: "git"}); err != nil {
 		t.Fatalf("encode B: %v", err)
 	}
@@ -457,10 +416,6 @@ func TestSupersedeAfterDebounceStillWorks(t *testing.T) {
 	}
 }
 
-// TestNoGoroutineLeak drives many rapidly-superseding requests across several
-// connections, tears everything down, and asserts runtime.NumGoroutine()
-// settles back near baseline — a coordinator that fails to cancel (or a
-// goroutine stuck on something other than ctx) leaves the count elevated.
 func TestNoGoroutineLeak(t *testing.T) {
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
@@ -529,8 +484,6 @@ func TestNoGoroutineLeak(t *testing.T) {
 	}
 }
 
-// TestRecordRequestInvokesRecordFn asserts a KindRecord request is delivered
-// to the registered record func with its Cmd/Cwd intact.
 func TestRecordRequestInvokesRecordFn(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -584,9 +537,6 @@ func TestRecordRequestInvokesRecordFn(t *testing.T) {
 	}
 }
 
-// TestRecordRequestProducesNoReplyAndSkipsSuggest asserts a KindRecord
-// request never reaches suggest and never gets a Reply on the wire: only the
-// typing request sent afterward should produce one.
 func TestRecordRequestProducesNoReplyAndSkipsSuggest(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -636,9 +586,6 @@ func TestRecordRequestProducesNoReplyAndSkipsSuggest(t *testing.T) {
 		t.Fatal("record fn was not invoked in time")
 	}
 
-	// Nothing should have been written to the wire for the record request.
-	// A subsequent typing request is used to prove the connection is still
-	// alive and that its reply is the only one that arrives.
 	if err := protocol.Encode(conn, protocol.Request{
 		V: protocol.Version, ID: "1.2", Kind: protocol.KindTyping, Buf: "git",
 	}); err != nil {
@@ -661,10 +608,6 @@ func TestRecordRequestProducesNoReplyAndSkipsSuggest(t *testing.T) {
 	}
 }
 
-// TestRecordBetweenTypingRequestsDoesNotSupersede sends typing(A), record,
-// typing(B) back to back and asserts the record neither cancels A nor
-// resets B's debounce window: A must still complete and only B's reply
-// (the winner of normal supersede) reaches the wire.
 func TestRecordBetweenTypingRequestsDoesNotSupersede(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -720,7 +663,6 @@ func TestRecordBetweenTypingRequestsDoesNotSupersede(t *testing.T) {
 		t.Fatal("request A did not start in time")
 	}
 
-	// A record request while A is in flight must not touch supersede state.
 	if err := protocol.Encode(conn, protocol.Request{V: protocol.Version, ID: "rec.1", Kind: protocol.KindRecord, Cmd: "ls"}); err != nil {
 		t.Fatalf("encode record: %v", err)
 	}
@@ -730,7 +672,6 @@ func TestRecordBetweenTypingRequestsDoesNotSupersede(t *testing.T) {
 		t.Fatal("record fn was not invoked in time")
 	}
 
-	// A must still be in flight (not cancelled by the record).
 	select {
 	case <-cancelled:
 		t.Fatal("request A was cancelled by an intervening record request")
@@ -759,9 +700,6 @@ func TestRecordBetweenTypingRequestsDoesNotSupersede(t *testing.T) {
 	}
 }
 
-// TestNoticeOnNonRecoverableError asserts a suggest error that NoticeFor
-// classifies as surfaceable (auth) produces exactly one Reply with the
-// notice fields set and an empty Suggestion, rather than nothing at all.
 func TestNoticeOnNonRecoverableError(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -803,9 +741,6 @@ func TestNoticeOnNonRecoverableError(t *testing.T) {
 	}
 }
 
-// TestNoRecoverableErrorWritesNothing asserts a suggest error NoticeFor does
-// not surface (rate limited, recoverable by design) produces no write at all
-// on the wire.
 func TestNoRecoverableErrorWritesNothing(t *testing.T) {
 	path := testSocketPath(t)
 
@@ -841,9 +776,6 @@ func TestNoRecoverableErrorWritesNothing(t *testing.T) {
 		t.Fatalf("encode: %v", err)
 	}
 
-	// Give the debounce + dispatch + would-be write time to happen, then
-	// assert nothing showed up: a short read deadline turns "no bytes ever
-	// arrive" into a fast, deterministic timeout instead of hanging.
 	conn.SetReadDeadline(time.Now().Add(testDebounce*4 + 200*time.Millisecond))
 	var reply protocol.Reply
 	err = protocol.NewDecoder(conn).Decode(&reply)

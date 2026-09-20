@@ -1,15 +1,12 @@
 #!/bin/sh
-# zsh-autopilot install script — for friends dogfooding, not a public release.
-#
-# Downloads the autopilotd daemon binary from the latest GitHub Release
-# (built by GoReleaser, see ../.goreleaser.yaml) plus the zsh plugin bundle,
-# installs them locally, and prints the .zshrc lines to add by hand.
-#
+# zsh-autopilot install script: downloads the autopilotd binary and zsh
+# plugin bundle from the latest GitHub Release, installs them locally, and
+# prints the .zshrc lines to add by hand.
+
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/naasanov/zeta/main/scripts/install.sh | sh
-#
-# Optional: set ZSH_AUTOPILOT_INSTALL_KEY to have the Codestral key line
-# printed pre-filled instead of a placeholder.
+
+# Optional: set ZSH_AUTOPILOT_INSTALL_KEY to pre-fill the Codestral key line.
 
 set -eu
 
@@ -40,10 +37,9 @@ version="${latest_tag#v}"
 asset="zsh-autopilot_${version}_${os}_${arch}.tar.gz"
 url="https://github.com/${REPO}/releases/download/${latest_tag}/${asset}"
 
-# Rerunnable: record the installed release tag and skip the work when we're
-# already on the latest. `--force` (or ZSH_AUTOPILOT_INSTALL_FORCE=1) reinstalls
-# anyway. The background self-updater (zsh/66_update.zsh) relies on this early
-# exit to be a cheap no-op on the common "already current" path.
+# Rerunnable: records the installed release tag and skips the work when
+# already current. `--force` (or ZSH_AUTOPILOT_INSTALL_FORCE=1) reinstalls
+# anyway; the background self-updater relies on this being a cheap no-op.
 version_file="${SHARE_DIR}/VERSION"
 installed=""
 [ -f "$version_file" ] && installed="$(cat "$version_file" 2>/dev/null)"
@@ -80,7 +76,7 @@ printf '%s\n' "$latest_tag" > "$version_file"
 # single-instance guard means the old one must exit before the new can bind.
 pkill -x autopilotd 2>/dev/null || true
 
-# On an update (a prior version existed) the .zshrc is already wired — just
+# On an update (a prior version existed) the .zshrc is already wired; just
 # report. On a first install, print the lines the user still has to add.
 if [ -n "$installed" ]; then
   echo "==> Updated ${installed} -> ${latest_tag}. Open a new terminal to pick it up."

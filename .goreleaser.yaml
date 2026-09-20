@@ -1,7 +1,6 @@
-# GoReleaser config for the autopilotd daemon (design doc §10).
-# go.mod lives in daemon/ (its own module), so builds `dir` into it.
-# Run manually with `goreleaser release --clean` (needs a `vX.Y.Z` tag),
-# or via .github/workflows/release.yml on tag push.
+# GoReleaser config for the autopilotd daemon.
+# go.mod lives in daemon/ (its own module), so `dir` builds into it.
+# Run manually with `goreleaser release --clean` (needs a vX.Y.Z tag).
 version: 2
 
 project_name: zsh-autopilot

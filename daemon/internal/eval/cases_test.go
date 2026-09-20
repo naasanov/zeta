@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// wantIDs is the full case set the plan doc's "Test cases" tables list:
-// categories A, B, D, F1/F2 in full, plus every C and E case — the
-// deterministic ones from Part 2 and the three Part 3 judged cases
-// (C3, E3, F2).
 var wantIDs = []string{
 	"A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9",
 	"B1", "B2", "B3", "B3b", "B4", "B5", "B6", "B6b", "B7", "B7b", "B8", "B8b", "B9",
@@ -38,10 +34,9 @@ func TestCases_ExactIDSet(t *testing.T) {
 }
 
 func TestCases_JudgedIDsUseJudgeGrader(t *testing.T) {
-	// Checks both directions against Cases(), so the judged set and the
-	// actual judge-graded cases can't silently drift apart. A judged case
-	// may also pair the judge assertion with deterministic ones (E11 keeps
-	// its deterministic "stale-history-wins" MustNot alongside the judged leg).
+	// Checks both directions so the judged set and the judge-graded cases
+	// can't drift apart. A case may pair a judge assertion with
+	// deterministic ones too (E11's "stale-history-wins" MustNot).
 	judged := map[string]bool{"C1b": true, "C3": true, "E3": true, "E10": true, "E11": true, "E14": true, "F2": true}
 	for _, c := range Cases() {
 		hasJudgeGrader := false
@@ -97,8 +92,7 @@ func TestCases_WellFormed(t *testing.T) {
 							c.ID, a.Label, a.Polarity, a.Threshold)
 					}
 				case TripWire, Measure:
-					// Threshold is ignored for these polarities per
-					// Assertion's doc comment; no constraint to check.
+					// Threshold is ignored for these polarities; nothing to check.
 				default:
 					t.Errorf("case %s assertion %q has unrecognized polarity %q", c.ID, a.Label, a.Polarity)
 				}
@@ -108,9 +102,8 @@ func TestCases_WellFormed(t *testing.T) {
 }
 
 func TestCases_CategoriesMatchPlan(t *testing.T) {
-	// The plan doc names these five category strings; a typo'd category
-	// silently breaks -cases <category> selection (select.go) and the
-	// report's category grouping (report.go).
+	// A typo'd category string here silently breaks -cases <category>
+	// selection and the report's category grouping.
 	wantCategories := map[string]bool{
 		"syntax": true, "fabrication": true, "incrementing": true,
 		"looping": true, "context": true, "abstention": true,
@@ -122,13 +115,9 @@ func TestCases_CategoriesMatchPlan(t *testing.T) {
 	}
 }
 
-// caseShape is the structural, comparable projection of a Case used by
-// TestCases_Deterministic. A Grader is a func-carrying interface
-// (GraderFunc.F), and reflect.DeepEqual on funcs is only ever true for two
-// nils — even functionally-identical closures built by two separate
-// Cases() calls compare unequal. So determinism is checked over everything
-// EXCEPT the grader funcs themselves: ID, category, request, and each
-// assertion's label/polarity/threshold/grader name.
+// caseShape is Case's comparable projection for TestCases_Deterministic:
+// reflect.DeepEqual on a grader func is only ever true for two nils, so
+// determinism is checked by ID/category/request/assertion shape instead.
 type caseShape struct {
 	ID, Category string
 	Req          interface{}
@@ -162,11 +151,9 @@ func TestCases_Deterministic(t *testing.T) {
 	}
 }
 
-// TestCases_SelectableByCategoryAndGlob is a light integration check that
-// the corpus actually composes with Select (select.go) the way cmd/eval
-// drives it — the exact failure mode this Part 2 work needs to avoid is a
-// corpus that looks right in isolation but a selector like "syntax" or "B*"
-// silently matches nothing against it.
+// TestCases_SelectableByCategoryAndGlob checks the corpus composes with
+// Select the way cmd/eval drives it, so a selector like "syntax" or "B*"
+// doesn't silently match nothing.
 func TestCases_SelectableByCategoryAndGlob(t *testing.T) {
 	cases := Cases()
 
@@ -186,10 +173,8 @@ func TestCases_SelectableByCategoryAndGlob(t *testing.T) {
 		t.Errorf("Select(B*) matched %d cases, want 13 (B1..B9 plus the four paired \"b\" cases)", len(byGlob))
 	}
 
-	// "B6" must select the bare case ALONE — a selector that silently swept
-	// in its paired high-context sibling would make the two indistinguishable
-	// in a scorecard, which is the whole point of the pairing. "B6*" is the
-	// selector that takes both.
+	// "B6" must select the bare case ALONE, not sweep in its paired
+	// high-context sibling; "B6*" is the selector that takes both.
 	bare, err := Select(cases, "B6")
 	if err != nil {
 		t.Fatalf("Select(B6): %v", err)

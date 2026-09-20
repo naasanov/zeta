@@ -3,9 +3,7 @@
 # Autopilot Widget Implementations                                   #
 #--------------------------------------------------------------------#
 
-# Clear the suggestion
 _zsh_autopilot_clear() {
-  # Remove the suggestion
   POSTDISPLAY=
 
   # METRICS(§12): outcome cleared
@@ -14,21 +12,17 @@ _zsh_autopilot_clear() {
   _zsh_autopilot_invoke_original_widget $@
 }
 
-# Modify the buffer and get a new suggestion
 _zsh_autopilot_modify() {
   local -i retval
 
   # Only available in zsh >= 5.4
   local -i KEYS_QUEUED_COUNT
 
-  # Save the contents of the buffer/postdisplay
   local orig_buffer="$BUFFER"
   local orig_postdisplay="$POSTDISPLAY"
 
-  # Clear suggestion while waiting for next one
   POSTDISPLAY=
 
-  # Original widget may modify the buffer
   _zsh_autopilot_invoke_original_widget $@
   retval=$?
 
@@ -47,7 +41,7 @@ _zsh_autopilot_modify() {
   fi
 
   # METRICS(§12): buffer diverged from the shown suggestion (a real edit, not
-  # just typing into it) — the suggestion was dropped instead of accepted.
+  # just typing into it), so the suggestion was dropped instead of accepted.
   whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome typed_over
 
   # Bail out if suggestions are disabled (latent kill-switch: set
@@ -56,7 +50,6 @@ _zsh_autopilot_modify() {
     return $?
   fi
 
-  # Get a new suggestion if the buffer is not empty after modification
   if (( $#BUFFER > 0 )); then
     if [[ -z "$ZSH_AUTOPILOT_BUFFER_MAX_SIZE" ]] || (( $#BUFFER <= $ZSH_AUTOPILOT_BUFFER_MAX_SIZE )); then
       _zsh_autopilot_fetch
@@ -66,33 +59,20 @@ _zsh_autopilot_modify() {
   return $retval
 }
 
-# Fetch a new suggestion for the current buffer by asking the daemon.
-#
-# Unlike zsh-autosuggestions (which forks a subshell to run a local strategy),
-# we hand the buffer to the socket transport, which ships it to autopilotd and
-# paints the async reply via `zle autopilot-suggest`. `_zsh_autopilot_send`
-# lives in the socket transport fragment (50_socket.zsh); until that is
-# implemented this degrades to a no-op so the widget/ghost-text loop still runs.
+# Falls back to a no-op if the socket transport isn't loaded.
 _zsh_autopilot_fetch() {
   whence -w _zsh_autopilot_send &>/dev/null && _zsh_autopilot_send "$BUFFER" typing
   return 0
 }
 
-# Offer a suggestion. Invoked as `zle autopilot-suggest -- "$source" "$suggestion"`
-# by the socket transport when the daemon's reply arrives. This is the seam
-# where the daemon's string becomes ghost text. $source (llm|history) is carried
-# through from the protocol's source tag; Phase 1 paints regardless of source,
-# but the seam is here so the Phase 4a history/upgrade rendering rules slot in
-# without touching the widget's caller.
 _zsh_autopilot_suggest() {
   emulate -L zsh
 
   local source="$1"
   local suggestion="$2"
 
-  # Paint whenever we have a suggestion — including on an empty buffer, which
-  # is the next-command (precmd) case. With an empty BUFFER the prefix strip
-  # is a no-op, so POSTDISPLAY becomes the whole suggested command.
+  # Paints on an empty buffer too (the next-command case): the prefix strip
+  # is then a no-op, so POSTDISPLAY becomes the whole suggested command.
   if [[ -n "$suggestion" ]]; then
     POSTDISPLAY="${suggestion#$BUFFER}"
   else
@@ -100,42 +80,34 @@ _zsh_autopilot_suggest() {
   fi
 }
 
-# Accept the entire suggestion
 _zsh_autopilot_accept() {
   local -i retval max_cursor_pos=$#BUFFER
 
-  # When vicmd keymap is active, the cursor can't move all the way
-  # to the end of the buffer
+  # vicmd keymap can't move the cursor all the way to the end of the buffer.
   if [[ "$KEYMAP" = "vicmd" ]]; then
     max_cursor_pos=$((max_cursor_pos - 1))
   fi
 
-  # If we're not in a valid state to accept a suggestion, just run the
-  # original widget and bail out
+  # Bail to the original widget unless the cursor is at the end with a
+  # suggestion showing.
   if (( $CURSOR != $max_cursor_pos || !$#POSTDISPLAY )); then
     _zsh_autopilot_invoke_original_widget $@
     return
   fi
 
-  # Only accept if the cursor is at the end of the buffer
   # METRICS(§12): capture the accepted length before POSTDISPLAY is blanked.
   local _zsh_autopilot_metrics_accepted_chars=$#POSTDISPLAY
 
-  # Add the suggestion to the buffer
   BUFFER="$BUFFER$POSTDISPLAY"
-
-  # Remove the suggestion
   POSTDISPLAY=
 
   # METRICS(§12): outcome accepted
   whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome accepted "$_zsh_autopilot_metrics_accepted_chars"
 
-  # Run the original widget before manually moving the cursor so that the
-  # cursor movement doesn't make the widget do something unexpected
+  # Runs before the cursor move below so the move doesn't affect the widget.
   _zsh_autopilot_invoke_original_widget $@
   retval=$?
 
-  # Move the cursor to the end of the buffer
   if [[ "$KEYMAP" = "vicmd" ]]; then
     CURSOR=$(($#BUFFER - 1))
   else
@@ -145,30 +117,25 @@ _zsh_autopilot_accept() {
   return $retval
 }
 
-# Accept the entire suggestion and execute it
 _zsh_autopilot_execute() {
-  # Add the suggestion to the buffer
   BUFFER="$BUFFER$POSTDISPLAY"
-
-  # Remove the suggestion
   POSTDISPLAY=
 
-  # Call the original `accept-line` to handle syntax highlighting or
-  # other potential custom behavior
+  # Invokes accept-line explicitly, not the passed-in widget, for its
+  # highlighting and other side effects.
   _zsh_autopilot_invoke_original_widget "accept-line"
 }
 
-# Partially accept the suggestion
 _zsh_autopilot_partial_accept() {
   local -i retval cursor_loc
 
-  # Save the contents of the buffer so we can restore later if needed
   local original_buffer="$BUFFER"
 
-  # Temporarily accept the suggestion.
+  # Temporarily accepts the suggestion so the original widget's cursor math
+  # runs against the full buffer; restored below if the cursor didn't move
+  # into it.
   BUFFER="$BUFFER$POSTDISPLAY"
 
-  # Original widget moves the cursor
   _zsh_autopilot_invoke_original_widget $@
   retval=$?
 
@@ -178,26 +145,21 @@ _zsh_autopilot_partial_accept() {
     cursor_loc=$((cursor_loc + 1))
   fi
 
-  # If we've moved past the end of the original buffer
   if (( $cursor_loc > $#original_buffer )); then
-    # Set POSTDISPLAY to text right of the cursor
     POSTDISPLAY="${BUFFER[$(($cursor_loc + 1)),$#BUFFER]}"
-
-    # Clip the buffer at the cursor
     BUFFER="${BUFFER[1,$cursor_loc]}"
 
     # METRICS(§12): outcome partial_accepted, accepted_chars = chars actually taken
     whence -w _zsh_autopilot_metric_outcome &>/dev/null && _zsh_autopilot_metric_outcome partial_accepted "$(( cursor_loc - $#original_buffer ))"
   else
-    # Restore the original buffer
     BUFFER="$original_buffer"
   fi
 
   return $retval
 }
 
-# METRICS(§12): flag the on-screen suggestion as a bad-output eval candidate.
-# Must not touch BUFFER/POSTDISPLAY or emit an `outcome` — flagging isn't a
+# METRICS(§12): flags the on-screen suggestion as a bad-output candidate.
+# Must not touch BUFFER/POSTDISPLAY or emit an outcome; flagging isn't a
 # thing the user did with the suggestion, so it must stay on screen.
 _zsh_autopilot_flag() {
   whence -w _zsh_autopilot_metric_flag &>/dev/null && _zsh_autopilot_metric_flag
@@ -207,15 +169,9 @@ _zsh_autopilot_flag() {
 () {
   typeset -ga _ZSH_AUTOPILOT_BUILTIN_ACTIONS
 
-  # Actions that get a registered `autopilot-<action>` ZLE widget. `suggest`
-  # is here because the socket transport calls `zle autopilot-suggest`; the
-  # rest are here so users can bind keys directly to them. `modify` and
-  # `partial_accept` deliberately get widget *functions* (below) but no ZLE
-  # widget — they are invoked through the bind trampoline, not by name.
-  #
-  # Also doubles as the ignore list in _zsh_autopilot_bind_widgets
-  # (20_bind.zsh) — omitting an autopilot widget here gets it rebound as
-  # `modify`, clearing the suggestion whenever it's invoked.
+  # `suggest` needs a ZLE widget since the socket transport calls it by name;
+  # the rest let users bind keys directly. Omitting an action here makes
+  # _zsh_autopilot_bind_widgets treat it as `modify`.
   _ZSH_AUTOPILOT_BUILTIN_ACTIONS=(
     clear
     suggest

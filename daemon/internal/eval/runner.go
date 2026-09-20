@@ -10,35 +10,26 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/provider"
 )
 
-// Limiter paces provider calls. Wait blocks until the caller is allowed to
-// make its next call, or ctx is done. Observe feeds back what a completed
-// call learned about the remote budget (nil when the call carried nothing).
+// Limiter paces provider calls: Wait blocks until the next call is allowed;
+// Observe reports what a completed call learned about the remote budget.
 type Limiter interface {
 	Wait(ctx context.Context) error
 	Observe(rl *provider.RateLimit)
 }
 
-// NoopLimiter never waits. It's the Runner default and what the stub
-// provider / -dry-run path uses, since there is no real rate limit to
-// respect against a fake in-process provider.
+// NoopLimiter never waits.
 type NoopLimiter struct{}
 
 func (NoopLimiter) Wait(ctx context.Context) error { return ctx.Err() }
 func (NoopLimiter) Observe(*provider.RateLimit)    {}
 
-// RateLimiter paces calls to at most N per minute via a simple leaky-bucket:
-// each Wait call is allowed to return only `interval` after the previous one
-// did. Used for the judge model's own independent per-call cap, which is a
-// real requests/minute limit unlike groq's (see AdaptiveLimiter).
+// RateLimiter paces calls to at most N per minute via a leaky bucket.
 type RateLimiter struct {
 	mu       sync.Mutex
 	interval time.Duration
 	next     time.Time
 }
 
-// NewRateLimiter returns a RateLimiter allowing perMinute calls per minute.
-// perMinute <= 0 is treated as 1 (the most conservative non-zero rate)
-// rather than a divide-by-zero or an accidental unlimited rate.
 func NewRateLimiter(perMinute int) *RateLimiter {
 	if perMinute <= 0 {
 		perMinute = 1
@@ -73,13 +64,10 @@ func (l *RateLimiter) Wait(ctx context.Context) error {
 	}
 }
 
-// Observe is a no-op: RateLimiter paces by a fixed per-minute rate and has
-// no budget to learn from response headers.
+// Observe is a no-op: RateLimiter has no budget to learn from headers.
 func (l *RateLimiter) Observe(*provider.RateLimit) {}
 
-// AdaptiveLimiter paces calls against a remote token bucket learned from
-// response headers. Groq bills max_tokens against a per-minute token budget,
-// so a fixed requests/minute rate is blind to per-call cost.
+// AdaptiveLimiter paces calls against a token budget learned from response headers.
 type AdaptiveLimiter struct {
 	mu sync.Mutex
 
@@ -93,28 +81,21 @@ type AdaptiveLimiter struct {
 	retryAfter time.Time // absolute deadline from the most recent 429
 }
 
-// costSafetyFactor inflates the learned cost before Wait reserves it. The
-// bucket isn't exclusively ours, so the projected remaining is always
-// somewhat stale.
+// costSafetyFactor inflates the learned cost before Wait reserves it.
 const costSafetyFactor = 1.5
 
-// NewAdaptiveLimiter returns an AdaptiveLimiter with no learned budget yet;
-// it will not throttle until Observe sees a response carrying rate-limit
-// headers.
+// NewAdaptiveLimiter returns a limiter that won't throttle until Observe
+// learns rate-limit headers.
 func NewAdaptiveLimiter() *AdaptiveLimiter {
 	return &AdaptiveLimiter{}
 }
 
 // DefaultEvalConfigPath holds eval-only provider profiles, relative to the
-// daemon module root. It is independent of the daemon's own config.toml.
+// daemon module root.
 const DefaultEvalConfigPath = "internal/eval/eval.toml"
 
-// LimiterForBrand returns the rate limiter an eval run should use for calls
-// to brand: groq gets the adaptive token-bucket AdaptiveLimiter;
-// codestral/anthropic and unknown brands get NoopLimiter
-// (concurrency-bounded by the Runner's worker pool instead — an
-// unrecognized brand will already have failed to resolve into a provider
-// before a limiter matters).
+// LimiterForBrand returns the rate limiter for calls to brand: groq gets the
+// adaptive token-bucket AdaptiveLimiter; everything else gets NoopLimiter.
 func LimiterForBrand(brand string) Limiter {
 	switch brand {
 	case "groq":
@@ -124,11 +105,9 @@ func LimiterForBrand(brand string) Limiter {
 	}
 }
 
-// Wait blocks until the projected token budget can cover one more call at
-// the current cost estimate, or until an observed RetryAfter deadline has
-// passed, whichever is later; it reserves the estimated cost against the
-// projected remaining budget before returning so back-to-back calls pace
-// correctly between header refreshes.
+// Wait blocks until the projected token budget covers one more call at the
+// current cost estimate, or until an observed RetryAfter deadline passes,
+// whichever is later, reserving the estimated cost before returning.
 func (l *AdaptiveLimiter) Wait(ctx context.Context) error {
 	l.mu.Lock()
 	now := time.Now()
@@ -166,11 +145,9 @@ func (l *AdaptiveLimiter) Wait(ctx context.Context) error {
 	}
 }
 
-// Observe learns from one completed call. RetryAfter (a 429) raises the
-// floor Wait must block until. A valid LimitTokens/ResetTokens pair derives
-// the refill rate; the drop in RemainingTokens since the last observation,
-// corrected for refill that happened in between, updates the running-max
-// cost estimate. rl == nil (no headers on this call) is a no-op.
+// Observe learns from one completed call: RetryAfter (a 429) raises the
+// floor Wait must block until, and a valid LimitTokens/ResetTokens pair
+// derives the refill rate and updates the running-max cost estimate.
 func (l *AdaptiveLimiter) Observe(rl *provider.RateLimit) {
 	if rl == nil {
 		return
@@ -215,8 +192,8 @@ func (l *AdaptiveLimiter) Observe(rl *provider.RateLimit) {
 	l.started = true
 }
 
-// defaultMinRuns, defaultMaxRuns: adaptive sampling runs 3, escalates to 10
-// on any disagreement (see Runner.FixedN to opt out).
+// defaultMinRuns, defaultMaxRuns: adaptive sampling runs 3, escalating to 10
+// on any disagreement.
 const (
 	defaultMinRuns = 3
 	defaultMaxRuns = 10
@@ -226,8 +203,7 @@ const (
 	maxRateLimitAttempts = 4
 
 	// defaultConcurrency bounds how many Cases run at once; runs within one
-	// case stay sequential. Only sensible without a shared Limiter — a cell
-	// with a real rate limiter should set Runner.Concurrency instead.
+	// case stay sequential.
 	defaultConcurrency = 4
 )
 
@@ -239,11 +215,7 @@ type Runner struct {
 	MaxRuns  int // default 10
 	FixedN   int // 0 = adaptive; otherwise exactly N, hard-capped at MaxRuns
 
-	// Concurrency overrides defaultConcurrency (0 = default). With a shared
-	// Limiter (e.g. groq's AdaptiveLimiter) extra workers only add queuing
-	// latency, not throughput, and since Progress reports in case order,
-	// spreading limited slots across concurrent cases delays the first
-	// result for no gain — rate-limited cells should pass Concurrency: 1.
+	// Concurrency overrides defaultConcurrency (0 = default).
 	Concurrency int
 
 	// ProviderLabel overrides CaseResult.Provider with the name the user
@@ -251,22 +223,15 @@ type Runner struct {
 	// share. Empty falls back to Provider.Name().
 	ProviderLabel string
 
-	// Progress, when non-nil, is called once per completed case, in CASE
-	// ORDER (not completion order, even though cases run concurrently) and
-	// from one goroutine at a time without Run holding a lock — safe to
-	// write to a shared io.Writer, but a slow Progress serializes the pool.
+	// Progress, when non-nil, is called once per completed case, in case
+	// order (not completion order) from one goroutine at a time without Run
+	// holding a lock; a slow Progress serializes the pool.
 	Progress func(Case, CaseResult)
 }
 
-// CaseSymbol is the one-character progress glyph for a finished case, in the
-// spirit of pytest's dots: pass is quiet, anything else is loud.
-//
-//	'.' every assertion passed
-//	'x' at least one assertion failed
-//	'!' a trip-wire tripped — a defect in shipped logic, not a quality miss,
-//	    so it reads differently from an ordinary threshold miss at a glance
-//	'E' the case produced no successful runs at all (provider errors), so
-//	    nothing was actually evaluated — distinct from "evaluated and failed"
+// CaseSymbol is the one-character progress glyph for a finished case: '.'
+// pass, 'x' at least one failed assertion, '!' a tripped trip-wire, 'E' no
+// successful runs at all.
 func CaseSymbol(r CaseResult) rune {
 	if r.Runs == 0 {
 		return 'E'
@@ -284,8 +249,6 @@ func CaseSymbol(r CaseResult) rune {
 	return symbol
 }
 
-// providerLabel is the brand name to record on results: ProviderLabel when
-// set, else the adapter's own Name(). See the ProviderLabel field.
 func (r *Runner) providerLabel() string {
 	if r.ProviderLabel != "" {
 		return r.ProviderLabel
@@ -294,8 +257,7 @@ func (r *Runner) providerLabel() string {
 }
 
 // resolved returns the effective min/max/concurrency/limiter, applying
-// defaults for zero values without mutating the Runner (so a Runner is safe
-// to reuse or share read-only across goroutines the caller might spawn).
+// defaults for zero values without mutating the Runner.
 func (r *Runner) resolved() (min, max, concurrency int, limiter Limiter) {
 	min, max = r.MinRuns, r.MaxRuns
 	if min <= 0 {
@@ -315,11 +277,9 @@ func (r *Runner) resolved() (min, max, concurrency int, limiter Limiter) {
 	return min, max, concurrency, limiter
 }
 
-// Run drives every case through r.Provider and returns one CaseResult per
-// case, in the same order as cases. A bounded worker pool consumes case
-// indices from a channel and each worker writes only to its own result
-// index, so no locking is needed for the writes; ctx cancellation unblocks
-// workers via Limiter.Wait/Provider.Complete rather than hanging the pool.
+// Run drives every case through r.Provider, returning one CaseResult per
+// case in the same order as cases. A bounded worker pool writes each result
+// only to its own index; no locking is needed for the writes.
 func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 	results := make([]CaseResult, len(cases))
 	if len(cases) == 0 {
@@ -337,8 +297,7 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 
 	// The pool's out-of-order completions are re-emitted in index order:
 	// `done` marks finished indices, `cursor` is the next unreported one.
-	// Progress is called while holding progressMu, which is what orders the
-	// output; emitting outside the lock reorders it.
+	// Progress is called while holding progressMu; that lock is what orders output.
 	var (
 		progressMu sync.Mutex
 		done       []bool
@@ -376,8 +335,7 @@ func (r *Runner) Run(ctx context.Context, cases []Case) []CaseResult {
 
 // runCase runs one case's samples (adaptively or fixed, per r's config),
 // grades every successful sample against every assertion, and aggregates
-// into a CaseResult. Runs within a case are strictly sequential — see
-// Run's doc comment for why that's the deliberate simplicity choice.
+// into a CaseResult. Runs within a case are strictly sequential.
 func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 	minRuns, maxRuns, _, limiter := r.resolved()
 
@@ -395,9 +353,9 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 			completion provider.Completion
 			err        error
 		)
-		// A throttled attempt is retried rather than recorded, so latency
-		// only ever reflects clean attempts. Bounded so a persistent outage
-		// still surfaces as an error sample instead of looping forever.
+		// A throttled attempt is retried rather than recorded; latency
+		// reflects only clean attempts. Retries are bounded, so a
+		// persistent outage still surfaces as an error sample.
 		for range maxRateLimitAttempts {
 			if err = limiter.Wait(ctx); err != nil {
 				break
@@ -416,18 +374,16 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 			samples = append(samples, Sample{Err: err})
 			return
 		}
-		// Mirror internal/suggest.LLM's trailing-whitespace trim so grading
-		// sees what the user sees. Leading whitespace stays untouched — it's
-		// load-bearing (see prompt.systemPrompt).
+		// Trailing whitespace is trimmed to match what the user sees.
+		// Leading whitespace stays untouched; it can be load-bearing.
 		s := Sample{Output: strings.TrimRight(completion.Text, " \t\r\n"), TTFT: completion.TTFT}
 		samples = append(samples, s)
 		for i, a := range c.Asserts {
 			ok, gerr := a.Grader.Grade(ctx, c.Req, s.Output)
 			if gerr != nil {
-				// Neither a run error nor a graded result, but still counted:
-				// an assertion that silently never ran must not look the
-				// same as "ran and passed" (see CLAUDE.md: Graded == 0 never
-				// passes).
+				// Neither a run error nor a graded result, but still counted: an
+				// assertion that silently never ran must not look like one that
+				// ran and passed.
 				graderErrs[i]++
 				if !graderErrSet[i] {
 					firstGraderErr[i] = truncateGraderError(gerr.Error())
@@ -488,8 +444,8 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 			FirstGraderError: firstGraderErr[i],
 		}
 		// graded == 0 (every sample or grader call errored) is never a pass,
-		// for any polarity — TripWire's "Present == 0" would otherwise read
-		// an unevaluated assertion as a confident green.
+		// for any polarity: TripWire's "Present == 0" would otherwise read an
+		// unevaluated assertion as a confident green.
 		switch {
 		case graded == 0:
 			ar.Pass = false
@@ -524,14 +480,9 @@ func (r *Runner) runCase(ctx context.Context, c Case) CaseResult {
 }
 
 // maxGraderErrorLen bounds how much of a grader error message
-// AssertionResult.FirstGraderError retains. API error bodies can be
-// arbitrarily large; a prefix truncation is enough since the identifying
-// bits (HTTP status, model id) sit in the first line or two.
+// AssertionResult.FirstGraderError retains.
 const maxGraderErrorLen = 300
 
-// truncateGraderError truncates msg to maxGraderErrorLen runes, appending a
-// marker so a truncated message is visibly not the whole story rather than
-// looking like a short, complete one.
 func truncateGraderError(msg string) string {
 	r := []rune(msg)
 	if len(r) <= maxGraderErrorLen {
@@ -541,8 +492,7 @@ func truncateGraderError(msg string) string {
 }
 
 // allAgree reports whether every assertion's graded samples so far agree
-// (all present or all absent). Zero graded samples agrees vacuously, since
-// more runs won't help if the provider keeps erroring.
+// (all present or all absent). Zero graded samples agrees vacuously.
 func allAgree(present [][]bool) bool {
 	for _, ps := range present {
 		if len(ps) == 0 {
