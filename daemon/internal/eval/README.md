@@ -8,7 +8,7 @@ in the scorecard means.
 
 ## Custom provider profiles
 
-`-profiles` accepts preset brands (codestral/anthropic/groq/ollama) plus
+`-profiles` accepts preset brands (codestral/anthropic/groq/ollama/qwen) plus
 profile names from a TOML config: `internal/eval/eval.toml` (gitignored) by
 default, or a path passed via `-config`. See `eval.toml.example` for the
 format. A different model means a new profile there, not a flag. Missing

@@ -187,6 +187,24 @@ func TestConfigResolve(t *testing.T) {
 		}
 	})
 
+	t.Run("qwen preset uses openai adapter on deepinfra", func(t *testing.T) {
+		cfg := Config{}
+		r, err := cfg.Resolve("qwen")
+		if err != nil {
+			t.Fatalf("Resolve() err = %v, want nil", err)
+		}
+		want := ResolvedProfile{
+			Provider:  "qwen",
+			Adapter:   "openai",
+			BaseURL:   "https://api.deepinfra.com/v1/openai",
+			Model:     "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+			APIKeyEnv: "ZSH_AUTOPILOT_DEEPINFRA_KEY",
+		}
+		if r != want {
+			t.Errorf("Resolve() = %+v, want %+v", r, want)
+		}
+	})
+
 	t.Run("ollama preset has no key env", func(t *testing.T) {
 		cfg := Config{}
 		r, err := cfg.Resolve("ollama")

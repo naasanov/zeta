@@ -25,7 +25,7 @@ import (
 	"github.com/naasanov/zsh-autopilot/daemon/internal/suggest"
 )
 
-const knownProviders = "anthropic, codestral, groq, ollama, openai"
+const knownProviders = "anthropic, codestral, groq, ollama, openai, qwen"
 
 func main() {
 	socket := flag.String("socket", envOr("ZSH_AUTOPILOT_SOCKET", server.DefaultSocket), "unix socket path to listen on (default $ZSH_AUTOPILOT_SOCKET)")

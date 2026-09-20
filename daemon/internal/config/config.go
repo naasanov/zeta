@@ -48,6 +48,12 @@ var presets = map[string]Preset{
 		KeyEnv:    "ZSH_AUTOPILOT_GROQ_KEY",
 		MaxTokens: 150,
 	},
+	"qwen": {
+		Adapter: "openai",
+		BaseURL: "https://api.deepinfra.com/v1/openai",
+		Model:   "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+		KeyEnv:  "ZSH_AUTOPILOT_DEEPINFRA_KEY",
+	},
 	"ollama": {
 		Adapter: "openai",
 		BaseURL: "http://localhost:11434/v1",
@@ -84,7 +90,7 @@ type Config struct {
 // BaseURL/Model/APIKeyEnv/APIKeyCmd are optional overrides layered on the
 // brand's preset.
 type Profile struct {
-	Provider  string `toml:"provider"` // brand: "anthropic" | "codestral" | "groq" | "ollama" | "openai"
+	Provider  string `toml:"provider"` // brand: "anthropic" | "codestral" | "groq" | "ollama" | "openai" | "qwen"
 	BaseURL   string `toml:"base_url"` // ignored by the anthropic adapter (no baseURL param)
 	Model     string `toml:"model"`
 	APIKeyEnv string `toml:"api_key_env"` // read first
@@ -95,7 +101,7 @@ type Profile struct {
 // ResolvedProfile is a brand's preset defaults with any profile-level
 // overrides applied.
 type ResolvedProfile struct {
-	Provider  string // the brand selected (e.g. "codestral", "groq", "openai")
+	Provider  string // the brand selected (e.g. "codestral", "groq", "qwen", "openai")
 	Adapter   string // the internal adapter to construct: "openai" | "anthropic" | "codestral"
 	BaseURL   string
 	Model     string
